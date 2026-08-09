@@ -324,3 +324,37 @@ outputs/
   自動的に収集される。**新規テストファイルは `tests/test_*.py` の命名にすること。**
 - `tests/rendered-html.test.mjs` の `281組のペアを解析しました` assert は
   **Wave 2-C2 まで変更しない**（Wave 1-C の機械分割が挙動不変であることの証明に使うため）。
+
+---
+
+## 9. モジュール間インターフェース（orchestrator が Wave 1 dispatch 前に凍結）
+
+Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約。ここに書かれた名前・シグネチャは両者とも変更禁止（変更が必要なら orchestrator へ差し戻し）。
+
+### `local_raw/presets.py`（所有: Wave 1-A）
+
+- `PRESETS: dict[str, dict]` — key = preset name（9種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
+- `preset_infos() -> list[dict]` — 契約 `PresetInfo[]` そのもの（`/api/health` 用。Wave 1-B はこれを呼ぶだけ）
+- `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
+- `DEFAULT_PRESET = "neutral_recovery"`
+
+### `local_raw/engine.py`（所有: Wave 1-A）
+
+- 既存 export 維持: `SOURCE_ROOT` / `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
+- 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
+- `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
+  — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
+
+### `local_raw/lens.py`（所有: Wave 1-A）
+
+- `lensfun_info() -> dict` — `{"available": bool, "db_version": "0.3.4.0"?}`（`/api/health` の `lensfun` キーへそのまま入る形。db_version 不明時はキー省略）
+
+### `local_raw/analysis.py`（所有: Wave 1-B）
+
+- `THUMBS_ROOT = PROJECT_ROOT / "outputs" / "thumbnails"`（`/thumbs/` 配信元）
+- 分析ジョブ管理（開始/状態取得）の内部 API は 1-B が自由に設計してよい（server.py も 1-B 所有のため外部契約は §1 の HTTP 契約のみ）
+
+### 並列作業の約束事
+
+- Wave 1-A は **local_raw/server.py を起動も編集もしない**（ポート 8788 は 1-B の検証専用）
+- 作業中のテストは自分の所有ファイルを対象に module 指定で実行する（例: `.venv/bin/python -m unittest tests.test_analysis`）。`npm run test:raw` のフルスイートは他エージェントの編集途中ファイルを拾いうるため、失敗が自分の所有外なら無視し、最終判定は orchestrator が行う
