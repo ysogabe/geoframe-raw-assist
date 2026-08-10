@@ -1,8 +1,25 @@
 """現像エンジンの検証（サンプル画像に依存しない範囲）。"""
 
+import os
+import struct
+import tempfile
+import threading
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from local_raw.engine import RawDevelopmentError, _params_hash, _shadow_lift_table, develop_raw
+from PIL import Image
+
+from local_raw import engine
+from local_raw.engine import (
+    RawDevelopmentError,
+    _params_hash,
+    _resolve_save_kwargs,
+    _save_developed_jpeg,
+    _shadow_lift_table,
+    _temp_path,
+    develop_raw,
+)
 from local_raw.presets import (
     ADJUSTMENT_KEYS,
     ADJUSTMENT_RANGES,
@@ -200,6 +217,192 @@ class ShadowLiftTableTests(unittest.TestCase):
 
     def test_stronger_lift_brightens_more(self):
         self.assertGreater(_shadow_lift_table(100)[85], _shadow_lift_table(25)[85])
+
+
+class TempPathTests(unittest.TestCase):
+    """修正1: 同一 params_hash の同時リクエストで一時ファイル名が衝突しない。"""
+
+    def test_encodes_pid_and_current_thread_ident(self):
+        result = _temp_path(Path("/outputs/DSC00001-neutral_recovery-abc123.jpg"), "tmp.jpg")
+        self.assertEqual(
+            result.name,
+            f"DSC00001-neutral_recovery-abc123.{os.getpid()}-{threading.get_ident()}.tmp.jpg",
+        )
+
+    def test_differs_across_concurrent_threads(self):
+        path = Path("/outputs/DSC00001-neutral_recovery-abc123.jpg")
+        results: list[Path] = []
+        lock = threading.Lock()
+
+        def worker():
+            value = _temp_path(path, "tmp.jpg")
+            with lock:
+                results.append(value)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(results), 4)
+        self.assertEqual(len(set(results)), 4, "同時に呼ばれた別スレッドの一時パスは全て別々であるべき")
+
+    def test_repeated_call_on_same_thread_is_stable(self):
+        # 同一スレッド内の呼び出しは同じ pid-tid になる(衝突対策はスレッド単位で十分)。
+        path = Path("/outputs/DSC00001-neutral_recovery-abc123.jpg")
+        self.assertEqual(_temp_path(path, "tmp.jpg"), _temp_path(path, "tmp.jpg"))
+
+
+class SaveDevelopedJpegTests(unittest.TestCase):
+    """修正1(一時ファイル衝突)・修正2(EXIF保存失敗フォールバックとtmp掃除)。"""
+
+    def _image(self, fill=(120, 60, 30)):
+        return Image.new("RGB", (16, 16), fill)
+
+    def test_saves_and_leaves_no_tmp_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "DSC00001-neutral_recovery-abc123.jpg"
+            exif_inherited = _save_developed_jpeg(self._image(), output_path, {"quality": 90}, False)
+            self.assertFalse(exif_inherited)
+            self.assertTrue(output_path.is_file())
+            self.assertEqual(list(Path(directory).glob("*tmp.jpg")), [])
+
+    def test_falls_back_to_no_exif_when_exif_save_fails_and_cleans_up_tmp(self):
+        """exif.tobytes() 以外の場所(image.save 内)で起きる EXIF 関連の失敗も拾えること。
+
+        Pillow の EXIF サイズ超過検知は image.save() 呼び出し中に起きるため、
+        再現には save() そのものを失敗させる必要がある。
+        """
+        original_save = Image.Image.save
+        calls: list[dict] = []
+
+        def flaky_save(self, fp, format=None, **kwargs):
+            calls.append(dict(kwargs))
+            if "exif" in kwargs:
+                raise struct.error("simulated oversized/invalid EXIF payload")
+            return original_save(self, fp, format, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "DSC00001-neutral_recovery-abc123.jpg"
+            with mock.patch.object(Image.Image, "save", flaky_save):
+                exif_inherited = _save_developed_jpeg(
+                    self._image(), output_path, {"quality": 90, "exif": b"bogus-exif-bytes"}, True
+                )
+
+            self.assertFalse(exif_inherited, "exif付き保存が失敗したら exif_inherited は False に落ちる")
+            self.assertEqual(len(calls), 2, "1回目(exif付き)失敗後、exif無しで1回だけ再保存する")
+            self.assertIn("exif", calls[0])
+            self.assertNotIn("exif", calls[1])
+            self.assertTrue(output_path.is_file())
+            self.assertEqual(list(Path(directory).glob("*tmp.jpg")), [], "成功経路で一時ファイルが残らない")
+
+    def test_raises_raw_development_error_and_cleans_tmp_when_fallback_also_fails(self):
+        def always_fail(self, fp, format=None, **kwargs):
+            raise struct.error("still broken even without exif")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "DSC00001-neutral_recovery-abc123.jpg"
+            with mock.patch.object(Image.Image, "save", always_fail):
+                with self.assertRaises(RawDevelopmentError):
+                    _save_developed_jpeg(
+                        self._image(), output_path, {"quality": 90, "exif": b"bogus"}, True
+                    )
+            self.assertFalse(output_path.is_file())
+            self.assertEqual(
+                list(Path(directory).glob("*tmp.jpg")), [], "例外経路でも一時ファイルが残らない"
+            )
+
+    def test_raises_raw_development_error_when_save_fails_without_exif(self):
+        def always_fail(self, fp, format=None, **kwargs):
+            raise OSError("disk full")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "DSC00001-neutral_recovery-abc123.jpg"
+            with mock.patch.object(Image.Image, "save", always_fail):
+                with self.assertRaises(RawDevelopmentError):
+                    _save_developed_jpeg(self._image(), output_path, {"quality": 90}, False)
+            self.assertEqual(list(Path(directory).glob("*tmp.jpg")), [])
+
+    def test_concurrent_saves_to_the_same_output_path_both_succeed(self):
+        """同一 params_hash の同時現像(ThreadingHTTPServer での二重クリック)の回帰確認。
+
+        一時ファイル名が衝突していた頃は、片方の書き込み中の一時ファイルをもう片方の
+        os.replace が拾ってしまい、破損 JPEG が cached:true として恒久化し得た。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "DSC00001-neutral_recovery-abc123.jpg"
+            barrier = threading.Barrier(2)
+            errors: list[Exception] = []
+            lock = threading.Lock()
+
+            def worker(fill):
+                image = self._image((fill, fill, fill))
+                barrier.wait()
+                try:
+                    _save_developed_jpeg(image, output_path, {"quality": 90}, False)
+                except Exception as error:  # pragma: no cover - failure path asserted via `errors`
+                    with lock:
+                        errors.append(error)
+
+            threads = [threading.Thread(target=worker, args=(fill,)) for fill in (10, 220)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            with Image.open(output_path) as result:
+                result.load()  # 破損していれば例外になる
+                pixel = result.getpixel((8, 8))
+            # 圧縮誤差はあるが、2色のどちらか一方をほぼそのまま反映しているはず(混ざった破損ではない)。
+            self.assertTrue(
+                all(abs(channel - 10) < 20 for channel in pixel)
+                or all(abs(channel - 220) < 20 for channel in pixel),
+                f"破損した可能性のあるピクセル値: {pixel}",
+            )
+            self.assertEqual(list(Path(directory).glob("*tmp.jpg")), [])
+
+
+class ResolveSaveKwargsTests(unittest.TestCase):
+    """修正2: build_inherited_exif の失敗捕捉を Exception まで広げる(struct.error 含む)。"""
+
+    def test_no_pair_jpg_skips_exif_and_has_no_exif_key(self):
+        save_kwargs, exif_inherited = _resolve_save_kwargs(Path("/nonexistent/DSC00001.JPG"), 100, 100)
+        self.assertFalse(exif_inherited)
+        self.assertNotIn("exif", save_kwargs)
+
+    def test_falls_back_when_build_inherited_exif_raises_struct_error(self):
+        """exif.tobytes() が投げる struct.error は元々 except 節に含まれておらず漏れていた。"""
+        with tempfile.TemporaryDirectory() as directory:
+            source_jpg = Path(directory) / "DSC00001.JPG"
+            source_jpg.write_bytes(b"not-decoded-because-build_inherited_exif-is-mocked")
+            with mock.patch.object(
+                engine, "build_inherited_exif", side_effect=struct.error("bad pack format")
+            ):
+                save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, 100, 100)
+        self.assertFalse(exif_inherited)
+        self.assertNotIn("exif", save_kwargs)
+
+    def test_still_falls_back_on_previously_handled_exceptions(self):
+        for exc in (OSError("nope"), ValueError("bad"), KeyError("missing")):
+            with self.subTest(exc=type(exc).__name__):
+                with tempfile.TemporaryDirectory() as directory:
+                    source_jpg = Path(directory) / "DSC00001.JPG"
+                    source_jpg.write_bytes(b"x")
+                    with mock.patch.object(engine, "build_inherited_exif", side_effect=exc):
+                        save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, 100, 100)
+                self.assertFalse(exif_inherited)
+                self.assertNotIn("exif", save_kwargs)
+
+    def test_succeeds_when_build_inherited_exif_succeeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_jpg = Path(directory) / "DSC00001.JPG"
+            source_jpg.write_bytes(b"x")
+            with mock.patch.object(engine, "build_inherited_exif", return_value=b"exif-bytes"):
+                save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, 100, 100)
+        self.assertTrue(exif_inherited)
+        self.assertEqual(save_kwargs["exif"], b"exif-bytes")
 
 
 if __name__ == "__main__":

@@ -755,7 +755,15 @@ def start_analysis(force: bool = False) -> str:
         progress = Progress()
         _PROGRESS = progress
         _RUNNING = True
-    threading.Thread(target=_run_analysis, args=(progress,), daemon=True, name="raw-analysis").start()
+    try:
+        threading.Thread(target=_run_analysis, args=(progress,), daemon=True, name="raw-analysis").start()
+    except RuntimeError:
+        # start() failed before the worker could run (e.g. the OS refused a new
+        # thread) -- undo the _RUNNING flip above so /api/analysis does not get
+        # wedged reporting "running" forever.
+        with _STATE_LOCK:
+            _RUNNING = False
+        raise
     return "started"
 
 

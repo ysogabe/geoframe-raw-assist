@@ -1,6 +1,8 @@
 """Analysis pipeline tests. Synthetic data only — no dependency on sample/."""
 
+import threading
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -391,6 +393,44 @@ class ThumbnailTest(unittest.TestCase):
                 self.assertEqual(max(thumb.size), analysis.THUMB_MAX_EDGE)
                 self.assertEqual(thumb.size, (640, 320))
             self.assertEqual(list(root.glob("*.tmp.webp")), [])
+
+
+class StartAnalysisThreadFailureTest(unittest.TestCase):
+    """修正3: Thread.start() が失敗しても _RUNNING が True に固着しない。"""
+
+    def setUp(self):
+        # 他のテスト/前回失敗の影響を受けないよう、素の状態から始める。
+        with analysis._STATE_LOCK:
+            analysis._RUNNING = False
+            analysis._PROGRESS = None
+
+    def tearDown(self):
+        with analysis._STATE_LOCK:
+            analysis._RUNNING = False
+            analysis._PROGRESS = None
+
+    def test_running_flag_is_reset_and_error_propagates_when_start_fails(self):
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("can't start new thread")
+        ):
+            with self.assertRaises(RuntimeError):
+                # force=True: キャッシュ有無に関わらず必ず Thread() の起動を試みさせる。
+                analysis.start_analysis(force=True)
+
+        with analysis._STATE_LOCK:
+            self.assertFalse(analysis._RUNNING, "start() 失敗後も _RUNNING が True のままでは /api/analysis が固着する")
+
+    def test_a_subsequent_call_is_not_blocked_by_already_running(self):
+        """固着していれば次の呼び出しは常に 'already_running' になってしまう回帰確認。"""
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("can't start new thread")
+        ):
+            with self.assertRaises(RuntimeError):
+                analysis.start_analysis(force=True)
+
+        with mock.patch.object(threading.Thread, "start", return_value=None):
+            status = analysis.start_analysis(force=True)
+        self.assertEqual(status, "started")
 
 
 if __name__ == "__main__":

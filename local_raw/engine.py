@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,8 +98,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _temp_path(path: Path, extension: str) -> Path:
+    """`path` と同じ場所に、プロセス/スレッドで一意な一時ファイルパスを作る。
+
+    同一 params_hash の同時リクエスト（ThreadingHTTPServer への二重クリック等）でも
+    `pid-tid` を挟むことで一時ファイル名が衝突しないようにする。`os.replace` によるアトミック
+    置換自体は変わらず、衝突が起きるのは書き込み中の一時ファイル名だけだったのを塞ぐ。
+    """
+    return path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.{extension}")
+
+
 def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
-    temporary_path = recipe_path.with_suffix(".tmp.json")
+    temporary_path = _temp_path(recipe_path, "tmp.json")
     temporary_path.write_text(
         json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -218,6 +229,65 @@ def _apply_tone(image: Image.Image, adjustments: dict[str, Any]) -> Image.Image:
         image = ImageEnhance.Color(image).enhance(saturation)
 
     return ImageEnhance.Sharpness(image).enhance(float(adjustments["sharpness"]))
+
+
+def _resolve_save_kwargs(source_jpg: Path, width: int, height: int) -> tuple[dict[str, Any], bool]:
+    """JPEG保存オプションを組み立てる。ペアJPGがあれば EXIF 継承を試みる。
+
+    `build_inherited_exif` の失敗（`exif.tobytes()` が投げる `struct.error` を含む、
+    あらゆる例外）は EXIF 無し保存へのフォールバックとして扱う。契約上のフォールバック方針
+    （EXIF 無しでも保存は続行する）自体は変えない。
+    """
+    save_kwargs: dict[str, Any] = {
+        "quality": JPEG_QUALITY,
+        "subsampling": 0,
+        "optimize": True,
+        "progressive": True,
+        "icc_profile": SRGB_ICC_BYTES,
+    }
+    exif_inherited = False
+    if source_jpg.is_file():
+        try:
+            save_kwargs["exif"] = build_inherited_exif(source_jpg, width, height)
+            exif_inherited = True
+        except Exception:
+            exif_inherited = False
+    return save_kwargs, exif_inherited
+
+
+def _save_developed_jpeg(
+    image: Image.Image,
+    output_path: Path,
+    save_kwargs: dict[str, Any],
+    exif_inherited: bool,
+) -> bool:
+    """`image` を JPEG として `output_path` にアトミック保存する。
+
+    `exif` キー付きの保存が失敗した場合（`exif.tobytes()` の `struct.error` や、
+    Pillow が `image.save()` 内で検出する EXIF サイズ超過の `ValueError` など）は、
+    `exif` キーを外して1回だけ再保存する。それでも失敗したら `RawDevelopmentError` に
+    変換して raise する。一時ファイルは成功・失敗いずれの経路でも残さない
+    （`os.replace` 成功後は一時ファイルが存在しないため、`unlink(missing_ok=True)` は安全）。
+
+    戻り値: 最終的に exif 付きで保存できたかどうか。
+    """
+    temporary_output = _temp_path(output_path, "tmp.jpg")
+    try:
+        try:
+            image.save(temporary_output, "JPEG", **save_kwargs)
+        except Exception as error:
+            if not exif_inherited:
+                raise RawDevelopmentError(f"JPEG保存に失敗しました: {error}") from error
+            save_kwargs.pop("exif", None)
+            exif_inherited = False
+            try:
+                image.save(temporary_output, "JPEG", **save_kwargs)
+            except Exception as retry_error:
+                raise RawDevelopmentError(f"JPEG保存に失敗しました: {retry_error}") from retry_error
+        os.replace(temporary_output, output_path)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+    return exif_inherited
 
 
 def _cached_result(
@@ -343,24 +413,8 @@ def develop_raw(
 
     image = _apply_tone(image, resolved)
 
-    save_kwargs: dict[str, Any] = {
-        "quality": JPEG_QUALITY,
-        "subsampling": 0,
-        "optimize": True,
-        "progressive": True,
-        "icc_profile": SRGB_ICC_BYTES,
-    }
-    exif_inherited = False
-    if source_jpg.is_file():
-        try:
-            save_kwargs["exif"] = build_inherited_exif(source_jpg, image.width, image.height)
-            exif_inherited = True
-        except (OSError, ValueError, KeyError):
-            exif_inherited = False
-
-    temporary_output = output_path.with_suffix(".tmp.jpg")
-    image.save(temporary_output, "JPEG", **save_kwargs)
-    os.replace(temporary_output, output_path)
+    save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, image.width, image.height)
+    exif_inherited = _save_developed_jpeg(image, output_path, save_kwargs, exif_inherited)
     elapsed_seconds = round(time.monotonic() - started_at, 2)
 
     recipe = {
