@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   activePreset,
@@ -35,6 +33,15 @@ import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
 
+// ローカルRAWエンジンは rawpy/numpy/opencv/lensfunpy の import で起動に数秒かかる。
+// デスクトップシェルはウィンドウ表示とサイドカー起動をほぼ同時に行うため、初回の
+// ヘルスチェックはサーバがまだ listen していない状態で当たりうる（isEndpointUnavailable
+// が true になる 404 / 接続不能ケース）。この場合は一定回数だけ再試行し、それでも
+// ダメなら（エンジンが本当に起動していない＝ npm run setup:raw 未実施など）既存の
+// オフライン表示にフォールバックする。
+const HEALTH_CHECK_RETRY_INTERVAL_MS = 1000;
+const HEALTH_CHECK_MAX_ATTEMPTS = 20; // 1000ms × 20 ≈ 20秒、冷間起動の実測時間に対して十分な余裕
+
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -46,18 +53,31 @@ export default function Home() {
 
   const { analysis, health, screen, developMode } = state;
 
-  // ---- ローカルRAWエンジンの死活確認 --------------------------------------
+  // ---- ローカルRAWエンジンの死活確認（起動直後は数秒未起動のため再試行あり） -----
   useEffect(() => {
     let cancelled = false;
-    getHealth()
-      .then((payload) => {
-        if (!cancelled) dispatch({ type: "health/ok", health: payload });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: "health/fail" });
-      });
+    let retryTimer: number | undefined;
+
+    const checkHealth = (attempt: number) => {
+      getHealth()
+        .then((payload) => {
+          if (!cancelled) dispatch({ type: "health/ok", health: payload });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          if (isEndpointUnavailable(error) && attempt < HEALTH_CHECK_MAX_ATTEMPTS) {
+            retryTimer = window.setTimeout(() => checkHealth(attempt + 1), HEALTH_CHECK_RETRY_INTERVAL_MS);
+            return;
+          }
+          dispatch({ type: "health/fail" });
+        });
+    };
+
+    checkHealth(1);
+
     return () => {
       cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
   }, []);
 
@@ -72,8 +92,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // ローカルRAWエンジンの死活確認（上の useEffect）が終わる前に叩くと、
+    // デスクトップシェルではエンジン起動と同時にウィンドウが開くため
+    // 同じコールドスタート競合で "Load failed" になる。ready になってから叩く。
+    if (state.engineStatus !== "ready") return;
     void pollAnalysis();
-  }, [pollAnalysis]);
+  }, [state.engineStatus, pollAnalysis]);
 
   useEffect(() => {
     if (state.analysisState !== "running") return;

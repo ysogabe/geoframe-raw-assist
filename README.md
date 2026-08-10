@@ -7,10 +7,16 @@
 ```bash
 npm install
 npm run setup:raw
-npm run dev:raw
 ```
 
-`npm run dev:raw` はNext.jsの開発サーバ（`http://localhost:3000/`）とRAWエンジン（`http://127.0.0.1:8788`）を同時に起動します。画面右側に「rawpy 接続済み」と表示されたら準備完了です。
+起動方法は2通りあります。
+
+1. **ブラウザで確認しながら開発する場合** — `npm run dev:raw`。RAWエンジン（`http://127.0.0.1:8788`）を裏で起動したあと、Viteの開発サーバ（`http://localhost:1420/`）をフォアグラウンドで起動します。ブラウザで `http://localhost:1420/` を開いてください。
+2. **デスクトップアプリとして使う場合** — `npm run tauri:dev`。1コマンドでネイティブウィンドウが開き、TauriがPythonのRAWエンジンを自動的に起動・終了まで管理します（別ターミナルは不要です）。
+
+画面右側に「rawpy 接続済み」と表示されたら準備完了です。
+
+配布用ビルドは `npm run tauri:build` で作成できますが、エンドユーザー環境向けにPython実行環境（`.venv`）を同梱する仕組みはまだ未整備です（既知のギャップ）。
 
 ## 機能フロー
 
@@ -93,7 +99,7 @@ outputs/
 ## テスト
 
 ```bash
-npm run test       # ビルド + SSR検証
+npm run test       # ビルド検証（vite build）
 npm run test:raw   # Python側（解析・現像・書き出し）165件
 npm run lint
 ```
