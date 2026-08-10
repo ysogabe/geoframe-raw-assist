@@ -54,8 +54,13 @@ HIGHLIGHT_LEVEL = 250            # a channel at/above this counts as clipped
 SHADOW_LEVEL = 5                 # all channels at/below this count as crushed
 
 # --- grouping --------------------------------------------------------------
-GROUP_GAP_SECONDS = 12.0         # larger gap starts a new group
-GROUP_FOCAL_RATIO = 1.3          # focal length ratio above this starts a new group
+# Tuned on the 281-pair sample library (Wave 3). 12s/1.3 left 85% of groups as
+# single shots; 60s/1.5 folds the "linger at one viewpoint and take a few frames"
+# pattern into one group (single 84.6% -> 57.6%) while the largest group stays at
+# 6 photos. Note: the 10-18mm zoom spans exactly 1.8x, so a ratio above ~1.8 would
+# make the focal rule inert on this library — see docs/GEOFRAME_RAW_ASSIST_HANDOFF.md.
+GROUP_GAP_SECONDS = 60.0         # larger gap starts a new group
+GROUP_FOCAL_RATIO = 1.5          # focal length ratio above this starts a new group
 BURST_MEDIAN_GAP_SECONDS = 1.5   # median gap at/below this => "burst"
 
 # Bracket detection. The sample set uses a *constant* +-0.3EV everyday exposure

@@ -34,8 +34,8 @@ class GroupPhotosTest(unittest.TestCase):
         groups = analysis.group_photos([
             record("DSC00001", "2025-06-07T10:00:00"),
             record("DSC00002", "2025-06-07T10:00:05"),
-            # 13s > GROUP_GAP_SECONDS (12s)
-            record("DSC00003", "2025-06-07T10:00:18"),
+            # 61s > GROUP_GAP_SECONDS (60s)
+            record("DSC00003", "2025-06-07T10:01:06"),
         ])
         self.assertEqual([group["capture_ids"] for group in groups],
                          [["DSC00001", "DSC00002"], ["DSC00003"]])
@@ -43,7 +43,8 @@ class GroupPhotosTest(unittest.TestCase):
     def test_gap_exactly_at_threshold_stays_together(self):
         groups = analysis.group_photos([
             record("DSC00001", "2025-06-07T10:00:00"),
-            record("DSC00002", "2025-06-07T10:00:12"),
+            # exactly GROUP_GAP_SECONDS (60s) — not "larger", so no split
+            record("DSC00002", "2025-06-07T10:01:00"),
         ])
         self.assertEqual(len(groups), 1)
 
@@ -57,14 +58,14 @@ class GroupPhotosTest(unittest.TestCase):
     def test_focal_ratio_splits_groups(self):
         groups = analysis.group_photos([
             record("DSC00001", "2025-06-07T10:00:00", focal=10.0),
-            record("DSC00002", "2025-06-07T10:00:01", focal=13.5),  # ratio 1.35 > 1.3
+            record("DSC00002", "2025-06-07T10:00:01", focal=15.5),  # ratio 1.55 > 1.5
         ])
         self.assertEqual(len(groups), 2)
 
     def test_focal_ratio_within_threshold_stays_together(self):
         groups = analysis.group_photos([
             record("DSC00001", "2025-06-07T10:00:00", focal=10.0),
-            record("DSC00002", "2025-06-07T10:00:01", focal=13.0),  # ratio 1.3, not > 1.3
+            record("DSC00002", "2025-06-07T10:00:01", focal=15.0),  # ratio 1.5, not > 1.5
         ])
         self.assertEqual(len(groups), 1)
 
