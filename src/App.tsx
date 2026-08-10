@@ -27,9 +27,11 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
 import { AnalysisGate } from "./components/AnalysisGate";
+import { BootstrapGate } from "./components/BootstrapGate";
 import { GroupList } from "./components/GroupList";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
+import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
 
@@ -49,12 +51,23 @@ function messageOf(error: unknown, fallback: string): string {
 export default function Home() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [tick, setTick] = useState(0);
+  const [setupState, setSetupState] = useState<SetupState | null>(null);
   const comparisonRef = useRef<HTMLDivElement>(null);
 
   const { analysis, health, screen, developMode } = state;
 
   // ---- ローカルRAWエンジンの死活確認（起動直後は数秒未起動のため再試行あり） -----
+  // Tauri内で初回セットアップ（venv作成/pip install）が進行中は、その分だけ
+  // エンジン起動が遅れる（数十秒〜）。ブートストラップが終わる（ready/succeeded/failed）
+  // までヘルスチェック自体を開始しないことで、固定の再試行回数を無駄に消費して
+  // 「実際にはエンジンが起動しているのに画面だけ停止表示のまま」になるのを防ぐ。
+  // ブラウザモード（isTauri() === false）では従来どおり即座に開始する。
+  const setupStage = setupState?.stage;
   useEffect(() => {
+    const waitingForBootstrap =
+      isTauri() && (setupStage === undefined || setupStage === "creating-venv" || setupStage === "installing-deps");
+    if (waitingForBootstrap) return;
+
     let cancelled = false;
     let retryTimer: number | undefined;
 
@@ -78,6 +91,33 @@ export default function Home() {
     return () => {
       cancelled = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [setupStage]);
+
+  // ---- 初回起動時のブートストラップ（.venv 作成 / pip install）進捗の購読 --------
+  // ブラウザモード（npm run dev:raw）では isTauri() が false になり、このブロックは
+  // invoke/listen を一切呼ばず、既存の挙動に一切影響しない。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      unlisten = await onSetupUpdate((next) => {
+        if (!cancelled) setSetupState(next);
+      });
+      try {
+        const current = await getSetupStatus();
+        if (!cancelled) setSetupState(current);
+      } catch {
+        // イベント購読は既に張られているため、初回状態の取得に失敗しても
+        // 直後の "raw-setup" イベントで復帰できる。
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
@@ -237,6 +277,9 @@ export default function Home() {
   }
 
   const analysisReady = state.analysisState === "ready" && analysis !== null;
+  const bootstrapping =
+    setupState !== null &&
+    (setupState.stage === "creating-venv" || setupState.stage === "installing-deps" || setupState.stage === "failed");
   const elapsed = developMode ? Math.max(0, (tick - state.developStartedAt) / 1000) : 0;
   const elapsedLabel = `${elapsed.toFixed(1)}秒`;
 
@@ -271,7 +314,9 @@ export default function Home() {
           </div>
         )}
 
-        {!analysisReady || !analysis ? (
+        {bootstrapping && setupState ? (
+          <BootstrapGate setup={setupState} />
+        ) : !analysisReady || !analysis ? (
           <AnalysisGate
             engineStatus={state.engineStatus}
             analysisState={state.analysisState}
