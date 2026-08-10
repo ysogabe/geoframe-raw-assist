@@ -19,6 +19,15 @@ PORT = int(os.environ.get("RAW_ASSIST_PORT", "8788"))
 ALLOWED_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
 MAX_JSON_BODY_BYTES = 64 * 1024
 
+# DNS リバインディング対策。ブラウザは攻撃者のドメインを 127.0.0.1 に向けられても
+# Host ヘッダは書き換えられないため、ループバック名以外を弾けば無効化できる。
+ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
+if PORT == 80:
+    ALLOWED_HOSTS |= {"127.0.0.1", "localhost", "[::1]"}
+
+#: 静的配信を許可する拡張子（レシピJSON や .tmp を配信しないため）。
+SERVABLE_SUFFIXES = {".jpg", ".webp"}
+
 # Static roots mirror the directory layout frozen in API_CONTRACT.md §4/§9.
 # They are derived locally rather than imported from engine.py so that the
 # analysis and static-file endpoints keep working while Wave 1-A rewrites the
@@ -33,6 +42,9 @@ THUMBS_ROOT = analysis.THUMBS_ROOT
 
 class RawAssistHandler(BaseHTTPRequestHandler):
     server_version = "GeoFrameRawAssist/1.0"
+    #: 無言で接続だけ張るクライアントにスレッドを占有されないためのソケットタイムアウト。
+    #: ハンドラ全体の制限時間ではないので、10〜20秒かかる本現像には影響しない。
+    timeout = 10
 
     def _cors_headers(self) -> None:
         origin = self.headers.get("Origin")
@@ -42,6 +54,7 @@ class RawAssistHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
 
     def _json(self, status: HTTPStatus, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -66,11 +79,27 @@ class RawAssistHandler(BaseHTTPRequestHandler):
     def _serve_from_root(self, root: Path, prefix: str, parsed: ParseResult, missing: str) -> None:
         """Serve a file from `root`, rejecting anything that escapes it."""
         filename = unquote(parsed.path.removeprefix(prefix))
-        requested_path = (root / filename).resolve()
-        if requested_path.parent != root.resolve() or not requested_path.is_file():
+        try:
+            # `%00` などはここで ValueError/OSError になる。500 にせず 404 として扱う。
+            requested_path = (root / filename).resolve()
+        except (ValueError, OSError):
+            self._json(HTTPStatus.NOT_FOUND, {"error": missing})
+            return
+        if (
+            requested_path.suffix.lower() not in SERVABLE_SUFFIXES
+            or requested_path.parent != root.resolve()
+            or not requested_path.is_file()
+        ):
             self._json(HTTPStatus.NOT_FOUND, {"error": missing})
             return
         self._serve_file(requested_path)
+
+    def _host_allowed(self) -> bool:
+        """Host ヘッダをループバック名に限定する（DNS リバインディング対策）。"""
+        if self.headers.get("Host") in ALLOWED_HOSTS:
+            return True
+        self._json(HTTPStatus.FORBIDDEN, {"error": "許可されていないホスト名です。"})
+        return False
 
     def _read_json_body(self) -> dict:
         """Read and parse the JSON request body.
@@ -94,6 +123,8 @@ class RawAssistHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not self._host_allowed():
+            return
         parsed = urlparse(self.path)
         exact_handler = GET_EXACT.get(parsed.path)
         if exact_handler is not None:
@@ -106,6 +137,8 @@ class RawAssistHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": "未対応のURLです。"})
 
     def do_POST(self) -> None:
+        if not self._host_allowed():
+            return
         origin = self.headers.get("Origin")
         if origin and origin not in ALLOWED_ORIGINS:
             self._json(HTTPStatus.FORBIDDEN, {"error": "この画面からの操作は許可されていません。"})
@@ -124,12 +157,25 @@ class RawAssistHandler(BaseHTTPRequestHandler):
 Handler = Callable[[RawAssistHandler, ParseResult], None]
 
 
+def _fail(req: RawAssistHandler, message: str, error: Exception) -> None:
+    """500 を返す。例外の詳細（内部パスを含みうる）はサーバログにだけ出す。"""
+    req.log_message("%s", f"{message} ({type(error).__name__}: {error})")
+    req._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": message})
+
+
+def _request_payload(req: RawAssistHandler) -> dict:
+    payload = req._read_json_body()
+    if not isinstance(payload, dict):
+        raise ValueError("リクエストの形式が不正です。")
+    return payload
+
+
 def handle_health(req: RawAssistHandler, parsed: ParseResult) -> None:
     try:
         from .lens import lensfun_info
         from .presets import preset_infos
     except Exception as error:
-        req._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"プリセット情報を読み込めません: {error}"})
+        _fail(req, "プリセット情報を読み込めません。", error)
         return
     req._json(HTTPStatus.OK, {
         "status": "ready",
@@ -148,15 +194,13 @@ def handle_analyze(req: RawAssistHandler, parsed: ParseResult) -> None:
     try:
         # Contract §0: a zero-byte or malformed Content-Length is a 400, so the
         # body is always read rather than defaulted.
-        payload = req._read_json_body()
-        if not isinstance(payload, dict):
-            raise ValueError("リクエストの形式が不正です。")
+        payload = _request_payload(req)
         status = analysis.start_analysis(force=bool(payload.get("force", False)))
         req._json(HTTPStatus.OK, {"status": status})
-    except (ValueError, TypeError, json.JSONDecodeError) as error:
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as error:
         req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
     except Exception as error:
-        req._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"解析の開始に失敗しました: {error}"})
+        _fail(req, "解析の開始に失敗しました。", error)
 
 
 def handle_outputs(req: RawAssistHandler, parsed: ParseResult) -> None:
@@ -173,7 +217,8 @@ def handle_thumbs(req: RawAssistHandler, parsed: ParseResult) -> None:
 
 def handle_source_jpg(req: RawAssistHandler, parsed: ParseResult) -> None:
     filename = unquote(parsed.path.removeprefix("/source-jpg/"))
-    if not filename.startswith("DSC") or not filename.endswith(".JPG") or len(filename) != 12 or not filename[3:8].isdigit():
+    # isdecimal() は全角・Unicode 数字を弾く（isdigit() は "²" 等を通してしまう）。
+    if not filename.startswith("DSC") or not filename.endswith(".JPG") or len(filename) != 12 or not filename[3:8].isdecimal():
         req._json(HTTPStatus.BAD_REQUEST, {"error": "無効なJPGファイル名です。"})
         return
     requested_path = (SOURCE_ROOT / filename).resolve()
@@ -190,11 +235,11 @@ def handle_raw_develop(req: RawAssistHandler, parsed: ParseResult) -> None:
     try:
         from .engine import RawDevelopmentError, develop_raw
     except Exception as error:
-        req._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"現像エンジンを読み込めません: {error}"})
+        _fail(req, "現像エンジンを読み込めません。", error)
         return
 
     try:
-        payload = req._read_json_body()
+        payload = _request_payload(req)
         adjustments = payload.get("adjustments")
         if adjustments is not None and not isinstance(adjustments, dict):
             raise ValueError("adjustments はオブジェクトで指定してください。")
@@ -213,10 +258,50 @@ def handle_raw_develop(req: RawAssistHandler, parsed: ParseResult) -> None:
         cache_buster = f"?v={output_path.stat().st_mtime_ns}" if output_path.is_file() else ""
         result["output_url"] = f"http://{HOST}:{PORT}{route}{quote(result['filename'])}{cache_buster}"
         req._json(HTTPStatus.OK, result)
-    except (RawDevelopmentError, ValueError, TypeError, json.JSONDecodeError) as error:
+    except (
+        RawDevelopmentError,
+        ValueError,
+        TypeError,
+        OverflowError,  # max_edge: 1e999 → int() が OverflowError
+        json.JSONDecodeError,
+    ) as error:
         req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
     except Exception as error:
-        req._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"現像処理に失敗しました: {error}"})
+        _fail(req, "現像処理に失敗しました。", error)
+
+
+def handle_export(req: RawAssistHandler, parsed: ParseResult) -> None:
+    try:
+        from .export import export_batch
+    except Exception as error:
+        _fail(req, "書き出し機能を読み込めません。", error)
+        return
+
+    try:
+        payload = _request_payload(req)
+        req._json(HTTPStatus.OK, export_batch(payload.get("batch_name"), payload.get("items")))
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+    except Exception as error:
+        _fail(req, "書き出しに失敗しました。", error)
+
+
+def handle_import_to_photos(req: RawAssistHandler, parsed: ParseResult) -> None:
+    try:
+        from .photos_import import import_batch
+    except Exception as error:
+        _fail(req, "「写真」への取り込み機能を読み込めません。", error)
+        return
+
+    try:
+        payload = _request_payload(req)
+        # osascript 側の失敗は契約どおり 200 + {"status": "error", ...} で返す。
+        result = import_batch(payload.get("batch_name"), album=payload.get("album"))
+        req._json(HTTPStatus.OK, result)
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+    except Exception as error:
+        _fail(req, "「写真」への取り込みに失敗しました。", error)
 
 
 GET_EXACT: dict[str, Handler] = {
@@ -235,6 +320,8 @@ GET_PREFIX: list[tuple[str, Handler]] = [
 POST_ROUTES: dict[str, Handler] = {
     "/api/raw-develop": handle_raw_develop,
     "/api/analyze": handle_analyze,
+    "/api/export": handle_export,
+    "/api/import-to-photos": handle_import_to_photos,
 }
 
 
