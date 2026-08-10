@@ -103,15 +103,23 @@ export default function Home() {
     let unlisten: (() => void) | undefined;
 
     void (async () => {
-      unlisten = await onSetupUpdate((next) => {
-        if (!cancelled) setSetupState(next);
-      });
       try {
+        unlisten = await onSetupUpdate((next) => {
+          if (!cancelled) setSetupState(next);
+        });
         const current = await getSetupStatus();
         if (!cancelled) setSetupState(current);
-      } catch {
-        // イベント購読は既に張られているため、初回状態の取得に失敗しても
-        // 直後の "raw-setup" イベントで復帰できる。
+      } catch (error) {
+        // listen/invoke 自体が失敗した場合（本来ここに来ないはずだが、原因を握り
+        // つぶして無限に「解析状況を確認しています」に留まるよりは、実際のエラー内容を
+        // 画面に出して気づけるようにする）。
+        if (!cancelled) {
+          setSetupState({
+            stage: "failed",
+            message: `セットアップ状態の取得に失敗しました: ${messageOf(error, "不明なエラー")}`,
+            log: [],
+          });
+        }
       }
     })();
 
