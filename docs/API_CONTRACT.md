@@ -6,7 +6,7 @@
 > 実装を止めて orchestrator に差し戻し、全ウェーブ停止のうえ再凍結する。
 >
 > 凍結日: 2026-08-10 / 出典: `.claude/plans/vectorized-snacking-falcon-agent-ad862d8a7d0ff47d3.md` §d・§f
-> TypeScript 側の写し: `app/lib/types.contract.ts`（同じく凍結）
+> TypeScript 側の写し: `app/lib/types.ts`（同じく凍結）
 
 ---
 
@@ -19,8 +19,10 @@
 - リクエストボディ上限: **64 KiB**。超過・0バイト・不正な `Content-Length` は **400**（`"リクエストサイズが不正です。"`）。
 - エラーレスポンスは全て `{ "error": string }`（日本語メッセージ）。
 - エラーの HTTP マッピング（現状維持）:
-  - `RawDevelopmentError` / `ValueError` / `TypeError` / `JSONDecodeError` → **400**、`{"error": str(error)}`
-  - それ以外の例外 → **500**、`{"error": "現像処理に失敗しました: <msg>"}`
+  - `RawDevelopmentError` / `ValueError` / `TypeError` / `OverflowError` / `JSONDecodeError` → **400**、`{"error": str(error)}`
+  - それ以外の例外 → **500**、`{"error": "<エンドポイントごとの定型文>"}`（例: `"現像処理に失敗しました。"`）。
+    例外詳細（内部パスを含みうる）はレスポンスに載せず**サーバログにのみ**出す
+    （Wave 2-D のセキュリティ堅牢化で再凍結。旧仕様の `": <msg>"` 付き形式は廃止）
 
 ---
 
@@ -42,7 +44,7 @@
 > | `GET /outputs/`・`GET /source-jpg/` | 契約どおり動作（既存） | — |
 >
 > Wave 1-C は「挙動不変の機械分割」であり API 駆動化は Wave 2-C2 の担当なので、
-> **Wave 1-C では `types.contract.ts` を使った新規 fetch を書かないこと**（§6 参照）。
+> **Wave 1-C では `app/lib/types.ts` の契約型を使った新規 fetch を書かないこと**（§6 参照）。
 
 ### `GET /api/health` → `HealthResponse`
 
@@ -271,12 +273,12 @@ outputs/
 
 ## 6. TypeScript 側の取り決め
 
-- 契約型の写しは **`app/lib/types.contract.ts`**（凍結）。
+- 契約型の写しは **`app/lib/types.ts`**（凍結）。
 - `RawPreset` の union 型は **廃止**。プリセットは `string` + `PresetInfo[]` を `/api/health` から動的取得する
   （Python 側とのプリセット二重定義を解消するため）。
-- Wave 1-C の機械分割では `app/lib/types.ts` に**既存定義のまま**移設し、`types.contract.ts` と一時併存させる。
-  Wave 2-C2 で `types.contract.ts` へ一本化する。
-- `app/page.tsx` は Wave 0 時点では `types.contract.ts` を**インポートしない**（挙動不変を保つため）。
+- Wave 1-C の機械分割では `app/lib/types.ts` に**既存定義のまま**移設し、`types.contract.ts` と一時併存させた。
+  Wave 2-C2 で `app/lib/types.ts` へ一本化済み（`types.contract.ts` は削除）。
+- `app/page.tsx` は Wave 0 時点では契約型を**インポートしない**（挙動不変を保つため）。
 
 ---
 
