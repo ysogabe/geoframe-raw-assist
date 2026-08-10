@@ -24,3 +24,18 @@
 
 - macOS + zsh。`timeout` コマンドは無い（`gtimeout` かコマンド自身のタイムアウトを使う）。zsh は unquoted 変数を word-split しない。
 - 画面表示の検証はブラウザ（vite dev）で行う。デスクトップアプリの確認は `tauri:build` 後の .app を起動して行う。
+
+## orchestrator-qa スキルの OMP ハーネス対応
+
+`orchestrator-qa` スキル本文は Claude Code 前提の記述を含む。この OMP ハーネスで適用する際の対応表:
+
+| スキル本文（Claude Code 前提） | OMP での実態 |
+|---|---|
+| `model: sonnet / opus / haiku` の指定 | **不可**。`task` ツールの `agent` 型がモデルを決定（`scout` は高速モデル等）。`model` パラメータは存在しない |
+| `subagent_type`: `Explore` / `general-purpose` / `claude` | `scout`（読み取り専用調査）/ `designer`（UI）/ `reviewer` / `security-reviewer` / `librarian` / `task`（汎用 worker）/ `sonic`（機械的反復のみ） |
+| `EnterWorktree` ツール | 存在しない。`git worktree add` を bash で実行する |
+| `ExitPlanMode` / `/goal` / `/loop` | 該当概念なし。プラン承認は会話上で行う。外部状態の待機は `hub wait` / `hub jobs` |
+| `TaskCreate` / `TaskUpdate` | `todo` ツール（タスク名は内容文字列で参照） |
+| `Monitor` ツール | `hub jobs` / `hub wait`（ジョブ完了の自動通知） |
+
+契約の規範部分（メインは実装コードを書かない／委譲プロンプトの自己完結性／QA ゲート＝完了報告を鵜呑みにしない／失敗時 3 回までの再実装／コミット・PR はメインの責務）は OMP でもそのまま有効。
