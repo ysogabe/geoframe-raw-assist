@@ -1,0 +1,36 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="36%" r="85%">
+      <stop offset="0%" stop-color="#263a32"/>
+      <stop offset="55%" stop-color="#16201e"/>
+      <stop offset="100%" stop-color="#0b110f"/>
+    </radialGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6fc7ab"/>
+      <stop offset="100%" stop-color="#41a080"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e8b577"/>
+      <stop offset="100%" stop-color="#c58b4c"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="28" stdDeviation="32" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- subtle sheen -->
+  <rect width="1024" height="512" fill="url(#bg)" opacity="0"/>
+
+  <g transform="rotate(-6 512 512)" filter="url(#shadow)">
+    <!-- (0,0) green -->
+    <path d="M 187,153 H 399 Q 483,153 483,237 V 399 Q 483,483 399,483 H 187 Q 153,483 153,399 V 187 Q 153,153 187,153 Z" fill="url(#green)"/>
+    <!-- (1,0) amber -->
+    <path d="M 625,153 H 837 Q 871,153 871,187 V 399 Q 871,483 837,483 H 575 Q 541,483 541,449 V 237 Q 541,153 625,153 Z" fill="url(#amber)"/>
+    <!-- (0,1) amber -->
+    <path d="M 237,541 H 449 Q 483,541 483,575 V 787 Q 483,871 399,871 H 187 Q 153,871 153,837 V 625 Q 153,541 237,541 Z" fill="url(#amber)"/>
+    <!-- (1,1) green -->
+    <path d="M 575,541 H 787 Q 871,541 871,625 V 837 Q 871,871 787,871 H 625 Q 541,871 541,837 V 575 Q 541,541 575,541 Z" fill="url(#green)"/>
+  </g>
+</svg>
