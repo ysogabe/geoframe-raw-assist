@@ -42,8 +42,8 @@ export function Topbar({
       <header className="topbar">
         <div>
           <div className="breadcrumbs"><span>レビュー</span><b>/</b>おすすめ一覧</div>
-          <h1>選ぶ時間を、撮る時間へ。</h1>
-          <p>似たカットをまとめて比較し、仕上げるべきRAWだけを提案します。</p>
+          <h1>おすすめ写真の確認</h1>
+          <p>解析結果から似たカットを比較し、採用する写真とRAW現像の対象を選びます。</p>
         </div>
         <div className="top-actions">
           <span className={`engine-badge ${engineStatus}`}><i />{engineLabel(engineStatus, engineVersion)}</span>

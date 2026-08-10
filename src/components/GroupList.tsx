@@ -27,7 +27,7 @@ export function GroupList({
   return (
     <section className="review-list screen-enter">
       <div className="section-heading">
-        <div><p className="eyebrow">SMART REVIEW</p><h2>おすすめを確認</h2></div>
+        <div><p className="eyebrow">SUGGESTIONS</p><h2>提案グループ一覧</h2></div>
         <div className="view-tabs" role="tablist" aria-label="表示切替">
           <button className={activeView === "suggestions" ? "active" : ""} onClick={() => onChangeView("suggestions")}>すべて <span>{analysis.groups.length}</span></button>
           <button className={activeView === "queue" ? "active" : ""} onClick={() => onChangeView("queue")}>現像済み <span>{developedGroupIds.length}</span></button>
