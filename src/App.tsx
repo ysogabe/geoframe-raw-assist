@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   activePreset,
@@ -29,11 +27,22 @@ import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
 import { AnalysisGate } from "./components/AnalysisGate";
+import { BootstrapGate } from "./components/BootstrapGate";
 import { GroupList } from "./components/GroupList";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
+import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
+
+// ローカルRAWエンジンは rawpy/numpy/opencv/lensfunpy の import で起動に数秒かかる。
+// デスクトップシェルはウィンドウ表示とサイドカー起動をほぼ同時に行うため、初回の
+// ヘルスチェックはサーバがまだ listen していない状態で当たりうる（isEndpointUnavailable
+// が true になる 404 / 接続不能ケース）。この場合は一定回数だけ再試行し、それでも
+// ダメなら（エンジンが本当に起動していない＝ npm run setup:raw 未実施など）既存の
+// オフライン表示にフォールバックする。
+const HEALTH_CHECK_RETRY_INTERVAL_MS = 1000;
+const HEALTH_CHECK_MAX_ATTEMPTS = 20; // 1000ms × 20 ≈ 20秒、冷間起動の実測時間に対して十分な余裕
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -42,22 +51,81 @@ function messageOf(error: unknown, fallback: string): string {
 export default function Home() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [tick, setTick] = useState(0);
+  const [setupState, setSetupState] = useState<SetupState | null>(null);
   const comparisonRef = useRef<HTMLDivElement>(null);
 
   const { analysis, health, screen, developMode } = state;
 
-  // ---- ローカルRAWエンジンの死活確認 --------------------------------------
+  // ---- ローカルRAWエンジンの死活確認（起動直後は数秒未起動のため再試行あり） -----
+  // Tauri内で初回セットアップ（venv作成/pip install）が進行中は、その分だけ
+  // エンジン起動が遅れる（数十秒〜）。ブートストラップが終わる（ready/succeeded/failed）
+  // までヘルスチェック自体を開始しないことで、固定の再試行回数を無駄に消費して
+  // 「実際にはエンジンが起動しているのに画面だけ停止表示のまま」になるのを防ぐ。
+  // ブラウザモード（isTauri() === false）では従来どおり即座に開始する。
+  const setupStage = setupState?.stage;
   useEffect(() => {
+    const waitingForBootstrap =
+      isTauri() && (setupStage === undefined || setupStage === "creating-venv" || setupStage === "installing-deps");
+    if (waitingForBootstrap) return;
+
     let cancelled = false;
-    getHealth()
-      .then((payload) => {
-        if (!cancelled) dispatch({ type: "health/ok", health: payload });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: "health/fail" });
-      });
+    let retryTimer: number | undefined;
+
+    const checkHealth = (attempt: number) => {
+      getHealth()
+        .then((payload) => {
+          if (!cancelled) dispatch({ type: "health/ok", health: payload });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          if (isEndpointUnavailable(error) && attempt < HEALTH_CHECK_MAX_ATTEMPTS) {
+            retryTimer = window.setTimeout(() => checkHealth(attempt + 1), HEALTH_CHECK_RETRY_INTERVAL_MS);
+            return;
+          }
+          dispatch({ type: "health/fail" });
+        });
+    };
+
+    checkHealth(1);
+
     return () => {
       cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [setupStage]);
+
+  // ---- 初回起動時のブートストラップ（.venv 作成 / pip install）進捗の購読 --------
+  // ブラウザモード（npm run dev:raw）では isTauri() が false になり、このブロックは
+  // invoke/listen を一切呼ばず、既存の挙動に一切影響しない。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      try {
+        unlisten = await onSetupUpdate((next) => {
+          if (!cancelled) setSetupState(next);
+        });
+        const current = await getSetupStatus();
+        if (!cancelled) setSetupState(current);
+      } catch (error) {
+        // listen/invoke 自体が失敗した場合（本来ここに来ないはずだが、原因を握り
+        // つぶして無限に「解析状況を確認しています」に留まるよりは、実際のエラー内容を
+        // 画面に出して気づけるようにする）。
+        if (!cancelled) {
+          setSetupState({
+            stage: "failed",
+            message: `セットアップ状態の取得に失敗しました: ${messageOf(error, "不明なエラー")}`,
+            log: [],
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
@@ -72,8 +140,12 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // ローカルRAWエンジンの死活確認（上の useEffect）が終わる前に叩くと、
+    // デスクトップシェルではエンジン起動と同時にウィンドウが開くため
+    // 同じコールドスタート競合で "Load failed" になる。ready になってから叩く。
+    if (state.engineStatus !== "ready") return;
     void pollAnalysis();
-  }, [pollAnalysis]);
+  }, [state.engineStatus, pollAnalysis]);
 
   useEffect(() => {
     if (state.analysisState !== "running") return;
@@ -213,6 +285,9 @@ export default function Home() {
   }
 
   const analysisReady = state.analysisState === "ready" && analysis !== null;
+  const bootstrapping =
+    setupState !== null &&
+    (setupState.stage === "creating-venv" || setupState.stage === "installing-deps" || setupState.stage === "failed");
   const elapsed = developMode ? Math.max(0, (tick - state.developStartedAt) / 1000) : 0;
   const elapsedLabel = `${elapsed.toFixed(1)}秒`;
 
@@ -247,7 +322,9 @@ export default function Home() {
           </div>
         )}
 
-        {!analysisReady || !analysis ? (
+        {bootstrapping && setupState ? (
+          <BootstrapGate setup={setupState} />
+        ) : !analysisReady || !analysis ? (
           <AnalysisGate
             engineStatus={state.engineStatus}
             analysisState={state.analysisState}

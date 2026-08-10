@@ -16,7 +16,7 @@ from . import analysis
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("RAW_ASSIST_PORT", "8788"))
-ALLOWED_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
+ALLOWED_ORIGINS = {"http://localhost:1420", "http://127.0.0.1:1420", "tauri://localhost"}
 MAX_JSON_BODY_BYTES = 64 * 1024
 
 # DNS リバインディング対策。ブラウザは攻撃者のドメインを 127.0.0.1 に向けられても
