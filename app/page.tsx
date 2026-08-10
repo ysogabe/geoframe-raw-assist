@@ -1,303 +1,316 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  activePreset,
+  changedAdjustmentKeys,
+  developedGroupIds,
+  effectiveAdjustments,
+  initialState,
+  isValidBatchName,
+  photoOf,
+  reducer,
+  selectedCaptureOf,
+  selectedGroup,
+  visibleGroups,
+  type DevelopMode,
+} from "./lib/app-state";
+import {
+  developRaw,
+  exportSelection,
+  getAnalysis,
+  getHealth,
+  importToPhotos,
+  isEndpointUnavailable,
+  startAnalyze,
+} from "./lib/raw-api";
+import type { Adjustments, ExportItem } from "./lib/types";
+import { Sidebar } from "./components/Sidebar";
+import { Topbar } from "./components/Topbar";
+import { SummaryStrip } from "./components/SummaryStrip";
+import { AnalysisGate } from "./components/AnalysisGate";
+import { GroupList } from "./components/GroupList";
+import { OperationPanel } from "./components/OperationPanel";
+import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 
-type Shot = {
-  id: string;
-  image: string;
-  score: number;
-  sharpness: number;
-  highlight: number;
-  label?: string;
-};
+const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
 
-type Group = {
-  id: number;
-  title: string;
-  kind: string;
-  time: string;
-  recommendation: string;
-  reason: string;
-  raw: "none" | "maybe" | "recommended" | "strong";
-  rawLabel: string;
-  shots: Shot[];
-};
-
-const groups: Group[] = [
-  {
-    id: 1,
-    title: "花のクローズアップ",
-    kind: "類似カット",
-    time: "10:42",
-    recommendation: "DSC02774",
-    reason: "花芯の輪郭が最も明瞭で、背景のボケも自然です。",
-    raw: "maybe",
-    rawLabel: "調整で改善",
-    shots: [
-      { id: "DSC02773", image: "/photos/DSC02773.webp", score: 72, sharpness: 68, highlight: 94 },
-      { id: "DSC02774", image: "/photos/DSC02774.webp", score: 91, sharpness: 94, highlight: 91, label: "推薦" },
-      { id: "DSC02775", image: "/photos/DSC02775.webp", score: 79, sharpness: 82, highlight: 88 },
-    ],
-  },
-  {
-    id: 2,
-    title: "地下鉄のモザイク",
-    kind: "連写 3枚",
-    time: "10:47",
-    recommendation: "DSC02776",
-    reason: "円形装飾が中央に収まり、手ブレが最も少ない一枚です。",
-    raw: "recommended",
-    rawLabel: "RAW推奨",
-    shots: [
-      { id: "DSC02776", image: "/photos/DSC02776.webp", score: 89, sharpness: 91, highlight: 87, label: "推薦" },
-      { id: "DSC02777", image: "/photos/DSC02777.webp", score: 81, sharpness: 83, highlight: 84 },
-      { id: "DSC02778", image: "/photos/DSC02778.webp", score: 84, sharpness: 86, highlight: 86 },
-    ],
-  },
-  {
-    id: 3,
-    title: "旧市街の屋上",
-    kind: "類似カット",
-    time: "13:15",
-    recommendation: "DSC02861",
-    reason: "水平が安定し、建物と遠景の階調が最も残っています。",
-    raw: "none",
-    rawLabel: "JPEGで採用可",
-    shots: [
-      { id: "DSC02860", image: "/photos/DSC02860.webp", score: 76, sharpness: 80, highlight: 78 },
-      { id: "DSC02861", image: "/photos/DSC02861.webp", score: 92, sharpness: 90, highlight: 95, label: "推薦" },
-      { id: "DSC02862", image: "/photos/DSC02862.webp", score: 86, sharpness: 87, highlight: 89 },
-    ],
-  },
-  {
-    id: 4,
-    title: "木彫と回廊",
-    kind: "構図違い",
-    time: "13:28",
-    recommendation: "DSC02869",
-    reason: "回廊の奥行きと装飾の情報量が両立しています。",
-    raw: "maybe",
-    rawLabel: "調整で改善",
-    shots: [
-      { id: "DSC02867", image: "/photos/DSC02867.webp", score: 75, sharpness: 85, highlight: 67 },
-      { id: "DSC02868", image: "/photos/DSC02868.webp", score: 78, sharpness: 82, highlight: 73 },
-      { id: "DSC02869", image: "/photos/DSC02869.webp", score: 88, sharpness: 89, highlight: 86, label: "推薦" },
-    ],
-  },
-  {
-    id: 5,
-    title: "ライトアップされた門",
-    kind: "夜景",
-    time: "20:06",
-    recommendation: "DSC02943",
-    reason: "建物の輪郭が最もシャープで、照明の色も残っています。",
-    raw: "strong",
-    rawLabel: "RAWを強く推奨",
-    shots: [
-      { id: "DSC02943", image: "/photos/DSC02943.webp", score: 94, sharpness: 92, highlight: 88, label: "推薦" },
-      { id: "DSC02946", image: "/photos/DSC02946.webp", score: 82, sharpness: 84, highlight: 79 },
-      { id: "DSC02947", image: "/photos/DSC02947.webp", score: 85, sharpness: 87, highlight: 81 },
-    ],
-  },
-  {
-    id: 6,
-    title: "夕暮れの広場",
-    kind: "逆光 3枚",
-    time: "20:21",
-    recommendation: "DSC02954",
-    reason: "空のハイライトを保ちながら、建物の暗部も残っています。",
-    raw: "recommended",
-    rawLabel: "RAW推奨",
-    shots: [
-      { id: "DSC02948", image: "/photos/DSC02948.webp", score: 74, sharpness: 80, highlight: 63 },
-      { id: "DSC02953", image: "/photos/DSC02953.webp", score: 86, sharpness: 84, highlight: 91 },
-      { id: "DSC02954", image: "/photos/DSC02954.webp", score: 90, sharpness: 88, highlight: 95, label: "推薦" },
-    ],
-  },
-];
-
-const rawClass = (level: Group["raw"]) => `raw-pill raw-${level}`;
+function messageOf(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 export default function Home() {
-  const [selectedGroupId, setSelectedGroupId] = useState(1);
-  const [selectedShots, setSelectedShots] = useState<Record<number, string>>(
-    Object.fromEntries(groups.map((group) => [group.id, group.recommendation])),
-  );
-  const [accepted, setAccepted] = useState<number[]>([]);
-  const [queued, setQueued] = useState<number[]>([]);
-  const [activeView, setActiveView] = useState<"suggestions" | "queue" | "accepted">("suggestions");
-  const [notice, setNotice] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const [tick, setTick] = useState(0);
+  const comparisonRef = useRef<HTMLDivElement>(null);
 
-  const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0];
-  const selectedShot = selectedGroup.shots.find((shot) => shot.id === selectedShots[selectedGroup.id]) ?? selectedGroup.shots[0];
-  const visibleGroups = useMemo(() => {
-    if (activeView === "accepted") return groups.filter((group) => accepted.includes(group.id));
-    if (activeView === "queue") return groups.filter((group) => queued.includes(group.id));
-    return groups;
-  }, [accepted, activeView, queued]);
+  const { analysis, health, screen, developMode } = state;
 
-  function chooseShot(groupId: number, shotId: string) {
-    setSelectedShots((current) => ({ ...current, [groupId]: shotId }));
+  // ---- ローカルRAWエンジンの死活確認 --------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    getHealth()
+      .then((payload) => {
+        if (!cancelled) dispatch({ type: "health/ok", health: payload });
+      })
+      .catch(() => {
+        if (!cancelled) dispatch({ type: "health/fail" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---- 解析状況の取得と 1 秒ポーリング ------------------------------------
+  const pollAnalysis = useCallback(async () => {
+    try {
+      const response = await getAnalysis();
+      dispatch({ type: "analysis/status", response });
+    } catch (error) {
+      dispatch({ type: "analysis/error", message: messageOf(error, "解析状況を取得できませんでした。") });
+    }
+  }, []);
+
+  useEffect(() => {
+    void pollAnalysis();
+  }, [pollAnalysis]);
+
+  useEffect(() => {
+    if (state.analysisState !== "running") return;
+    const timer = window.setInterval(() => void pollAnalysis(), 1000);
+    return () => window.clearInterval(timer);
+  }, [state.analysisState, pollAnalysis]);
+
+  // ---- 現像の経過秒表示（tick を進めるだけ。経過秒はレンダー時に導出する） ----
+  useEffect(() => {
+    if (!developMode) return;
+    const timer = window.setInterval(() => setTick(Date.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [developMode]);
+
+  // ---- 派生値 --------------------------------------------------------------
+  const group = selectedGroup(state);
+  const captureId = group ? selectedCaptureOf(state, group) : "";
+  const photo = photoOf(analysis, captureId);
+  const adjustments = effectiveAdjustments(state);
+  const changedKeys = changedAdjustmentKeys(state);
+  const groupsToShow = useMemo(() => visibleGroups(state), [state]);
+  const developedIds = useMemo(() => developedGroupIds(state), [state]);
+  const engineVersion = health ? `rawpy ${health.rawpy_version}` : "";
+  const coverThumb = useMemo(() => {
+    if (!analysis) return null;
+    const first = analysis.groups[0];
+    return first ? (analysis.photos[first.recommended_capture_id]?.thumb ?? null) : null;
+  }, [analysis]);
+
+  const exportRows = useMemo<ExportRow[]>(() => {
+    if (!analysis) return [];
+    return state.acceptedGroupIds
+      .map((groupId) => analysis.groups.find((item) => item.id === groupId))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .map((item) => {
+        const chosen = selectedCaptureOf(state, item);
+        const developed = state.fullResults[chosen];
+        const variant = state.exportVariants[chosen] ?? (developed ? "developed" : "camera_jpg");
+        return { group: item, captureId: chosen, developed, variant: developed ? variant : "camera_jpg" };
+      });
+  }, [analysis, state]);
+
+  const albumName = `GeoFrame RAW Assist ${isValidBatchName(state.batchName) ? state.batchName : "<バッチ名>"}`;
+
+  // ---- 操作ハンドラ --------------------------------------------------------
+  function scrollToTop() {
+    window.requestAnimationFrame(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+    });
   }
 
-  function acceptSelection() {
-    setAccepted((current) => (current.includes(selectedGroup.id) ? current : [...current, selectedGroup.id]));
-    setNotice(`${selectedShots[selectedGroup.id]} を採用しました`);
+  function openOperationScreen(groupId: number) {
+    dispatch({ type: "screen/operation", groupId });
+    scrollToTop();
   }
 
-  function queueRaw() {
-    setQueued((current) => (current.includes(selectedGroup.id) ? current : [...current, selectedGroup.id]));
-    setNotice(`${selectedShots[selectedGroup.id]} のRAW現像をキューに追加しました`);
+  function returnToSuggestions() {
+    dispatch({ type: "screen/suggestions" });
+    scrollToTop();
   }
 
-  function handleFiles(files: FileList | null) {
-    if (!files?.length) return;
-    const jpgs = Array.from(files).filter((file) => /\.jpe?g$/i.test(file.name)).length;
-    const raws = Array.from(files).filter((file) => /\.arw$/i.test(file.name)).length;
-    setNotice(`${files.length}ファイルを確認しました（JPG ${jpgs} / ARW ${raws}）`);
+  function openExportScreen() {
+    dispatch({ type: "screen/export" });
+    scrollToTop();
   }
+
+  async function beginAnalyze(force = false) {
+    dispatch({ type: "analysis/requested" });
+    try {
+      const response = await startAnalyze(force);
+      if (response.status === "ready") {
+        await pollAnalysis();
+      }
+    } catch (error) {
+      dispatch({ type: "analysis/error", message: messageOf(error, "解析を開始できませんでした。") });
+    }
+  }
+
+  async function runDevelop(mode: DevelopMode) {
+    if (!group || !captureId) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください", tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) {
+      dispatch({ type: "notice/set", message: "プリセットを取得できていません。", tone: "error" });
+      return;
+    }
+
+    dispatch({ type: "develop/start", mode, captureId });
+    try {
+      const result = await developRaw(captureId, preset.name, {
+        adjustments: state.overrides,
+        preview: mode === "preview",
+        maxEdge: mode === "preview" ? undefined : 6000,
+      });
+      dispatch({ type: "develop/ok", mode, result });
+      window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
+    } catch (error) {
+      dispatch({ type: "develop/fail", message: messageOf(error, "RAW現像に失敗しました") });
+    }
+  }
+
+  async function runExport() {
+    if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
+    dispatch({ type: "export/start" });
+    const items: ExportItem[] = exportRows.map((row) =>
+      row.variant === "developed" && row.developed
+        ? { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename }
+        : { capture_id: row.captureId, variant: "camera_jpg" },
+    );
+    try {
+      const result = await exportSelection(state.batchName, items);
+      dispatch({ type: "export/ok", result });
+    } catch (error) {
+      dispatch({
+        type: "export/fail",
+        message: isEndpointUnavailable(error) ? EXPORT_UNAVAILABLE : messageOf(error, "書き出しに失敗しました。"),
+      });
+    }
+  }
+
+  async function runImport() {
+    if (!isValidBatchName(state.batchName)) return;
+    dispatch({ type: "import/start" });
+    try {
+      const result = await importToPhotos(state.batchName);
+      dispatch({ type: "import/ok", result });
+    } catch (error) {
+      dispatch({
+        type: "import/fail",
+        message: isEndpointUnavailable(error) ? EXPORT_UNAVAILABLE : messageOf(error, "Appleフォトへの登録に失敗しました。"),
+      });
+    }
+  }
+
+  const analysisReady = state.analysisState === "ready" && analysis !== null;
+  const elapsed = developMode ? Math.max(0, (tick - state.developStartedAt) / 1000) : 0;
+  const elapsedLabel = `${elapsed.toFixed(1)}秒`;
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
-          <span><strong>GeoFrame</strong><small>RAW ASSIST</small></span>
-        </div>
-
-        <nav className="primary-nav" aria-label="メインナビゲーション">
-          <button className="nav-item active"><span>◫</span>レビュー</button>
-          <button className="nav-item"><span>⌁</span>ライブラリ</button>
-          <button className="nav-item"><span>↻</span>処理履歴</button>
-        </nav>
-
-        <div className="sidebar-section">
-          <p className="eyebrow">現在のバッチ</p>
-          <div className="batch-card">
-            <div className="batch-cover"><img src="/photos/DSC02943.webp" alt="現在の撮影バッチ" /></div>
-            <div><strong>旅写真 #08</strong><small>281ペア・分析完了</small></div>
-            <span className="status-dot" title="分析完了" />
-          </div>
-        </div>
-
-        <div className="sidebar-spacer" />
-        <div className="storage">
-          <div><span>ローカル処理</span><strong>10.0 GB</strong></div>
-          <div className="storage-track"><span /></div>
-          <small>画像は外部へ送信されません</small>
-        </div>
-        <button className="settings-button"><span>⚙</span>設定</button>
-      </aside>
+      <Sidebar analysis={analysis} coverThumb={coverThumb} />
 
       <main className="workspace">
-        <header className="topbar">
-          <div>
-            <div className="breadcrumbs"><span>レビュー</span><b>/</b>旅写真 #08</div>
-            <h1>選ぶ時間を、撮る時間へ。</h1>
-            <p>似たカットをまとめて比較し、仕上げるべきRAWだけを提案します。</p>
+        <Topbar
+          screen={screen}
+          groupTitle={group?.title ?? ""}
+          groupKind={group ? group.raw.label : ""}
+          captureId={captureId}
+          engineStatus={state.engineStatus}
+          engineVersion={engineVersion}
+          canExport={state.acceptedGroupIds.length > 0}
+          acceptedCount={state.acceptedGroupIds.length}
+          analysisReady={analysisReady}
+          reanalyzing={state.analysisState === "running"}
+          onReturn={returnToSuggestions}
+          onOpenExport={openExportScreen}
+          onReanalyze={() => void beginAnalyze(true)}
+        />
+
+        {screen === "suggestions" && analysisReady && analysis && <SummaryStrip analysis={analysis} />}
+
+        {state.notice && (
+          <div className={`toast${state.noticeTone === "error" ? " error" : ""}`} role="status">
+            <span>{state.noticeTone === "error" ? "!" : "✓"}</span>
+            {state.notice}
+            <button onClick={() => dispatch({ type: "notice/clear" })} aria-label="閉じる">×</button>
           </div>
-          <div className="top-actions">
-            <button className="icon-button" aria-label="通知">●<span /></button>
-            <button className="import-button" onClick={() => fileInputRef.current?.click()}><span>＋</span>フォルダを追加</button>
-            <input ref={fileInputRef} className="hidden-input" type="file" multiple accept=".jpg,.jpeg,.arw" onChange={(event) => handleFiles(event.target.files)} />
-          </div>
-        </header>
+        )}
 
-        <section className="summary-strip" aria-label="分析サマリー">
-          <div className="summary-lead"><span className="pulse">✓</span><div><strong>281組のペアを解析しました</strong><small>JPGとARWの欠落はありません</small></div></div>
-          <div className="summary-metric"><strong>54</strong><span>撮影グループ</span></div>
-          <div className="summary-metric"><strong>18</strong><span>RAW現像候補</span></div>
-          <div className="summary-metric"><strong>6</strong><span>確認が必要</span></div>
-          <div className="progress-ring" aria-label="分析完了 100%"><span>100<small>%</small></span></div>
-        </section>
-
-        {notice && <div className="toast" role="status"><span>✓</span>{notice}<button onClick={() => setNotice("")} aria-label="閉じる">×</button></div>}
-
-        <div className="content-grid">
-          <section className="review-list">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">SMART REVIEW</p>
-                <h2>おすすめを確認</h2>
-              </div>
-              <div className="view-tabs" role="tablist" aria-label="表示切替">
-                <button className={activeView === "suggestions" ? "active" : ""} onClick={() => setActiveView("suggestions")}>すべて <span>{groups.length}</span></button>
-                <button className={activeView === "queue" ? "active" : ""} onClick={() => setActiveView("queue")}>処理待ち <span>{queued.length}</span></button>
-                <button className={activeView === "accepted" ? "active" : ""} onClick={() => setActiveView("accepted")}>採用済み <span>{accepted.length}</span></button>
-              </div>
-            </div>
-
-            <div className="group-stack">
-              {visibleGroups.length ? visibleGroups.map((group) => {
-                const hero = group.shots.find((shot) => shot.id === selectedShots[group.id]) ?? group.shots[0];
-                const isSelected = group.id === selectedGroup.id;
-                return (
-                  <article key={group.id} className={`group-card ${isSelected ? "selected" : ""}`} onClick={() => setSelectedGroupId(group.id)}>
-                    <div className="group-hero">
-                      <img src={hero.image} alt={`${group.title} ${hero.id}`} />
-                      <span className="photo-count">▧ {group.shots.length}枚</span>
-                      {accepted.includes(group.id) && <span className="accepted-badge">✓ 採用済み</span>}
-                    </div>
-                    <div className="group-copy">
-                      <div className="group-meta"><span>{group.kind}</span><small>{group.time}</small></div>
-                      <h3>{group.title}</h3>
-                      <div className="recommendation"><span className="spark">✦</span><p><strong>{selectedShots[group.id]}</strong><small>{group.reason}</small></p></div>
-                      <div className="group-footer">
-                        <span className={rawClass(group.raw)}>{group.rawLabel}</span>
-                        <button onClick={(event) => { event.stopPropagation(); setSelectedGroupId(group.id); }}>比較する <b>→</b></button>
-                      </div>
-                    </div>
-                  </article>
-                );
-              }) : (
-                <div className="empty-state"><span>○</span><h3>まだ写真がありません</h3><p>別の表示に切り替えるか、提案から写真を採用してください。</p></div>
-              )}
-            </div>
-          </section>
-
-          <aside className="inspector" aria-label="選択中のグループ詳細">
-            <div className="inspector-head">
-              <div><p className="eyebrow">COMPARE</p><h2>{selectedGroup.title}</h2></div>
-              <span>{selectedGroup.shots.length}枚</span>
-            </div>
-
-            <div className="selected-preview">
-              <img src={selectedShot.image} alt={`選択中 ${selectedShot.id}`} />
-              <div className="preview-grade"><small>総合</small><strong>{selectedShot.score}</strong></div>
-              <div className="filename">{selectedShot.id}.JPG</div>
-            </div>
-
-            <div className="shot-picker" role="radiogroup" aria-label="代表写真を選択">
-              {selectedGroup.shots.map((shot) => (
-                <button key={shot.id} className={selectedShots[selectedGroup.id] === shot.id ? "active" : ""} onClick={() => chooseShot(selectedGroup.id, shot.id)} role="radio" aria-checked={selectedShots[selectedGroup.id] === shot.id}>
-                  <img src={shot.image} alt={shot.id} />
-                  {shot.label && <span>{shot.label}</span>}
-                  <small>{shot.id.slice(-3)}</small>
-                </button>
-              ))}
-            </div>
-
-            <div className="analysis-card">
-              <div className="analysis-title"><span className="spark">✦</span><strong>この一枚をおすすめ</strong><small>信頼度 {selectedShot.score}%</small></div>
-              <p>{selectedGroup.reason}</p>
-              <div className="score-row"><span>シャープネス</span><div><i style={{ width: `${selectedShot.sharpness}%` }} /></div><strong>{selectedShot.sharpness}</strong></div>
-              <div className="score-row"><span>階調の保持</span><div><i style={{ width: `${selectedShot.highlight}%` }} /></div><strong>{selectedShot.highlight}</strong></div>
-              <div className="score-row"><span>構図</span><div><i style={{ width: `${selectedShot.score - 3}%` }} /></div><strong>{selectedShot.score - 3}</strong></div>
-            </div>
-
-            <div className={`raw-callout ${selectedGroup.raw === "strong" ? "urgent" : ""}`}>
-              <span className="raw-icon">R</span>
-              <div><strong>{selectedGroup.rawLabel}</strong><p>{selectedGroup.raw === "none" ? "JPEGの階調が十分に残っています。" : selectedGroup.raw === "strong" ? "夜景・高ISO・深い暗部を検出。ノイズ低減と色調整の効果が期待できます。" : "暗部とハイライトに調整余地があります。"}</p></div>
-            </div>
-
-            <div className="inspector-actions">
-              <button className="primary-action" onClick={acceptSelection}>{accepted.includes(selectedGroup.id) ? "✓ 採用済み" : "この写真を採用"}</button>
-              <button className="secondary-action" onClick={queueRaw} disabled={selectedGroup.raw === "none"}>{queued.includes(selectedGroup.id) ? "✓ 現像待ち" : "RAW現像を予約"}</button>
-            </div>
-            <p className="safety-note">元のJPG / ARWは変更されません</p>
-          </aside>
-        </div>
+        {!analysisReady || !analysis ? (
+          <AnalysisGate
+            engineStatus={state.engineStatus}
+            analysisState={state.analysisState}
+            progress={state.analysisProgress}
+            errorMessage={state.analysisError}
+            busy={state.analyzeRequested}
+            onStart={() => void beginAnalyze(false)}
+          />
+        ) : screen === "operation" && group ? (
+          <OperationPanel
+            analysis={analysis}
+            group={group}
+            photo={photo}
+            captureId={captureId}
+            onChooseCapture={(groupId, id) => dispatch({ type: "group/chooseCapture", groupId, captureId: id })}
+            engineStatus={state.engineStatus}
+            engineVersion={engineVersion}
+            health={health}
+            presetName={state.presetName}
+            adjustments={adjustments}
+            changedKeys={changedKeys}
+            onChangePreset={(presetName) => dispatch({ type: "preset/change", presetName })}
+            onChangeAdjustment={(key, value) =>
+              dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
+            }
+            onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
+            isAccepted={state.acceptedGroupIds.includes(group.id)}
+            onAccept={() => dispatch({ type: "group/accept", groupId: group.id })}
+            onDevelop={(mode) => void runDevelop(mode)}
+            developMode={developMode}
+            elapsedLabel={elapsedLabel}
+            previewResult={state.previewResults[captureId]}
+            fullResult={state.fullResults[captureId]}
+            comparisonRef={comparisonRef}
+          />
+        ) : screen === "export" ? (
+          <ExportPanel
+            analysis={analysis}
+            rows={exportRows}
+            batchName={state.batchName}
+            onChangeBatchName={(value) => dispatch({ type: "export/batchName", value })}
+            onChangeVariant={(id, variant) => dispatch({ type: "export/variant", captureId: id, variant })}
+            onExport={() => void runExport()}
+            onImport={() => void runImport()}
+            exporting={state.exporting}
+            importing={state.importing}
+            exportResult={state.exportResult}
+            importResult={state.importResult}
+            albumName={albumName}
+            onBack={returnToSuggestions}
+          />
+        ) : (
+          <GroupList
+            analysis={analysis}
+            visibleGroups={groupsToShow}
+            selectedCaptureOf={(item) => selectedCaptureOf(state, item)}
+            acceptedGroupIds={state.acceptedGroupIds}
+            developedGroupIds={developedIds}
+            activeView={state.listView}
+            onChangeView={(view) => dispatch({ type: "list/view", view })}
+            onOpenGroup={openOperationScreen}
+          />
+        )}
       </main>
     </div>
   );
