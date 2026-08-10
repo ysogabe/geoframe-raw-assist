@@ -168,7 +168,7 @@ Adjustments = {
 ```
 
 - リクエストの `adjustments` は `Partial<Adjustments>`。未指定キーはプリセット既定値で埋める（`resolve_adjustments`）。
-- **範囲外は reject（400）、未知キーも reject（400）。** `DevelopedResult.adjustments` は解決後の全量を返す。
+- **数値の範囲外は上記範囲へクランプ、未知キー・不正型・不正な noise_reduction は reject（400）。**（§9 と統一。Wave 1-A 実装済みの挙動を正とする） `DevelopedResult.adjustments` は解決後（クランプ後）の全量を返す。
 
 ### 実装マッピング（プラン §f 後半）
 
