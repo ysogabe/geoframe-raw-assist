@@ -11,9 +11,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
+from local_raw import analysis as analysis_module
 from local_raw import config as config_module
 from local_raw import export as export_module
 from local_raw import photos_import as photos_module
+from local_raw.exif import (
+    TAG_DATETIME_ORIGINAL,
+    TAG_EXIF_IFD,
+    TAG_FOCAL_LENGTH,
+    TAG_ISO,
+    TAG_LENS_MODEL,
+)
 from local_raw.export import export_batch, normalize_batch_name
 
 CAPTURE = "DSC02943"
@@ -50,10 +60,14 @@ class ExportTestCase(unittest.TestCase):
             PROJECT_ROOT=self.project_root,
             OUTPUT_ROOT=self.output_root,
             EXPORT_ROOT=self.export_root,
-            ANALYSIS_PATH=self.analysis_path,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 解析キャッシュの実体は `analysis` 側が持つ（export は
+        # `analysis.read_cached_analysis()` 経由でしか読まない）。
+        analysis_patcher = patch.object(analysis_module, "ANALYSIS_PATH", self.analysis_path)
+        analysis_patcher.start()
+        self.addCleanup(analysis_patcher.stop)
         # 現像元フォルダはモジュール定数ではなく `config.source_root()` で
         # 呼び出し時に解決されるので、定数差し替えではなく関数を差し替える。
         self.patch_source_root(self.source_root)
@@ -63,11 +77,19 @@ class ExportTestCase(unittest.TestCase):
         source_patcher.start()
         self.addCleanup(source_patcher.stop)
 
-    def write_analysis(self):
+    def write_analysis(self, root: Path | None = None):
+        """`root`（既定は現在の現像元フォルダ）の解析結果としてキャッシュを書く。
+
+        `analysis.read_cached_analysis()` はフォルダ署名で有効性を判定するので、
+        署名を入れずに書くと常に無効扱いになる。署名は書き込み時点のフォルダ内容から
+        計算されるため、写真を足す場合は `write_analysis()` より**先に**置くこと。
+        """
+        target = root if root is not None else self.source_root
         self.analysis_path.write_text(
             json.dumps(
                 {
-                    "analysis_version": 2,
+                    "analysis_version": analysis_module.ANALYSIS_VERSION,
+                    analysis_module.SIGNATURE_KEY: analysis_module._source_signature(target),
                     "photos": {
                         CAPTURE: {
                             "capture_id": CAPTURE,
@@ -205,8 +227,9 @@ class ManifestTests(ExportTestCase):
                 self.assertIsNone(item["exif"])
 
     def test_was_recommended_is_false_for_non_recommended_capture(self):
-        self.write_analysis()
+        # 解析キャッシュの署名はフォルダ内容から計算されるので、写真を足してから書く。
         (self.source_root / f"{OTHER_CAPTURE}.JPG").write_bytes(b"other-camera-jpeg")
+        self.write_analysis()
         result = export_batch("trip08", [{"capture_id": OTHER_CAPTURE, "variant": "camera_jpg"}])
         self.assertFalse(self.read_manifest(result)["items"][0]["group"]["was_recommended"])
 
@@ -217,6 +240,12 @@ class ManifestTests(ExportTestCase):
 
     def test_broken_analysis_json_is_ignored(self):
         self.analysis_path.write_text("{ not json", encoding="utf-8")
+        result = export_batch("trip08", [self.both_items()[0]])
+        self.assertIsNone(self.read_manifest(result)["items"][0]["group"])
+
+    def test_analysis_with_invalid_utf8_is_ignored(self):
+        """壊れ方が「不正な UTF-8」でも書き出しは続行する（500 にしない）。"""
+        self.analysis_path.write_bytes(b"\xff\xfe not utf-8 \x00\x80")
         result = export_batch("trip08", [self.both_items()[0]])
         self.assertIsNone(self.read_manifest(result)["items"][0]["group"])
 
@@ -259,6 +288,80 @@ class OutsideProjectSourceRootTests(ExportTestCase):
         result = export_batch("trip08", [{"capture_id": OTHER_CAPTURE, "variant": "camera_jpg"}])
         self.assertEqual(result["files"], [])
         self.assertEqual(result["skipped"][0]["capture_id"], OTHER_CAPTURE)
+
+
+class StaleAnalysisAfterFolderSwitchTests(ExportTestCase):
+    """フォルダ A の解析結果が残ったまま B を書き出しても A のメタデータを載せないこと。
+
+    `capture_id` はカメラの連番なので、カードが違えば別の写真に同じ ID が付く。
+    B の解析を走らせないまま（または解析が失敗したまま）書き出すと、コピーされる実体は
+    B なのに manifest の `exif` / `group` だけ A のもの、という取り違えが起きうる。
+    """
+
+    #: B の実ファイルに埋める EXIF。A の解析値（3200 / 10.7）と混同しない値にする。
+    B_CAPTURED_AT = "2026:03:04 05:06:07"
+    B_ISO = 125
+    B_LENS_MODEL = "FE 24mm F1.4 GM"
+    B_FOCAL_LENGTH = 24.0
+    #: A の解析結果（`write_analysis()` が書く値）。
+    A_CAPTURED_AT = "2025-06-09T00:35:11"
+    A_ISO = 3200
+
+    def setUp(self):
+        super().setUp()
+        # 1. フォルダ A（setUp の source_root）の解析結果をキャッシュに残す。
+        self.write_analysis()
+        # 2. 同じ capture_id を持つ別カード B へ切り替える（B の解析は走らせない）。
+        card_b = tempfile.TemporaryDirectory()
+        self.addCleanup(card_b.cleanup)
+        self.card_b = Path(card_b.name).resolve() / "DCIM" / "101MSDCF"
+        self.card_b.mkdir(parents=True, exist_ok=True)
+        self.write_jpeg_with_exif(self.card_b / f"{CAPTURE}.JPG")
+        (self.card_b / f"{CAPTURE}.ARW").write_bytes(b"card-b-raw")
+        self.patch_source_root(self.card_b)
+
+    def write_jpeg_with_exif(self, path: Path):
+        """B の写真として EXIF 付きの合成 JPEG を書く（`tests/test_exif.py` と同じ流儀）。"""
+        image = Image.new("RGB", (16, 12), (30, 60, 90))
+        exif = image.getexif()
+        ifd = exif.get_ifd(TAG_EXIF_IFD)
+        ifd[TAG_DATETIME_ORIGINAL] = self.B_CAPTURED_AT
+        ifd[TAG_ISO] = self.B_ISO
+        ifd[TAG_LENS_MODEL] = self.B_LENS_MODEL
+        ifd[TAG_FOCAL_LENGTH] = self.B_FOCAL_LENGTH
+        image.save(path, "JPEG", exif=exif.tobytes())
+
+    def export_one(self):
+        result = export_batch("trip09", [{"capture_id": CAPTURE, "variant": "camera_jpg"}])
+        return self.read_manifest(result)["items"][0]
+
+    def test_exif_comes_from_the_new_folder_not_the_stale_analysis(self):
+        exif = self.export_one()["exif"]
+
+        self.assertEqual(exif["iso"], self.B_ISO)
+        self.assertEqual(exif["lens_model"], self.B_LENS_MODEL)
+        self.assertEqual(exif["focal_length"], self.B_FOCAL_LENGTH)
+        self.assertEqual(exif["captured_at"], self.B_CAPTURED_AT)
+        self.assertNotEqual(exif["captured_at"], self.A_CAPTURED_AT)
+
+    def test_group_is_dropped_because_the_analysis_is_for_another_folder(self):
+        """`group` は実ファイルへのフォールバックが無いので、混入すれば必ず A 由来。"""
+        self.assertIsNone(self.export_one()["group"])
+
+    def test_copied_bytes_are_from_the_new_folder(self):
+        item = self.export_one()
+        copied = self.export_root / "trip09" / f"{CAPTURE}.JPG"
+        self.assertEqual(copied.read_bytes(), (self.card_b / f"{CAPTURE}.JPG").read_bytes())
+        self.assertEqual(item["source"]["jpg"], str(self.card_b / f"{CAPTURE}.JPG"))
+
+    def test_analysis_for_the_current_folder_is_still_used(self):
+        """B を解析し直せば（署名が一致すれば）これまでどおり解析結果が載る。"""
+        self.write_analysis(root=self.card_b)
+        item = self.export_one()
+
+        self.assertEqual(item["exif"]["iso"], self.A_ISO)
+        self.assertEqual(item["exif"]["captured_at"], self.A_CAPTURED_AT)
+        self.assertEqual(item["group"]["id"], 41)
 
 
 class BatchNameTests(ExportTestCase):
