@@ -24,6 +24,7 @@ import numpy as np
 import rawpy
 from PIL import Image, ImageEnhance
 
+from . import config
 from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
 from .lens import apply_lens_correction, probe_lens
 from .presets import (
@@ -35,7 +36,8 @@ from .presets import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"
+# 現像元フォルダはユーザーが切り替えられるため定数にしない（契約 §9）。
+# 参照は `config.source_root()` で**呼び出し時に**解決する。
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "developed"
 PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
@@ -75,7 +77,6 @@ __all__ = [
     "PREVIEW_ROOT",
     "PRESETS",
     "PROJECT_ROOT",
-    "SOURCE_ROOT",
     "RawDevelopmentError",
     "develop_raw",
     "preset_infos",
@@ -88,6 +89,19 @@ def _validate_capture_id(capture_id: str) -> str:
     if not CAPTURE_ID_PATTERN.fullmatch(normalized):
         raise RawDevelopmentError("無効な撮影IDです。DSC00000形式で指定してください。")
     return normalized
+
+
+def _relative_path(path: Path) -> str:
+    """プロジェクト相対の文字列パス。相対化できない場合は絶対パスのまま返す。
+
+    現像元フォルダはユーザーが任意の場所（`~/Pictures`・外部ボリューム等）を選べるので、
+    `relative_to()` を素で使うと `ValueError` → HTTP 400 になり、プロジェクト外フォルダの
+    現像が全滅する。`export._relative_path()` と同じ流儀。
+    """
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _sha256(path: Path) -> str:
@@ -122,11 +136,17 @@ def _params_hash(
     max_edge: int,
     preview: bool,
     lens_applied: bool,
+    source_root: str,
 ) -> str:
     """キャッシュキー（契約 §1）。
 
     出力に影響する全要素の canonical JSON から sha1 先頭10文字を取る純粋関数。
     数値は `resolve_adjustments` が float に正規化済みなので int/float 差では揺れない。
+
+    `source_root`（**解決済み**の現像元フォルダの絶対パス文字列）を含めるのは、
+    `capture_id` がカメラの連番でカードをまたぐと衝突するため。これが無いと、
+    別フォルダの同名 ID を同じプリセットで現像したときに
+    **他人の写真の現像結果が `cached: true` で返る**。
     """
     payload = {
         "adjustments": adjustments,
@@ -134,6 +154,7 @@ def _params_hash(
         "max_edge": int(max_edge),
         "preview": bool(preview),
         "lens_applied": bool(lens_applied),
+        "source_root": str(source_root),
         "versions": {
             "engine": ENGINE_VERSION,
             "rawpy": rawpy.__version__,
@@ -348,11 +369,14 @@ def develop_raw(
     resolved = resolve_adjustments(preset_name, adjustments)
     preset_label = PRESETS[preset_name]["label"]
 
-    source_path = (SOURCE_ROOT / f"{capture_id}.ARW").resolve()
-    if source_path.parent != SOURCE_ROOT.resolve() or not source_path.is_file():
+    # 現像元フォルダは1リクエストにつき1回だけ解決し、パス組み立て・トラバーサル検査・
+    # params_hash の全てで同じ値を使う（途中で切り替わってもリクエスト内では一貫させる）。
+    source_root = config.source_root().resolve()
+    source_path = (source_root / f"{capture_id}.ARW").resolve()
+    if source_path.parent != source_root or not source_path.is_file():
         raise RawDevelopmentError(f"ARWが見つかりません: {capture_id}.ARW")
 
-    source_jpg = SOURCE_ROOT / f"{capture_id}.JPG"
+    source_jpg = source_root / f"{capture_id}.JPG"
     capture_exif = read_capture_exif(source_jpg) if source_jpg.is_file() else {}
 
     # レンズ解決は RAW デコード（10〜20秒）の前に済ませる。
@@ -360,7 +384,12 @@ def develop_raw(
     lens_resolution = probe_lens(capture_exif)
 
     params_hash = _params_hash(
-        resolved, preset_name, effective_max_edge, preview, lens_resolution.applicable
+        resolved,
+        preset_name,
+        effective_max_edge,
+        preview,
+        lens_resolution.applicable,
+        str(source_root),
     )
 
     destination_root = PREVIEW_ROOT if preview else OUTPUT_ROOT
@@ -429,7 +458,7 @@ def develop_raw(
         "exif_inherited": exif_inherited,
         "makernote": "dropped",
         "source": {
-            "path": str(source_path.relative_to(PROJECT_ROOT)),
+            "path": _relative_path(source_path),
             "sha256": _sha256(source_path),
             "size_bytes": source_path.stat().st_size,
         },
@@ -440,7 +469,7 @@ def develop_raw(
             "pillow_version": Image.__version__,
         },
         "output": {
-            "path": str(output_path.relative_to(PROJECT_ROOT)),
+            "path": _relative_path(output_path),
             "width": image.width,
             "height": image.height,
             "format": "JPEG",

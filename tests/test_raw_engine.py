@@ -157,6 +157,7 @@ class ParamsHashTests(unittest.TestCase):
             "max_edge": 6000,
             "preview": False,
             "lens_applied": True,
+            "source_root": "/Volumes/CARD-A/DCIM/100MSDCF",
         }
         base.update(kwargs)
         return _params_hash(**base)
@@ -185,6 +186,23 @@ class ParamsHashTests(unittest.TestCase):
         self.assertNotEqual(baseline, self._hash(max_edge=3000))
         self.assertNotEqual(baseline, self._hash(preview=True))
         self.assertNotEqual(baseline, self._hash(lens_applied=False))
+
+    def test_changes_with_source_root(self):
+        """同じ capture_id・同じプリセットでも、フォルダが違えばキャッシュキーは別。
+
+        capture_id はカメラの連番なのでカードをまたぐと衝突する。ここが同一だと
+        別フォルダの写真に対して他人の現像結果が cached:true で返る。
+        """
+        baseline = self._hash()
+        self.assertNotEqual(baseline, self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"))
+        # 末尾スラッシュのような表記揺れも別キーになる（解決済みパスを渡す前提）。
+        self.assertNotEqual(baseline, self._hash(source_root="/Volumes/CARD-A/DCIM/100MSDCF/"))
+
+    def test_is_stable_for_the_same_source_root(self):
+        self.assertEqual(
+            self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"),
+            self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"),
+        )
 
     def test_int_and_float_adjustments_hash_identically(self):
         # resolve_adjustments が float 正規化するので 0 と 0.0 は同じキーになる

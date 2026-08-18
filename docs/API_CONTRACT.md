@@ -7,6 +7,12 @@
 >
 > 凍結日: 2026-08-10 / 出典: `.claude/plans/vectorized-snacking-falcon-agent-ad862d8a7d0ff47d3.md` §d・§f
 > TypeScript 側の写し: `app/lib/types.ts`（同じく凍結）
+>
+> **追補 2026-08-18（現像元フォルダの選択・ユーザー承認済み）**:
+> `GET/POST /api/source-folder` を §1 に追加、サムネイル命名を §4 で変更、
+> `params_hash` に現像元フォルダのパスを追加（§1）、`SOURCE_ROOT` 定数を
+> `config.source_root()` の呼び出し時解決へ置換（§9）。
+> `Analysis.source.root` の整形を `SourceFolderInfo.display_path` と共通化（§3）。
 
 ---
 
@@ -76,6 +82,57 @@ PresetInfo = { name:string, label:string, description:string,
 body { force?:boolean } → { status:"started"|"already_running"|"ready" }
 ```
 
+### `GET /api/source-folder` → `SourceFolderInfo`
+
+### `POST /api/source-folder` → `SourceFolderInfo`
+
+```
+body { path:string }        // 絶対パス。保存に成功したときのみ 200
+→ SourceFolderInfo
+
+SourceFolderInfo = {
+  path:string,              // 解決済みの絶対パス
+  display_path:string,      // 表示用。プロジェクト配下→プロジェクト相対 /
+                            // ホーム配下→"~/..." / それ以外→絶対パス
+  is_default:boolean,       // 既定（sample/100MSDCF）かどうか
+  exists:boolean,
+  readable:boolean,         // 実際に1エントリ読めたか（0組との区別に必須）
+  pairs:number,             // JPG/ARW 両方そろった組数
+  jpg_only:number,
+  arw_only:number,
+  total_bytes:number
+}
+```
+
+- 件数は `analysis.scan_pairs()` の結果をそのまま使う（重複実装しない）。
+- 対象は **JPEG+RAW ペアのみ**（`DSC#####.JPG` と `DSC#####.ARW` の同名ペア）。
+  RAW 単独フォルダ・他機種は対象外。`CAPTURE_ID_PATTERN` と `/source-jpg/` の
+  12文字検証は現状維持。
+- `GET` は設定が無い / 壊れている / 保存先がもう存在しない場合、既定フォルダの情報を返す（エラーにしない）。
+- 読み取れて **0 組**の場合は**エラーにせず保存**し、`pairs: 0` を返す
+  （ユーザーが後からファイルを置くことがあるため）。
+
+POST のエラーは全て **400** で `{ "error": string, "reason": string }`:
+
+| reason | 条件 | 保存 |
+|---|---|---|
+| `invalid` | `path` が文字列でない / 空 / 絶対パスでない / パスとして不正（NUL・長さ超過等） | しない |
+| `not_found` | 存在しない | しない |
+| `not_directory` | ディレクトリでない | しない |
+| `permission_denied` | 読み取り不可（`os.scandir` が `PermissionError`） | **しない** |
+| `analysis_running` | 解析ジョブ実行中 | **しない** |
+
+- `permission_denied` を「0組」と混同させないこと。macOS は `~/Pictures` / `~/Desktop` /
+  外部ボリュームへの初回アクセスで許可を求め、拒否されると `PermissionError` になる
+  （`Path.glob` はこれを握り潰すので、`readable` の判定には `os.scandir` を使う）。
+  メッセージはシステム設定での許可を案内する。
+- §0 の共通 400（64KiB 超過・不正 JSON 等）もこのエンドポイントでは
+  `reason: "invalid"` を付けて形を揃える。
+- **フォルダを切り替えると解析キャッシュは自動的に無効**になる（署名にルートパスを含むため）。
+  切り替え直後の `GET /api/analysis` は `{"status":"absent"}` を返すので、
+  フロントは `POST /api/analyze` で再解析を促すこと。現像キャッシュとサムネイルは
+  フォルダごとにキーが分かれるので、元のフォルダに戻せばそのまま再利用される。
+
 ### `POST /api/raw-develop`
 
 ```
@@ -108,7 +165,11 @@ DevelopedResult = {
 #### キャッシュキー（既存バグの解消）
 
 `params_hash` = `sha1(canonical JSON of { 解決後 adjustments, preset名, max_edge,
-rawpy/Pillow/engine バージョン, lensfun 適用有無 })[:10]`
+rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォルダの解決済み絶対パス** })[:10]`
+
+- **現像元フォルダのパスを必ず含める**（2026-08-18 追補）。`capture_id` はカメラの連番なので
+  カードが違えば別の写真に同じ ID が付く。含めないと、別フォルダの同名 ID を同じプリセットで
+  現像したときに**他人の写真の現像結果が `cached: true` で返る**。
 
 - ファイル名に `hash10` として埋め込む。
 - **ヒット判定はレシピJSON内の `params_hash` の完全一致**で行う
@@ -144,7 +205,7 @@ body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist
 | `GET /outputs/<file>` | `outputs/developed/` | 既存 |
 | `GET /preview/<file>` | `outputs/preview/` | 新規（Wave 1-B） |
 | `GET /thumbs/<file>` | `outputs/thumbnails/` | 新規（Wave 1-B） |
-| `GET /source-jpg/<DSCxxxxx.JPG>` | `sample/100MSDCF/` | 既存 |
+| `GET /source-jpg/<DSCxxxxx.JPG>` | 現像元フォルダ（`config.source_root()`。既定 `sample/100MSDCF/`） | 既存 |
 
 - いずれも `resolve()` 後に親ディレクトリが所定のルートと一致することを検証する（パストラバーサル防止、現状維持）。
 - `/source-jpg/` のファイル名検証（現状維持）: `DSC` 始まり・`.JPG` 終わり・**長さ12文字**・4〜8文字目が数字。
@@ -189,7 +250,8 @@ Adjustments = {
 ```
 Analysis = {
   analysis_version: 2, generated_at: string,
-  source: { root:string, pairs:number, jpg_only:number, arw_only:number, total_bytes:number },
+  source: { root:string,         // 表示用。SourceFolderInfo.display_path と同じ整形
+            pairs:number, jpg_only:number, arw_only:number, total_bytes:number },
   summary: { groups:number, raw_candidates:number, needs_review:number },
   photos: Record<string, PhotoInfo>,
   groups: GroupInfo[]
@@ -201,7 +263,7 @@ PhotoInfo = { capture_id, captured_at, iso, f_number, shutter, focal_length,
   sharpness_score:number,        // グループ内正規化 0-100
   highlight_clip_ratio:number, shadow_clip_ratio:number, mean_luma:number,
   overall_score:number,
-  thumb:string }                 // 例 "/thumbs/DSC02703.webp"
+  thumb:string }                 // 例 "/thumbs/3f9a1c02-DSC02703.webp"（§4 の命名）
 
 GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
   title:string,                  // 例 "10:42 連写 3枚"
@@ -225,10 +287,19 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 |---|---|
 | 現像JPEG | `{capture_id}-{preset}-{hash10}.jpg` 例: `DSC02943-nightscape-a1b2c3d4e5.jpg` |
 | レシピJSON | 上記と同一ステム + `.json` |
-| サムネイル | `{capture_id}.webp`（長辺640 / quality 80） |
+| サムネイル | `{root_key}-{capture_id}.webp`（長辺640 / quality 80） |
 | 解析キャッシュ | `analysis.json` |
 
 `hash10` は §1 の `params_hash`（sha1 先頭10文字）。
+
+`root_key` は**現像元フォルダの解決済み絶対パスの sha1 先頭8文字**（`config.root_key_for()`）。
+`capture_id` はカメラの連番でカードをまたぐと衝突するため、接頭辞が無いと別フォルダの解析が
+サムネイルを上書きする。**サブディレクトリは掘らずフラットな接頭辞にする**こと:
+`server._serve_from_root()` が `resolve()` 後の親ディレクトリ一致でパストラバーサルを弾いており、
+ネストするとこの防御を緩める必要が出る。
+
+> 旧命名のサムネイル `outputs/thumbnails/{capture_id}.webp` は**無視する。削除しない**
+> （ヒットしなくなるだけ）。
 
 > 既存キャッシュ `outputs/developed/{id}-{preset}.jpg`（旧命名、数件）は新命名移行後は**無視する。削除しない**。
 
@@ -241,6 +312,7 @@ outputs/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
+  config.json   現像元フォルダ等の設定             （HTTP直接配信なし。/api/source-folder 経由）
 ```
 
 `outputs/` 全体が `.gitignore` 済み。JSON の書き込みは全て **tmp + `os.replace`** のアトミック方式
@@ -340,9 +412,32 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 - `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
 - `DEFAULT_PRESET = "neutral_recovery"`
 
+### `local_raw/config.py`（2026-08-18 追補）
+
+現像元フォルダの検証・永続化。保存先は `outputs/config.json`（tmp + `os.replace` のアトミック書き込み）。
+
+- `DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"`
+- `source_root() -> Path` — 現在の設定を解決して返す。設定が無い / 壊れている / 保存先がもう
+  存在しない場合は `DEFAULT_SOURCE_ROOT` にフォールバックし、**例外は投げない**。
+  「読めないだけ」のフォルダはフォールバックしない（UI が許可を案内できるようにするため）
+- `set_source_root(path, *, analysis_running: bool = False) -> Path` — 検証して保存。
+  失敗は `SourceFolderError`（`ValueError` 派生・`reason` 属性つき）で、**保存しない**
+- `root_key_for(path) -> str` / `source_root_key() -> str` — sha1 先頭8文字（§4 の `root_key`）。
+  内部で必ず `resolve()` し、`params_hash` に混ぜるパス文字列と正規化を共有する
+- `display_path(path) -> str` — §1 の `display_path`
+- `source_folder_info(root=None) -> dict` — §1 の `SourceFolderInfo`（件数は `scan_pairs()` 由来）
+
+> ⚠️ **どのモジュールでも `SOURCE_ROOT = config.source_root()` のようにモジュールレベルで
+> 束縛しないこと。** import 時に固定され、フォルダ切り替えが半分しか効かなくなる。
+> 参照はすべてリクエスト処理時の関数呼び出しで解決する。
+
 ### `local_raw/engine.py`（所有: Wave 1-A）
 
-- 既存 export 維持: `SOURCE_ROOT` / `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
+- 既存 export 維持: `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
+- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。現像元フォルダは `config.source_root()` で
+  **呼び出し時に**解決する。`develop_raw()` は 1 リクエストにつき 1 回だけ解決し、パス組み立て・
+  トラバーサル検査・`params_hash` で同じ値を使う。レシピの `source.path` は
+  プロジェクト外フォルダでも壊れないよう相対化に失敗したら絶対パスのまま入る
 - 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
 - `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
   — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
@@ -354,6 +449,11 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 ### `local_raw/analysis.py`（所有: Wave 1-B）
 
 - `THUMBS_ROOT = PROJECT_ROOT / "outputs" / "thumbnails"`（`/thumbs/` 配信元）
+- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。`scan_pairs()` / `_source_signature()` /
+  `read_cached_analysis()` / `build_analysis()` は引数省略時に `config.source_root()` を
+  呼び出し時解決する。`_source_signature()` は**解決済みルートパスを署名に含む**
+  （含めないと似た構成の別フォルダで解析キャッシュが流用される）
+- `is_analysis_running() -> bool` — `POST /api/source-folder` の `analysis_running` 判定用
 - 分析ジョブ管理（開始/状態取得）の内部 API は 1-B が自由に設計してよい（server.py も 1-B 所有のため外部契約は §1 の HTTP 契約のみ）
 
 ### 並列作業の約束事

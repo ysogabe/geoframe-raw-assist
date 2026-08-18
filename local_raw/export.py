@@ -4,7 +4,7 @@
 マニフェスト仕様: プラン §3
 
 方針:
-- コピー元は `SOURCE_ROOT` / `OUTPUT_ROOT` 配下に `resolve()` 済みで限定する。
+- コピー元は現像元フォルダ（`config.source_root()`）/ `OUTPUT_ROOT` 配下に `resolve()` 済みで限定する。
 - コピー先は `outputs/export/<batch_name>/` 配下限定。元ファイルは一切変更しない。
 - **入力の検証・セキュリティ違反は `ValueError`（→ HTTP 400）**、
   **ファイルが単に存在しないだけなら `skipped[]` に積んでバッチは続行**する。
@@ -21,7 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT, SOURCE_ROOT
+from . import config
+from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT
 
 EXPORT_ROOT = PROJECT_ROOT / "outputs" / "export"
 ANALYSIS_PATH = PROJECT_ROOT / "outputs" / "analysis" / "analysis.json"
@@ -237,7 +238,8 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
 
     export_dir = export_dir_for(normalized_batch)
     analysis = _load_analysis()
-    source_root = SOURCE_ROOT.resolve()
+    # バッチ全体で同じフォルダを見る（途中で切り替えられても混ざらない）。
+    source_root = config.source_root().resolve()
 
     copies: list[tuple[Path, Path]] = []
     manifest_items: list[dict[str, Any]] = []
@@ -252,8 +254,8 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         if variant not in VARIANTS:
             raise ValueError("variant は camera_jpg か developed を指定してください。")
 
-        source_jpg = _resolve_within(SOURCE_ROOT, f"{capture_id}.JPG")
-        source_arw = _resolve_within(SOURCE_ROOT, f"{capture_id}.ARW")
+        source_jpg = _resolve_within(source_root, f"{capture_id}.JPG")
+        source_arw = _resolve_within(source_root, f"{capture_id}.ARW")
         recipe: dict[str, Any] | None = None
 
         if variant == "camera_jpg":
@@ -310,9 +312,7 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
             "app": APP_NAME,
             "batch_name": normalized_batch,
             "created_at": datetime.now(UTC).isoformat(),
-            "source_root": str(source_root.relative_to(PROJECT_ROOT))
-            if source_root.is_relative_to(PROJECT_ROOT)
-            else str(source_root),
+            "source_root": _relative_path(source_root),
             "items": manifest_items,
         },
     )
