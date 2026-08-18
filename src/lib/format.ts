@@ -1,4 +1,12 @@
-import type { Adjustments, AnalysisStage, GroupKind, PhotoInfo, RawLevel } from "./types";
+import type {
+  Adjustments,
+  AnalysisStage,
+  GroupKind,
+  PhotoInfo,
+  RawLevel,
+  SourceFolderErrorReason,
+  SourceFolderInfo,
+} from "./types";
 
 const DASH = "—";
 
@@ -161,4 +169,54 @@ const LENS_REASON_LABELS: Record<string, string> = {
 export function lensReasonLabel(reason: string | undefined): string {
   if (!reason) return "適用なし";
   return LENS_REASON_LABELS[reason] ?? reason;
+}
+
+// ---------------------------------------------------------------------------
+// 現像対象フォルダ
+// ---------------------------------------------------------------------------
+
+/**
+ * 読み取り許可が無いときの案内。macOS は ~/Pictures / ~/Desktop / 外部ボリュームへの
+ * 初回アクセスで許可ダイアログを出し、拒否されると以後読めなくなる。
+ * 「フォルダに写真が無い」と取り違えられないよう、専用の文言を必ず出すこと。
+ */
+export const SOURCE_FOLDER_PERMISSION_HELP =
+  "このフォルダを読み取る許可がありません。システム設定 > プライバシーとセキュリティ > ファイルとフォルダ で許可してから、もう一度選び直してください。";
+
+/** ペアが1組も無いフォルダを選んだとき。保存自体は成功しているので、エラーではなく注意として出す。 */
+export const SOURCE_FOLDER_NO_PAIRS =
+  "このフォルダには DSC#####.JPG と DSC#####.ARW のペアが見つかりません。別のフォルダを選び直してください。";
+
+/** Python 側が未対応・停止しているときにフォルダ変更を試した場合。 */
+export const SOURCE_FOLDER_UNAVAILABLE = "現像対象フォルダの変更を準備中です。しばらくしてからお試しください。";
+
+/**
+ * POST /api/source-folder の失敗をユーザー向けの文にする。
+ * invalid / not_found / not_directory はサーバの文言がそのまま十分に具体的なので素通しする。
+ */
+export function sourceFolderErrorMessage(
+  reason: SourceFolderErrorReason | null,
+  serverMessage: string,
+): string {
+  switch (reason) {
+    case "permission_denied":
+      return SOURCE_FOLDER_PERMISSION_HELP;
+    case "analysis_running":
+      return "解析の実行中はフォルダを変更できません。解析が終わってからやり直してください。";
+    default:
+      return serverMessage || "現像対象フォルダを変更できませんでした。";
+  }
+}
+
+/**
+ * 選択中フォルダそのものの不調（保存後に外部ボリュームが外れた／許可を取り消された／
+ * ペアが無い）を表す短い注記。サイドバーは幅が狭いので1行に収まる長さにし、
+ * 長い案内が要る permission 系はトースト側（SOURCE_FOLDER_PERMISSION_HELP）で補う。
+ * 問題が無ければ null。
+ */
+export function sourceFolderIssue(info: SourceFolderInfo): string | null {
+  if (!info.exists) return "フォルダが見つかりません";
+  if (!info.readable) return "読み取りできません";
+  if (info.pairs === 0) return "JPG/ARWのペアなし";
+  return null;
 }

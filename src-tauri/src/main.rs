@@ -538,6 +538,12 @@ fn main() {
         .manage(RawEngineState(Mutex::new(None)))
         .manage(Mutex::new(SetupState::new("ready", "")))
         .invoke_handler(tauri::generate_handler![setup_status])
+        // Native folder picker for the source-folder setting. The frontend
+        // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;
+        // the matching `dialog:allow-open` permission lives in
+        // capabilities/default.json. Browser mode (`npm run dev`) has no
+        // plugin at all and falls back to a path text field instead.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
 

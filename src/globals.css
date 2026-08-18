@@ -419,3 +419,18 @@ img { display: block; max-width: 100%; }
 }
 
 .gate-log { margin: 16px auto 0; width: min(420px, 100%); max-height: 160px; overflow-y: auto; text-align: left; background: #131b19; color: #b8c4bf; border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+
+.status-dot.warn { background: #d59a4a; box-shadow: 0 0 0 4px rgba(213,154,74,.12); }
+.source-folder-note { margin: 8px 9px 0; color: #8ea29c; font-size: 11px; line-height: 1.5; }
+.source-folder-note.warn { color: #e2a765; }
+.source-folder-form { margin-top: 10px; display: grid; gap: 7px; }
+.source-folder-label { padding: 0 1px; color: #6f8580; font-size: 10px; font-weight: 800; letter-spacing: .4px; }
+.source-folder-input { width: 100%; min-width: 0; border: 1px solid #2e3d39; border-radius: 8px; background: #16211f; color: #e3ebe8; padding: 8px 9px; font-size: 11px; }
+.source-folder-input::placeholder { color: #64756f; }
+.source-folder-input:focus-visible { outline: 2px solid rgba(94,188,156,.5); outline-offset: 1px; }
+.source-folder-input:disabled { opacity: .45; cursor: not-allowed; }
+.source-folder-button { width: 100%; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #354642; border-radius: 8px; background: #202d2a; color: #cfe0da; padding: 9px 10px; font-size: 12px; font-weight: 800; cursor: pointer; }
+.source-folder-form .source-folder-button { margin-top: 0; }
+.source-folder-button span { color: #5ebc9c; font-size: 13px; }
+.source-folder-button:hover:not(:disabled) { background: #263431; color: #fff; }
+.source-folder-button:disabled { opacity: .42; cursor: not-allowed; }

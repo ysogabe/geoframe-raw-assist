@@ -388,3 +388,57 @@ export type ExportManifest = {
   source_root: string;
   items: ManifestItem[];
 };
+
+// ---------------------------------------------------------------------------
+// 現像対象フォルダ — GET /api/source-folder, POST /api/source-folder
+//
+// 本セクションは凍結（2026-08-10）後の追加分である。既存の契約型には一切手を
+// 触れていない。Python 側の実装と対になっており、変更する場合は両方を同時に
+// 直すこと。
+// ---------------------------------------------------------------------------
+
+/**
+ * 現在の現像対象フォルダの情報。GET / POST いずれも成功時はこの形を返す。
+ * `pairs` などの枚数は保存時点でのスキャン結果であり、`GET /api/analysis` の
+ * `AnalysisSource` とは取得タイミングが違うため一致しないことがある。
+ * フォルダそのものの正は常にこちら側。
+ */
+export type SourceFolderInfo = {
+  /** 解決済みの絶対パス */
+  path: string;
+  /** 表示用。プロジェクト相対 / "~/..." / 絶対のいずれか */
+  display_path: string;
+  /** 既定の sample/100MSDCF のままかどうか */
+  is_default: boolean;
+  exists: boolean;
+  /** 読み取り可能か。false は macOS のアクセス許可が無い場合を含む */
+  readable: boolean;
+  /** JPG/ARW 両方そろった組数 */
+  pairs: number;
+  jpg_only: number;
+  arw_only: number;
+  total_bytes: number;
+};
+
+export type SourceFolderRequest = {
+  path: string;
+};
+
+/**
+ * POST /api/source-folder が HTTP 400 で返す失敗理由。
+ * `permission_denied` は「写真が無い」ではなく macOS のアクセス許可の問題なので、
+ * UI では必ず専用の案内（システム設定 > プライバシーとセキュリティ）を出すこと。
+ * 将来の追加に備え string との union にしてある。
+ */
+export type SourceFolderErrorReason =
+  | "invalid"
+  | "not_found"
+  | "not_directory"
+  | "permission_denied"
+  | "analysis_running"
+  | (string & {});
+
+/** POST /api/source-folder の失敗レスポンス（HTTP 400）。 */
+export type SourceFolderErrorResponse = ErrorResponse & {
+  reason: SourceFolderErrorReason;
+};
