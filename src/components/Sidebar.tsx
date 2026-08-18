@@ -1,15 +1,32 @@
-import { assetUrl } from "../lib/raw-api";
 import { formatBytes } from "../lib/format";
-import type { Analysis } from "../lib/types";
+import { SourceFolderPanel } from "./SourceFolderPanel";
+import type { Analysis, SourceFolderInfo } from "../lib/types";
 
 type SidebarProps = {
   analysis: Analysis | null;
   coverThumb: string | null;
+  sourceFolder: SourceFolderInfo | null;
+  sourceFolderUnavailable: boolean;
+  sourceFolderBusy: boolean;
+  sourceFolderLocked: boolean;
+  onApplySourceFolder: (path: string) => void;
+  onSourceFolderError: (message: string) => void;
 };
 
-export function Sidebar({ analysis, coverThumb }: SidebarProps) {
+export function Sidebar({
+  analysis,
+  coverThumb,
+  sourceFolder,
+  sourceFolderUnavailable,
+  sourceFolderBusy,
+  sourceFolderLocked,
+  onApplySourceFolder,
+  onSourceFolderError,
+}: SidebarProps) {
   const source = analysis?.source ?? null;
-  const missing = source ? source.jpg_only + source.arw_only : 0;
+  // 総容量は「直近の解析時点」の値を優先する（sourceFolder 側は保存時スキャンの
+  // 値で、以後 GET し直さないため古くなりうる）。解析前だけフォルダ情報で埋める。
+  const totalBytes = source ? source.total_bytes : (sourceFolder?.total_bytes ?? null);
 
   return (
     <aside className="sidebar">
@@ -24,27 +41,20 @@ export function Sidebar({ analysis, coverThumb }: SidebarProps) {
         <button className="nav-item"><span>↻</span>処理履歴</button>
       </nav>
 
-      <div className="sidebar-section">
-        <p className="eyebrow">現在のバッチ</p>
-        <div className="batch-card">
-          <div className="batch-cover">
-            {coverThumb ? (
-              <img src={assetUrl(coverThumb)} alt="現在の撮影バッチ" loading="lazy" decoding="async" />
-            ) : (
-              <span className="batch-cover-empty" aria-hidden="true" />
-            )}
-          </div>
-          <div>
-            <strong>{source ? source.root : "未読み込み"}</strong>
-            <small>{source ? `${source.pairs}ペア・${missing === 0 ? "欠落なし" : `欠落${missing}件`}` : "解析前"}</small>
-          </div>
-          <span className="status-dot" title={analysis ? "分析完了" : "未分析"} />
-        </div>
-      </div>
+      <SourceFolderPanel
+        info={sourceFolder}
+        unavailable={sourceFolderUnavailable}
+        fallbackSource={source}
+        coverThumb={coverThumb}
+        busy={sourceFolderBusy}
+        locked={sourceFolderLocked}
+        onApply={onApplySourceFolder}
+        onError={onSourceFolderError}
+      />
 
       <div className="sidebar-spacer" />
       <div className="storage">
-        <div><span>ローカル処理</span><strong>{source ? formatBytes(source.total_bytes) : "—"}</strong></div>
+        <div><span>ローカル処理</span><strong>{totalBytes === null ? "—" : formatBytes(totalBytes)}</strong></div>
         <div className="storage-track"><span /></div>
         <small>画像は外部へ送信されません</small>
       </div>

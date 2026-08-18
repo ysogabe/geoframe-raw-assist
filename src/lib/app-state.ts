@@ -1,3 +1,4 @@
+import { SOURCE_FOLDER_PERMISSION_HELP } from "./format";
 import type {
   Adjustments,
   Analysis,
@@ -12,6 +13,7 @@ import type {
   PhotoInfo,
   PresetInfo,
   PresetName,
+  SourceFolderInfo,
 } from "./types";
 
 export type Screen = "suggestions" | "operation" | "export";
@@ -32,6 +34,12 @@ export type State = {
   analysis: Analysis | null;
   analysisError: string;
   analyzeRequested: boolean;
+  /** 現像対象フォルダ。GET /api/source-folder が唯一の正で、analysis.source より優先する。 */
+  sourceFolder: SourceFolderInfo | null;
+  /** エンドポイントが 404 / 接続不能だったとき。フォルダ変更UIを出さずに従来表示へ退避する。 */
+  sourceFolderUnavailable: boolean;
+  /** POST /api/source-folder の実行中。 */
+  sourceFolderBusy: boolean;
   selectedGroupId: number | null;
   /** グループごとの採用候補。未設定なら recommended_capture_id を使う。 */
   selectedCaptures: Record<number, CaptureId>;
@@ -64,6 +72,9 @@ export const initialState: State = {
   analysis: null,
   analysisError: "",
   analyzeRequested: false,
+  sourceFolder: null,
+  sourceFolderUnavailable: false,
+  sourceFolderBusy: false,
   selectedGroupId: null,
   selectedCaptures: {},
   acceptedGroupIds: [],
@@ -91,6 +102,11 @@ export type Action =
   | { type: "analysis/status"; response: AnalysisResponse }
   | { type: "analysis/requested" }
   | { type: "analysis/error"; message: string }
+  | { type: "source/loaded"; info: SourceFolderInfo }
+  | { type: "source/unavailable" }
+  | { type: "source/applying" }
+  | { type: "source/changed"; info: SourceFolderInfo; message: string; tone?: "info" | "error" }
+  | { type: "source/failed"; message: string }
   | { type: "screen/suggestions" }
   | { type: "screen/export" }
   | { type: "screen/operation"; groupId: number }
@@ -176,6 +192,44 @@ export function reducer(state: State, action: Action): State {
 
     case "analysis/error":
       return { ...state, analysisState: "error", analysisError: action.message, analyzeRequested: false };
+
+    case "source/loaded":
+      return {
+        ...state,
+        sourceFolder: action.info,
+        sourceFolderUnavailable: false,
+        sourceFolderBusy: false,
+        // 保存済みのフォルダが後から読めなくなる（外部ボリュームの取り外し、macOS の
+        // 許可取り消し）ことがある。サイドバーの短い注記だけでは対処が分からないため、
+        // 起動時に気づいた時点で対処方法もトーストで出す。
+        notice: action.info.exists && !action.info.readable ? SOURCE_FOLDER_PERMISSION_HELP : state.notice,
+        noticeTone: action.info.exists && !action.info.readable ? "error" : state.noticeTone,
+      };
+
+    case "source/unavailable":
+      return { ...state, sourceFolderUnavailable: true, sourceFolderBusy: false };
+
+    case "source/applying":
+      return { ...state, sourceFolderBusy: true };
+
+    case "source/changed": {
+      // フォルダが変わると capture_id の指す実体が変わる（前のフォルダの DSC02943 は
+      // 新しいフォルダでは別の写真か、存在しない）。選択・現像結果・書き出し選択を
+      // まとめて捨て、エンジン接続情報と選択中プリセットだけを引き継ぐ。
+      // 解析のやり直しは呼び出し側が beginAnalyze(true) で行う。
+      return {
+        ...initialState,
+        health: state.health,
+        engineStatus: state.engineStatus,
+        presetName: state.presetName,
+        sourceFolder: action.info,
+        notice: action.message,
+        noticeTone: action.tone ?? "info",
+      };
+    }
+
+    case "source/failed":
+      return { ...state, sourceFolderBusy: false, notice: action.message, noticeTone: "error" };
 
     case "screen/suggestions":
       return { ...state, screen: "suggestions" };

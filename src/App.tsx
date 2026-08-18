@@ -18,10 +18,18 @@ import {
   exportSelection,
   getAnalysis,
   getHealth,
+  getSourceFolder,
   importToPhotos,
   isEndpointUnavailable,
+  isSourceFolderApiError,
+  setSourceFolder,
   startAnalyze,
 } from "./lib/raw-api";
+import {
+  SOURCE_FOLDER_NO_PAIRS,
+  SOURCE_FOLDER_UNAVAILABLE,
+  sourceFolderErrorMessage,
+} from "./lib/format";
 import type { Adjustments, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
@@ -46,6 +54,13 @@ const HEALTH_CHECK_MAX_ATTEMPTS = 20; // 1000ms × 20 ≈ 20秒、冷間起動�
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/** POST /api/source-folder の失敗を、reason 別の案内文に落とす。 */
+function sourceFolderFailureMessage(error: unknown): string {
+  if (isSourceFolderApiError(error)) return sourceFolderErrorMessage(error.reason, error.message);
+  if (isEndpointUnavailable(error)) return SOURCE_FOLDER_UNAVAILABLE;
+  return messageOf(error, "現像対象フォルダを変更できませんでした。");
 }
 
 export default function Home() {
@@ -153,6 +168,36 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [state.analysisState, pollAnalysis]);
 
+  // ---- 現像対象フォルダの取得 ----------------------------------------------
+  // 解析状況と同じくエンジンが ready になってから取りに行く（コールドスタート中は
+  // 接続不能になるため）。Python 側が未対応・停止中なら静かに機能を隠し、
+  // 従来どおり analysis.source ベースの表示にフォールバックする。
+  useEffect(() => {
+    if (state.engineStatus !== "ready") return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const info = await getSourceFolder();
+        if (!cancelled) dispatch({ type: "source/loaded", info });
+      } catch (error) {
+        if (cancelled) return;
+        if (isEndpointUnavailable(error)) {
+          dispatch({ type: "source/unavailable" });
+          return;
+        }
+        dispatch({
+          type: "source/failed",
+          message: messageOf(error, "現像対象フォルダを取得できませんでした。"),
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.engineStatus]);
+
   // ---- 現像の経過秒表示（tick を進めるだけ。経過秒はレンダー時に導出する） ----
   useEffect(() => {
     if (!developMode) return;
@@ -225,6 +270,39 @@ export default function Home() {
     }
   }
 
+  async function applySourceFolder(path: string) {
+    const trimmed = path.trim();
+    if (!trimmed || state.sourceFolderBusy) return;
+    dispatch({ type: "source/applying" });
+    try {
+      const info = await setSourceFolder(trimmed);
+      // capture_id に紐づく状態（選択グループ・現像結果・書き出し選択）を捨ててから、
+      // 新しいフォルダを解析し直す。前のフォルダの DSC02943 をそのまま持ち越すと
+      // 新しいフォルダの別写真を指してしまうため、リセットは必須。
+      const noPairs = info.pairs === 0;
+      dispatch({
+        type: "source/changed",
+        info,
+        message: noPairs
+          ? SOURCE_FOLDER_NO_PAIRS
+          : `現像対象フォルダを ${info.display_path} に変更しました。解析をやり直します。`,
+        tone: noPairs ? "error" : "info",
+      });
+      if (noPairs) {
+        // ペアが1組も無いフォルダで解析を走らせても得るものが無いうえ、解析中は
+        // フォルダ変更をロックするため「別のフォルダを選び直してください」と案内
+        // しながら選び直せない状態になってしまう。フォルダ変更時点で Python 側の
+        // 解析キャッシュは無効化済み（GET /api/analysis は absent に戻る）なので、
+        // 状態を取り直すだけにして、再解析は AnalysisGate の「解析を開始」に委ねる。
+        await pollAnalysis();
+        return;
+      }
+      await beginAnalyze(true);
+    } catch (error) {
+      dispatch({ type: "source/failed", message: sourceFolderFailureMessage(error) });
+    }
+  }
+
   async function runDevelop(mode: DevelopMode) {
     if (!group || !captureId) return;
     if (state.engineStatus !== "ready") {
@@ -293,7 +371,16 @@ export default function Home() {
 
   return (
     <div className="app-shell">
-      <Sidebar analysis={analysis} coverThumb={coverThumb} />
+      <Sidebar
+        analysis={analysis}
+        coverThumb={coverThumb}
+        sourceFolder={state.sourceFolder}
+        sourceFolderUnavailable={state.sourceFolderUnavailable}
+        sourceFolderBusy={state.sourceFolderBusy}
+        sourceFolderLocked={state.analysisState === "running"}
+        onApplySourceFolder={(path) => void applySourceFolder(path)}
+        onSourceFolderError={(message) => dispatch({ type: "source/failed", message })}
+      />
 
       <main className="workspace">
         <Topbar
