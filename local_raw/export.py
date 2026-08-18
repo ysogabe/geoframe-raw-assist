@@ -25,7 +25,6 @@ from . import config
 from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT
 
 EXPORT_ROOT = PROJECT_ROOT / "outputs" / "export"
-ANALYSIS_PATH = PROJECT_ROOT / "outputs" / "analysis" / "analysis.json"
 
 MANIFEST_VERSION = 1
 APP_NAME = "geoframe-raw-assist"
@@ -39,7 +38,6 @@ MAX_ITEMS = 500
 _DISALLOWED_IN_BATCH_NAME = re.compile(r"[^A-Za-z0-9_-]")
 
 __all__ = [
-    "ANALYSIS_PATH",
     "EXPORT_ROOT",
     "MANIFEST_NAME",
     "export_batch",
@@ -121,15 +119,28 @@ def _relative_path(path: Path) -> str:
         return str(path)
 
 
-def _load_analysis() -> dict[str, Any]:
-    """`analysis.json` を読む。存在しない・壊れている場合は空 dict。"""
+def _load_analysis(source_root: Path) -> dict[str, Any]:
+    """`source_root` の解析結果だけを読む。一致しない・無い・壊れている場合は空 dict。
+
+    `capture_id` はカメラの連番なので、カードが違えば別の写真に同じ ID が付く。
+    フォルダを検証せずに `analysis.json` を読むと、切り替え後に前のフォルダの
+    メタデータが manifest に載ってしまうため、署名照合込みの
+    `analysis.read_cached_analysis()` に委ねる（不一致は `None` なので空 dict に
+    正規化し、`_exif_from_source` の実ファイル読みフォールバックへ落とす）。
+
+    `analysis` は cv2 / numpy を引く重いモジュールなので、import は呼び出し時に遅延させる
+    （`config.source_folder_info()` と同じ流儀）。
+    """
+    from . import analysis
+
     try:
-        if not ANALYSIS_PATH.is_file():
-            return {}
-        loaded = json.loads(ANALYSIS_PATH.read_text(encoding="utf-8"))
+        cached = analysis.read_cached_analysis(source_root)
     except (OSError, ValueError):
+        # `read_cached_analysis()` は OSError / JSONDecodeError は自分で握るが、
+        # 不正な UTF-8 の `UnicodeDecodeError`（= ValueError の subclass）は素通しする。
+        # 壊れたキャッシュで書き出しを 500 にしないため、ここで空 dict へ落とす。
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return cached if isinstance(cached, dict) else {}
 
 
 def _group_info(analysis: dict[str, Any], capture_id: str) -> dict[str, Any] | None:
@@ -237,9 +248,10 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         raise ValueError(f"一度に書き出せるのは{MAX_ITEMS}枚までです。")
 
     export_dir = export_dir_for(normalized_batch)
-    analysis = _load_analysis()
     # バッチ全体で同じフォルダを見る（途中で切り替えられても混ざらない）。
+    # 解析結果も同じ `source_root` で検証する（別フォルダの解析は使わない）。
     source_root = config.source_root().resolve()
+    analysis = _load_analysis(source_root)
 
     copies: list[tuple[Path, Path]] = []
     manifest_items: list[dict[str, Any]] = []
