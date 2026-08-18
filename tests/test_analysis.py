@@ -376,6 +376,87 @@ class ScanPairsTest(unittest.TestCase):
         self.assertEqual(jpg_paths, [])
 
 
+class SourceSignatureTest(unittest.TestCase):
+    """解析キャッシュの署名がフォルダごとに分かれること。
+
+    署名がファイル名一覧だけだと、同じ構成の別カード（`DSC02943.JPG` を持つ 2 枚目の
+    カード等）で前のフォルダの解析結果がそのまま有効と判定されてしまう。
+    """
+
+    def _folder(self, *names):
+        import tempfile
+        from pathlib import Path
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        for name in names:
+            (root / name).write_bytes(b"x" * 10)
+        return root
+
+    def test_identical_filenames_in_two_folders_have_different_signatures(self):
+        names = ("DSC02943.JPG", "DSC02943.ARW")
+        card_a = self._folder(*names)
+        card_b = self._folder(*names)
+        self.assertNotEqual(
+            analysis._source_signature(card_a), analysis._source_signature(card_b)
+        )
+
+    def test_signature_is_stable_for_the_same_folder(self):
+        root = self._folder("DSC02943.JPG", "DSC02943.ARW")
+        self.assertEqual(analysis._source_signature(root), analysis._source_signature(root))
+
+    def test_signature_still_changes_when_files_change(self):
+        root = self._folder("DSC02943.JPG")
+        before = analysis._source_signature(root)
+        (root / "DSC02944.JPG").write_bytes(b"x" * 10)
+        self.assertNotEqual(before, analysis._source_signature(root))
+
+    def test_missing_folders_are_distinguished_by_path(self):
+        from pathlib import Path
+
+        self.assertNotEqual(
+            analysis._source_signature(Path("/nonexistent/geoframe/a")),
+            analysis._source_signature(Path("/nonexistent/geoframe/b")),
+        )
+
+    def test_cached_analysis_is_rejected_after_the_folder_changes(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        card_a = self._folder("DSC02943.JPG", "DSC02943.ARW")
+        card_b = self._folder("DSC02943.JPG", "DSC02943.ARW")
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "analysis.json"
+            cache_path.write_text(
+                json.dumps({
+                    "analysis_version": analysis.ANALYSIS_VERSION,
+                    "photos": {},
+                    analysis.SIGNATURE_KEY: analysis._source_signature(card_a),
+                }),
+                encoding="utf-8",
+            )
+            with mock.patch.object(analysis, "ANALYSIS_PATH", cache_path):
+                self.assertIsNotNone(analysis.read_cached_analysis(card_a))
+                self.assertIsNone(analysis.read_cached_analysis(card_b))
+
+
+class IsAnalysisRunningTest(unittest.TestCase):
+    def tearDown(self):
+        with analysis._STATE_LOCK:
+            analysis._RUNNING = False
+
+    def test_reflects_the_running_flag(self):
+        with analysis._STATE_LOCK:
+            analysis._RUNNING = False
+        self.assertFalse(analysis.is_analysis_running())
+        with analysis._STATE_LOCK:
+            analysis._RUNNING = True
+        self.assertTrue(analysis.is_analysis_running())
+
+
 class ThumbnailTest(unittest.TestCase):
     def test_thumbnail_is_written_with_long_edge_640(self):
         import tempfile
@@ -386,14 +467,51 @@ class ThumbnailTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = Image.new("RGB", (2000, 1000), (120, 60, 30))
-            url = analysis.make_thumbnail(image, "DSC00001", root)
-            self.assertEqual(url, "/thumbs/DSC00001.webp")
-            written = root / "DSC00001.webp"
+            url = analysis.make_thumbnail(image, "DSC00001", root, "cafe1234")
+            self.assertEqual(url, "/thumbs/cafe1234-DSC00001.webp")
+            written = root / "cafe1234-DSC00001.webp"
             self.assertTrue(written.is_file())
             with Image.open(written) as thumb:
                 self.assertEqual(max(thumb.size), analysis.THUMB_MAX_EDGE)
                 self.assertEqual(thumb.size, (640, 320))
             self.assertEqual(list(root.glob("*.tmp.webp")), [])
+
+    def test_the_same_capture_id_in_two_folders_gets_two_thumbnails(self):
+        """capture_id はカメラの連番なので、フォルダをまたぐと衝突する。
+
+        root_key の接頭辞が無いと、後から解析したフォルダのサムネイルが
+        先のフォルダのサムネイルを上書きしてしまう。
+        """
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            card_a = analysis.make_thumbnail(
+                Image.new("RGB", (100, 50), (255, 0, 0)), "DSC02943", root, "aaaaaaaa"
+            )
+            card_b = analysis.make_thumbnail(
+                Image.new("RGB", (100, 50), (0, 0, 255)), "DSC02943", root, "bbbbbbbb")
+            self.assertNotEqual(card_a, card_b)
+            self.assertEqual(len(sorted(root.glob("*.webp"))), 2)
+
+    def test_thumbnail_name_stays_flat(self):
+        """フラットな接頭辞であること（`server._serve_from_root` の親一致検査を緩めないため）。"""
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            url = analysis.make_thumbnail(
+                Image.new("RGB", (10, 10)), "DSC00001", root, "deadbeef"
+            )
+            name = url.removeprefix("/thumbs/")
+            self.assertNotIn("/", name)
+            self.assertEqual((root / name).parent.resolve(), root.resolve())
 
 
 class StartAnalysisThreadFailureTest(unittest.TestCase):

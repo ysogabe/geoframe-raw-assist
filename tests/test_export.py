@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from local_raw import config as config_module
 from local_raw import export as export_module
 from local_raw import photos_import as photos_module
 from local_raw.export import export_batch, normalize_batch_name
@@ -47,13 +48,20 @@ class ExportTestCase(unittest.TestCase):
         patcher = patch.multiple(
             export_module,
             PROJECT_ROOT=self.project_root,
-            SOURCE_ROOT=self.source_root,
             OUTPUT_ROOT=self.output_root,
             EXPORT_ROOT=self.export_root,
             ANALYSIS_PATH=self.analysis_path,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 現像元フォルダはモジュール定数ではなく `config.source_root()` で
+        # 呼び出し時に解決されるので、定数差し替えではなく関数を差し替える。
+        self.patch_source_root(self.source_root)
+
+    def patch_source_root(self, root: Path):
+        source_patcher = patch.object(config_module, "source_root", return_value=root)
+        source_patcher.start()
+        self.addCleanup(source_patcher.stop)
 
     def write_analysis(self):
         self.analysis_path.write_text(
@@ -211,6 +219,46 @@ class ManifestTests(ExportTestCase):
         self.analysis_path.write_text("{ not json", encoding="utf-8")
         result = export_batch("trip08", [self.both_items()[0]])
         self.assertIsNone(self.read_manifest(result)["items"][0]["group"])
+
+
+class OutsideProjectSourceRootTests(ExportTestCase):
+    """現像元フォルダがプロジェクト外（`~/Pictures`・外部ボリューム等）でも壊れないこと。
+
+    フォルダ選択機能の本題のケース。`_relative_path()` が相対化できないパスを
+    絶対パスのまま返す既存挙動に依存している。
+    """
+
+    def setUp(self):
+        super().setUp()
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        self.outside_root = Path(outside.name).resolve() / "DCIM" / "100MSDCF"
+        self.outside_root.mkdir(parents=True, exist_ok=True)
+        (self.outside_root / f"{CAPTURE}.JPG").write_bytes(b"external-volume-jpeg")
+        (self.outside_root / f"{CAPTURE}.ARW").write_bytes(b"external-volume-raw")
+        self.patch_source_root(self.outside_root)
+
+    def test_copies_from_a_folder_outside_the_project(self):
+        result = export_batch("trip08", [{"capture_id": CAPTURE, "variant": "camera_jpg"}])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(len(result["files"]), 1)
+        copied = self.export_root / "trip08" / f"{CAPTURE}.JPG"
+        self.assertEqual(copied.read_bytes(), (self.outside_root / f"{CAPTURE}.JPG").read_bytes())
+
+    def test_manifest_records_absolute_paths_for_an_external_folder(self):
+        result = export_batch("trip08", [{"capture_id": CAPTURE, "variant": "camera_jpg"}])
+        manifest = self.read_manifest(result)
+        self.assertEqual(manifest["source_root"], str(self.outside_root))
+        item = manifest["items"][0]
+        self.assertEqual(item["source"]["jpg"], str(self.outside_root / f"{CAPTURE}.JPG"))
+        self.assertEqual(item["source"]["arw"], str(self.outside_root / f"{CAPTURE}.ARW"))
+
+    def test_project_relative_files_are_not_reachable_after_switching(self):
+        """切り替え後は旧フォルダ（プロジェクト内 sample/）の写真は見えない。"""
+        (self.source_root / f"{OTHER_CAPTURE}.JPG").write_bytes(b"old-folder-jpeg")
+        result = export_batch("trip08", [{"capture_id": OTHER_CAPTURE, "variant": "camera_jpg"}])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["skipped"][0]["capture_id"], OTHER_CAPTURE)
 
 
 class BatchNameTests(ExportTestCase):
