@@ -481,7 +481,11 @@ export type MergeBracketRequest = {
  * および位置合わせの実施有無 `aligned` を持つ点が異なる。
  */
 export type MergedResult = {
-  /** 合成に使ったフレーム。リクエストで送った順。 */
+  /**
+   * 合成に使ったフレーム。サーバ側で撮影IDの昇順に正規化される（リクエストで送った順ではない）。
+   * POST /api/export の `variant: "merged"` では合成ファイル名の先頭IDと一致させるため、
+   * `capture_id` に `capture_ids[0]` を渡さなければならない。
+   */
   capture_ids: CaptureId[];
   /** capture_ids.length と同じ。2〜9。 */
   frames: number;
