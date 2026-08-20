@@ -864,14 +864,20 @@ export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
   );
 }
 
-/** 現像済み（本現像）または本合成の結果を持つグループID。 */
+/**
+ * 現像済み（本現像）または本合成の結果を持つグループID。
+ *
+ * 合成の有無も groupMergeResultOf の関門を通す。直接インデックスすると、再解析でIDが
+ * 使い回されたときに別グループの合成が残っているだけで「現像済み」に数えてしまう
+ * （タブの件数と、そのグループを開いたときの表示が食い違う）。
+ */
 export function developedGroupIds(state: State): number[] {
   const groups = state.analysis?.groups ?? [];
   return groups
     .filter(
       (group) =>
         group.capture_ids.some((captureId) => state.fullResults[captureId]) ||
-        Boolean(state.mergeFullResults[group.id]),
+        Boolean(groupMergeResultOf(state.mergeFullResults, group)),
     )
     .map((group) => group.id);
 }
