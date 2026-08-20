@@ -485,8 +485,19 @@ img { display: block; max-width: 100%; }
   .bracket-frames { grid-template-columns: 1fr; }
 }
 
+/* --- 原寸ビューアの起動元（別タブで開くリンクから <button> へ置き換えた分） ---
+   デスクトップシェルでは target=_blank が無反応になるため、リンクではなく
+   ボタンで同じ見た目を出し、アプリ内のビューアを開くようにしている。 */
+button.comparison-image { width: 100%; padding: 0; border: 0; cursor: zoom-in; font: inherit; }
+button.comparison-image:hover .developed-label { background: rgba(19,29,26,.92); }
+.media-footnote button { border: 0; padding: 0; background: transparent; color: var(--green); font-size: inherit; font-weight: 800; cursor: pointer; }
+.media-footnote button:hover { text-decoration: underline; }
+.preview-open { position: absolute; inset: 0; display: grid; align-items: end; justify-items: end; padding: 9px; border: 0; background: transparent; cursor: zoom-in; }
+.preview-open span { border-radius: 5px; background: rgba(20,29,27,.78); color: white; padding: 5px 7px; font-size: 10px; font-weight: 800; opacity: 0; transition: opacity .16s ease; }
+.preview-open:hover span, .preview-open:focus-visible span { opacity: 1; }
+
 /* --- アプリ内の原寸ビューア（FullSizeViewer） ------------------------------
-   デスクトップシェルには target="_blank" を処理する経路が無い。外部ブラウザへ
+   デスクトップシェルには target=_blank を処理する経路が無い。外部ブラウザへ
    逃がす代わりにここで原寸を見せる。<dialog> を showModal() で開いているので
    Escape・フォーカストラップ・トップレイヤーはブラウザ実装に任せている
    （.toast の z-index:20 より必ず上に来るのはトップレイヤーだから）。 */

@@ -29,8 +29,8 @@ export type ComparisonView = "develop" | "merged";
 /**
  * アプリ内の原寸ビューアに渡す 2 面。
  *
- * デスクトップシェル（Tauri/WKWebView）には `target="_blank"` を処理する経路が無く、
- * 「原寸で見る」が無反応になっていた。外部ブラウザへ逃がすのではなく、
+ * デスクトップシェル（Tauri/WKWebView）には別タブで開くリンク（target=_blank）を処理する
+ * 経路が無く、「原寸で見る」が無反応になっていた。外部ブラウザへ逃がすのではなく、
  * 同じ拡大率・同じ位置のまま現像前後を見比べられるビューアを内製する。
  */
 export type ViewerSource = {

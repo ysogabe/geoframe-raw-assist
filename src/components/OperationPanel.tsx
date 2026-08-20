@@ -1,5 +1,5 @@
 import { useRef, type RefObject } from "react";
-import type { ComparisonView, DevelopMode, EngineStatus } from "../lib/app-state";
+import type { ComparisonView, DevelopMode, EngineStatus, ViewerSource } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -11,6 +11,7 @@ import {
   formatScore,
   formatShutter,
   groupKindLabel,
+  isMergedResult,
   isPortrait,
   rawPillClass,
 } from "../lib/format";
@@ -70,6 +71,8 @@ type OperationPanelProps = {
   mergeFullResult: MergedResult | undefined;
   comparisonView: ComparisonView;
   onChangeComparisonView: (view: ComparisonView) => void;
+  /** アプリ内の原寸ビューアを開く。渡す 2 面はこの画面が組み立てる。 */
+  onOpenViewer: (source: ViewerSource) => void;
 };
 
 function ScoreRow({ label, value }: { label: string; value: number }) {
@@ -118,6 +121,7 @@ export function OperationPanel({
   mergeFullResult,
   comparisonView,
   onChangeComparisonView,
+  onOpenViewer,
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
   const developResult = fullResult ?? previewResult;
@@ -127,6 +131,26 @@ export function OperationPanel({
   const showMerged = Boolean(mergedResult) && (comparisonView === "merged" || !developResult);
   const result = showMerged ? mergedResult : developResult;
   const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
+
+  /**
+   * 原寸ビューアに渡す 2 面をここで組み立てる（起動元が 3 か所あるので 1 か所にまとめる）。
+   * 現像後の URL は `output_url` をそのまま使う。キャッシュバスター付きの完全URLなので
+   * assetUrl() を通してはならない。
+   */
+  function viewerSourceFor(initial: "before" | "after"): ViewerSource {
+    // ここは `result &&` のガードで書く（変数経由だと result の型が絞られない）。
+    const merged = result && isMergedResult(result) ? result : null;
+    return {
+      beforeUrl: sourceJpgUrl(captureId),
+      afterUrl: result?.output_url,
+      beforeLabel: "現像前",
+      afterLabel: merged ? "合成後" : "現像後",
+      // まだ現像していなければ見せられるのは現像前だけ。
+      initial: result ? initial : "before",
+      preview: Boolean(result?.preview),
+      title: merged ? `${captureId}（ブラケット合成 ${merged.frames}枚）` : captureId,
+    };
+  }
 
   return (
     <section className="operation-screen screen-enter" aria-label="写真の操作パネル">
@@ -148,10 +172,21 @@ export function OperationPanel({
             {photo ? <img src={assetUrl(photo.thumb)} alt={`選択中 ${captureId}`} decoding="async" /> : null}
             {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
             <div className="filename">{captureId}.JPG</div>
+            {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
+            <button
+              type="button"
+              className="preview-open"
+              onClick={() => onOpenViewer(viewerSourceFor("before"))}
+              aria-label={`${captureId} を原寸で表示`}
+            >
+              <span>原寸で見る</span>
+            </button>
           </div>
           <div className="media-footnote">
             {photo && <span>{formatDimensions(photo)}{isPortrait(photo.orientation) ? "・縦位置" : ""}</span>}
-            <a href={sourceJpgUrl(captureId)} target="_blank" rel="noreferrer">カメラJPGを原寸で開く ↗</a>
+            <button type="button" onClick={() => onOpenViewer(viewerSourceFor("before"))}>
+              カメラJPGを原寸で開く
+            </button>
           </div>
 
           <div className="shot-picker operation-shot-picker" role="radiogroup" aria-label="代表写真を選択">
@@ -292,6 +327,7 @@ export function OperationPanel({
         comparisonRef={comparisonRef}
         view={canToggleComparison ? (showMerged ? "merged" : "develop") : undefined}
         onChangeView={canToggleComparison ? onChangeComparisonView : undefined}
+        onOpenFullSize={() => onOpenViewer(viewerSourceFor("after"))}
       />
     </section>
   );

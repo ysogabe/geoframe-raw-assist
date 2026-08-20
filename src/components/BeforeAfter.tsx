@@ -21,6 +21,11 @@ type BeforeAfterProps = {
    */
   view?: ComparisonView;
   onChangeView?: (view: ComparisonView) => void;
+  /**
+   * 現像後を原寸ビューアで開く。押されたことを伝えるだけにして、どの 2 面を渡すかは
+   * OperationPanel が決める（この画面が state の形を知らずに済む）。
+   */
+  onOpenFullSize: () => void;
 };
 
 const RECIPE_KEYS: (keyof Adjustments)[] = [
@@ -35,7 +40,14 @@ const RECIPE_KEYS: (keyof Adjustments)[] = [
   "noise_reduction",
 ];
 
-export function BeforeAfter({ captureId, result, comparisonRef, view, onChangeView }: BeforeAfterProps) {
+export function BeforeAfter({
+  captureId,
+  result,
+  comparisonRef,
+  view,
+  onChangeView,
+  onOpenFullSize,
+}: BeforeAfterProps) {
   if (!result) return null;
 
   const lens = result.lens_correction;
@@ -92,14 +104,14 @@ export function BeforeAfter({ captureId, result, comparisonRef, view, onChangeVi
           <figcaption><strong>現像前</strong><span>カメラ内 JPG（{beforeCaptureId}）</span></figcaption>
         </figure>
         <figure>
-          <a className="comparison-image" href={result.output_url} target="_blank" rel="noreferrer">
+          <button type="button" className="comparison-image" onClick={onOpenFullSize}>
             <img
               src={result.output_url}
               alt={merged ? `${merged.frames}枚のブラケット合成後` : `${captureId} RAW現像後`}
               decoding="async"
             />
-            <span className="developed-label">原寸で見る ↗</span>
-          </a>
+            <span className="developed-label">原寸で見る</span>
+          </button>
           <figcaption>
             <strong>{merged ? "合成後" : "現像後"}</strong>
             <span>{merged ? `ARW ${merged.frames}枚を合成 / ${result.preset_label}` : `ARW / ${result.preset_label}`}</span>
