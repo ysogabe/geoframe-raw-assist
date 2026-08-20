@@ -1,5 +1,4 @@
 import type { RefObject } from "react";
-import type { ComparisonView } from "../lib/app-state";
 import {
   ADJUSTMENT_LABELS,
   formatAdjustmentValue,
@@ -10,6 +9,12 @@ import {
 import { sourceJpgUrl } from "../lib/raw-api";
 import type { Adjustments, CaptureId, DevelopedResult, MergedResult } from "../lib/types";
 
+/**
+ * 比較エリアのタブ。表示状態そのものは State の `viewing` が持っており、
+ * ここはその写像を受け取るだけの見た目用の型（state の形は知らない）。
+ */
+export type ComparisonTab = "develop" | "merged";
+
 type BeforeAfterProps = {
   captureId: CaptureId;
   /** 単写の現像結果、またはブラケット合成の結果。 */
@@ -19,8 +24,8 @@ type BeforeAfterProps = {
    * 現像結果と合成結果の両方があるときだけ渡す表示切替。
    * 片方しか無いときは省略し、押しても何も変わらないタブを出さない。
    */
-  view?: ComparisonView;
-  onChangeView?: (view: ComparisonView) => void;
+  view?: ComparisonTab;
+  onChangeView?: (view: ComparisonTab) => void;
   /**
    * 現像後を原寸ビューアで開く。押されたことを伝えるだけにして、どの 2 面を渡すかは
    * OperationPanel が決める（この画面が state の形を知らずに済む）。

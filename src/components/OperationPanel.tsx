@@ -1,5 +1,5 @@
 import { useRef, type RefObject } from "react";
-import type { ComparisonView, DevelopMode, EngineStatus, ViewerSource } from "../lib/app-state";
+import type { DevelopMode, EngineStatus, ViewerSource, ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -35,8 +35,9 @@ type OperationPanelProps = {
   analysis: Analysis;
   group: GroupInfo;
   photo: PhotoInfo | null;
+  /** 今見ている写真。合成を見ている間は合成の先頭フレーム。 */
   captureId: CaptureId;
-  onChooseCapture: (groupId: number, captureId: CaptureId) => void;
+  onViewCapture: (groupId: number, captureId: CaptureId) => void;
   engineStatus: EngineStatus;
   engineVersion: string;
   health: HealthResponse | null;
@@ -46,8 +47,11 @@ type OperationPanelProps = {
   onChangePreset: (presetName: PresetName) => void;
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
-  isAccepted: boolean;
-  onAccept: () => void;
+  /** 表示中の写真そのものが採用済みか（グループ単位のフラグではない）。 */
+  photoAccepted: boolean;
+  onAcceptPhoto: () => void;
+  mergedAccepted: boolean;
+  onAcceptMerged: () => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -69,8 +73,9 @@ type OperationPanelProps = {
   mergeBlockReason: string | null;
   mergePreviewResult: MergedResult | undefined;
   mergeFullResult: MergedResult | undefined;
-  comparisonView: ComparisonView;
-  onChangeComparisonView: (view: ComparisonView) => void;
+  /** このグループで今見ている面。比較タブの選択状態はここから導く。 */
+  viewing: ViewingItem;
+  onViewMerged: () => void;
   /** アプリ内の原寸ビューアを開く。渡す 2 面はこの画面が組み立てる。 */
   onOpenViewer: (source: ViewerSource) => void;
 };
@@ -90,7 +95,7 @@ export function OperationPanel({
   group,
   photo,
   captureId,
-  onChooseCapture,
+  onViewCapture,
   engineStatus,
   engineVersion,
   health,
@@ -100,8 +105,10 @@ export function OperationPanel({
   onChangePreset,
   onChangeAdjustment,
   onResetAdjustments,
-  isAccepted,
-  onAccept,
+  photoAccepted,
+  onAcceptPhoto,
+  mergedAccepted,
+  onAcceptMerged,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -119,8 +126,8 @@ export function OperationPanel({
   mergeBlockReason,
   mergePreviewResult,
   mergeFullResult,
-  comparisonView,
-  onChangeComparisonView,
+  viewing,
+  onViewMerged,
   onOpenViewer,
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
@@ -128,7 +135,7 @@ export function OperationPanel({
   const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
   // 現像と合成の両方があるときだけ切替タブを出す。片方しか無いときは自動でそちらを見せる。
   const canToggleComparison = Boolean(developResult && mergedResult);
-  const showMerged = Boolean(mergedResult) && (comparisonView === "merged" || !developResult);
+  const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
   const result = showMerged ? mergedResult : developResult;
   const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
 
@@ -196,7 +203,7 @@ export function OperationPanel({
                 <button
                   key={id}
                   className={captureId === id ? "active" : ""}
-                  onClick={() => onChooseCapture(group.id, id)}
+                  onClick={() => onViewCapture(group.id, id)}
                   role="radio"
                   aria-checked={captureId === id}
                 >
@@ -288,8 +295,12 @@ export function OperationPanel({
             onChangePreset={onChangePreset}
             onChangeAdjustment={onChangeAdjustment}
             onResetAdjustments={onResetAdjustments}
-            isAccepted={isAccepted}
-            onAccept={onAccept}
+            photoAccepted={photoAccepted}
+            onAcceptPhoto={onAcceptPhoto}
+            // 採用できるのは本合成の結果だけ（プレビューは書き出しに使えない）。
+            canAcceptMerged={Boolean(mergeFullResult)}
+            mergedAccepted={mergedAccepted}
+            onAcceptMerged={onAcceptMerged}
             onDevelop={onDevelop}
             developMode={developMode}
             elapsedLabel={elapsedLabel}
@@ -326,7 +337,13 @@ export function OperationPanel({
         result={result}
         comparisonRef={comparisonRef}
         view={canToggleComparison ? (showMerged ? "merged" : "develop") : undefined}
-        onChangeView={canToggleComparison ? onChangeComparisonView : undefined}
+        // タブは表示カーソル 1 本を書き換える。「単写の現像」側は今見えているカット
+        // （合成中なら合成の先頭フレーム）へ戻す。
+        onChangeView={
+          canToggleComparison
+            ? (next) => (next === "merged" ? onViewMerged() : onViewCapture(group.id, captureId))
+            : undefined
+        }
         onOpenFullSize={() => onOpenViewer(viewerSourceFor("after"))}
       />
     </section>

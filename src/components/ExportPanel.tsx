@@ -1,4 +1,4 @@
-import type { ExportVariantChoice } from "../lib/app-state";
+import type { PhotoExportVariant } from "../lib/app-state";
 import { isValidBatchName } from "../lib/app-state";
 import { rawPillClass } from "../lib/format";
 import { assetUrl } from "../lib/raw-api";
@@ -12,21 +12,41 @@ import type {
   MergedResult,
 } from "../lib/types";
 
-export type ExportRow = {
-  group: GroupInfo;
-  captureId: CaptureId;
-  developed: DevelopedResult | undefined;
-  /** グループの本合成の結果。プレビュー品質のものは入れない。 */
-  merged: MergedResult | undefined;
-  variant: ExportVariantChoice;
-};
+/**
+ * 書き出し 1 行。採用アイテム 1 件に 1 行が対応する（採用順のまま）。
+ *
+ * 成果物（developed / merged）は **採用時のスナップショットではなく** 書き出し画面を
+ * 開いた時点で引き直した結果が入る。本現像をやり直したらこの行も新しい結果を指す。
+ */
+export type ExportRow =
+  | {
+      kind: "photo";
+      /** acceptedKey。React の key と、形式変更の宛先に使う。 */
+      key: string;
+      group: GroupInfo;
+      captureId: CaptureId;
+      developed: DevelopedResult | undefined;
+      variant: PhotoExportVariant;
+    }
+  | {
+      kind: "merged";
+      key: string;
+      group: GroupInfo;
+      /** 合成の先頭フレーム。サムネと POST /api/export の capture_id に使う。 */
+      captureId: CaptureId;
+      /**
+       * 採用した合成の本合成結果。undefined なら成果物が失われている
+       * （先頭フレームの違う合成でやり直した等）。行は消さずに理由を出す。
+       */
+      merged: MergedResult | undefined;
+    };
 
 type ExportPanelProps = {
   analysis: Analysis;
   rows: ExportRow[];
   batchName: string;
   onChangeBatchName: (value: string) => void;
-  onChangeVariant: (captureId: CaptureId, variant: ExportVariantChoice) => void;
+  onChangeVariant: (key: string, variant: PhotoExportVariant) => void;
   onExport: () => void;
   onImport: () => void;
   exporting: boolean;
@@ -74,7 +94,7 @@ export function ExportPanel({
             {rows.map((row) => {
               const photo = analysis.photos[row.captureId];
               return (
-                <li key={row.captureId} className="export-row">
+                <li key={row.key} className="export-row">
                   <div className="export-thumb">
                     {photo ? <img src={assetUrl(photo.thumb)} alt={row.captureId} loading="lazy" decoding="async" /> : null}
                   </div>
@@ -83,40 +103,41 @@ export function ExportPanel({
                     <small>{row.group.title}</small>
                     <span className={rawPillClass(row.group.raw.level)}>{row.group.raw.label}</span>
                   </div>
-                  <div className="export-variant" role="radiogroup" aria-label={`${row.captureId} の書き出し形式`}>
-                    <button
-                      className={row.variant === "camera_jpg" ? "active" : ""}
-                      role="radio"
-                      aria-checked={row.variant === "camera_jpg"}
-                      onClick={() => onChangeVariant(row.captureId, "camera_jpg")}
-                    >
-                      カメラJPG
-                    </button>
-                    <button
-                      className={row.variant === "developed" ? "active" : ""}
-                      role="radio"
-                      aria-checked={row.variant === "developed"}
-                      disabled={!row.developed}
-                      title={row.developed ? row.developed.filename : "本現像の結果がありません"}
-                      onClick={() => onChangeVariant(row.captureId, "developed")}
-                    >
-                      現像済み
-                    </button>
-                    <button
-                      className={row.variant === "merged" ? "active" : ""}
-                      role="radio"
-                      aria-checked={row.variant === "merged"}
-                      disabled={!row.merged}
-                      title={
-                        row.merged
-                          ? `${row.merged.filename}（${row.merged.frames}枚合成）`
-                          : "ブラケット合成の結果がありません"
-                      }
-                      onClick={() => onChangeVariant(row.captureId, "merged")}
-                    >
-                      {row.merged ? `合成 ${row.merged.frames}枚` : "合成"}
-                    </button>
-                  </div>
+                  {/* 合成の採用行には形式の選択肢が無い（合成は「写真の別形式」ではない）。 */}
+                  {row.kind === "merged" ? (
+                    <div className="export-variant">
+                      {row.merged ? (
+                        <span className="merged-tag ok" title={`${row.merged.filename}（${row.merged.frames}枚合成）`}>
+                          合成 {row.merged.frames}枚
+                        </span>
+                      ) : (
+                        <span className="merged-tag" title="採用した合成の結果が見つかりません。合成し直して採用し直してください。">
+                          合成結果なし
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="export-variant" role="radiogroup" aria-label={`${row.captureId} の書き出し形式`}>
+                      <button
+                        className={row.variant === "camera_jpg" ? "active" : ""}
+                        role="radio"
+                        aria-checked={row.variant === "camera_jpg"}
+                        onClick={() => onChangeVariant(row.key, "camera_jpg")}
+                      >
+                        カメラJPG
+                      </button>
+                      <button
+                        className={row.variant === "developed" ? "active" : ""}
+                        role="radio"
+                        aria-checked={row.variant === "developed"}
+                        disabled={!row.developed}
+                        title={row.developed ? row.developed.filename : "本現像の結果がありません"}
+                        onClick={() => onChangeVariant(row.key, "developed")}
+                      >
+                        現像済み
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}
