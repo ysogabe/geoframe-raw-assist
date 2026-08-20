@@ -69,8 +69,9 @@ export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
  * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
  * `merged:12:DSC02943` まで含めれば衝突しない。
  *
- * `accept/merged` のトグルは groupId を直接見ていてこのキー文字列を使わないので、
- * ここを変えても「グループにつき合成は 1 件」という採用の意味は変わらない。
+ * `accept/merged` のトグルと isMergedAccepted も同じ 2 つ組（groupId + 先頭フレーム）で
+ * 同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合したグループで
+ * チップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
  */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
@@ -502,13 +503,27 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 合成の採用はグループにつき 1 件。ここは acceptedKey を経由せず groupId を
-      // 直接見る（キーは先頭フレームも含むが、採用の同一性はグループにある）。
-      const already = state.accepted.some((item) => item.kind === "merged" && item.groupId === action.groupId);
+      // 同一性は acceptedKey と同じ groupId + leadCaptureId で見る。reconcileAccepted は
+      // 仕様どおり重複除去をしないので、同じ groupId に合成の採用が複数同居しうる
+      // （別々のグループで採用した 2 件の合成が、再解析で 1 グループへ再結合した場合）。
+      // groupId だけで判定すると、そのときチップを 1 回押しただけで 2 件とも消える。
+      const already = state.accepted.some(
+        (item) =>
+          item.kind === "merged" &&
+          item.groupId === action.groupId &&
+          item.leadCaptureId === action.leadCaptureId,
+      );
       return {
         ...state,
         accepted: already
-          ? state.accepted.filter((item) => !(item.kind === "merged" && item.groupId === action.groupId))
+          ? state.accepted.filter(
+              (item) =>
+                !(
+                  item.kind === "merged" &&
+                  item.groupId === action.groupId &&
+                  item.leadCaptureId === action.leadCaptureId
+                ),
+            )
           : [
               ...state.accepted,
               { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
@@ -812,8 +827,17 @@ export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
   return state.accepted.some((item) => item.kind === "photo" && item.captureId === captureId);
 }
 
-export function isMergedAccepted(state: State, groupId: number): boolean {
-  return state.accepted.some((item) => item.kind === "merged" && item.groupId === groupId);
+/**
+ * その合成（グループ + 先頭フレーム）が採用済みか。
+ *
+ * groupId だけでは足りない。再結合で同じ groupId に合成の採用が複数並びうるし、
+ * `accept/merged` のトグルも同じ 2 つ組で同一性を見るため、判定をここだけ groupId に
+ * すると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ */
+export function isMergedAccepted(state: State, groupId: number, leadCaptureId: CaptureId): boolean {
+  return state.accepted.some(
+    (item) => item.kind === "merged" && item.groupId === groupId && item.leadCaptureId === leadCaptureId,
+  );
 }
 
 export function photoOf(analysis: Analysis | null, captureId: CaptureId | undefined): PhotoInfo | null {
