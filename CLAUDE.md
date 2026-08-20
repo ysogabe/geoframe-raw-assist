@@ -3,9 +3,9 @@
 ## 作業フロー（必須）
 
 - 実装・変更作業は**必ず作業ブランチを作成してから実施**する。`main` への直接コミット禁止。
-  - ブランチ名: `<type>/<短い説明>`（例: `fix/ui-copy`、`feat/typography`）
-  - 完了後は検証（ビルド・型検査・必要なら実機確認）を経て `main` へマージする。
-  - このリポジトリはローカル専用（リモートなし）。PR 運用は行わず、ブランチ → マージをローカルで完結させる。
+  - ブランチ名: `<type>/<issue番号>-<短い説明>`（例: `fix/12-ui-copy`、`feat/13-typography`）。Issue が無い場合は `<type>/<短い説明>`。
+  - 完了後は検証（ビルド・型検査・必要なら実機確認）を経て PR を作成し、`main` へマージする。
+  - リモートは `origin`（github.com/ysogabe/geoframe-raw-assist）。作業は GitHub Issue を立ててから対応ブランチを切り、PR 経由でマージする（`github-pr-workflow` スキルに従う）。
 - **サブエージェントで並行開発するときは `git worktree` を使って実施**する。
   - 作業ブランチごとに `git worktree add` で作業ツリーを切り、サブエージェントには worktree のパスを渡す。
   - worktree には `node_modules` / `.venv` / `dist` / `target` が無いため、検証前に依存の再インストールが必要な場合がある。
