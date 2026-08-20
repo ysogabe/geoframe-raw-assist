@@ -463,6 +463,20 @@ class MergedVariantTests(ExportTestCase):
         with self.assertRaises(ValueError):
             export_batch("trip08", [self.merged_item(capture_id=OTHER_CAPTURE)])
 
+    def test_rejects_mismatched_capture_id_and_writes_nothing(self):
+        """capture_id が合成ファイル名の先頭ID（capture_ids[0]）と違えば 400 で1件も書かない。"""
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.merged_item(capture_id=OTHER_CAPTURE)])
+        # 検証はコピーより前に走るので、書き出し先ディレクトリ自体が作られない。
+        self.assertFalse((self.export_root / "trip08").exists())
+
+    def test_exports_when_capture_id_matches_the_first_merged_frame(self):
+        """capture_id を合成ファイル名の先頭ID（capture_ids[0]）にすれば合成JPEGが書き出される。"""
+        result = export_batch("trip08", [self.merged_item(capture_id=CAPTURE)])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip08/{MERGED}"])
+        self.assertEqual((self.export_root / "trip08" / MERGED).read_bytes(), b"merged-jpeg-bytes")
+
     def write_merged(self, filename, recipe):
         """`outputs/merged/` に合成JPEGとレシピJSONを1組置く。"""
         (self.merged_root / filename).write_bytes(b"merged-jpeg-bytes")

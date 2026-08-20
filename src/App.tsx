@@ -399,7 +399,7 @@ export default function Home() {
         return { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename };
       }
       if (row.variant === "merged" && row.merged) {
-        return { capture_id: row.captureId, variant: "merged", merged_filename: row.merged.filename };
+        return { capture_id: row.merged.capture_ids[0], variant: "merged", merged_filename: row.merged.filename };
       }
       return { capture_id: row.captureId, variant: "camera_jpg" };
     });
