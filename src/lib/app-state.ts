@@ -770,10 +770,19 @@ export function groupMergeResultOf(
  *
  * 採用アイテムの groupId は reconcileAccepted が leadCaptureId から引き直した「現在
  * 属しているグループ」なので、その groupId の「現在の」合成結果（groupMergeResultOf）を
- * 見て、先頭フレームが一致するかだけ確認する。一致しなければ「グループの合成が別の
- * フレーム構成でやり直された」ということなので、この採用アイテムの成果物は失われたものと
- * して扱う（グローバルに探し直さない）。ExportPanel 側は merged: undefined を
- * 「成果物が失われている」行として理由付きで表示する。
+ * 見て、先頭フレームが一致するかだけ確認する。グローバルには探し直さない。
+ *
+ * undefined になる経路は 2 つあり、**どちらも「成果物が失われた」扱いで正しい**:
+ * 1. 合成が別のフレーム構成でやり直された（先頭フレームが変わった）→ 別物の合成
+ * 2. 再解析でグループIDがずれ、合成結果が **古いキーのまま取り残された**
+ *    （mergeFullResults は詰め替えない）。合成をやり直していなくてもこうなる。
+ *
+ * 2 の方は「無関係な合成を無言で書き出す」より安全なだけでなく、そのグループを合成し直せば
+ * 自然に直る: merge/ok は現在の groupId をキーに結果を入れるので、同じフレーム構成なら
+ * 先頭フレームも同じ値に戻り、この関数も isMergedAccepted も再び一致する。
+ *
+ * ExportPanel 側は merged: undefined を「成果物が失われている」行として理由付きで表示する
+ * （行は消さない）。
  */
 export function mergedResultFor(
   mergeFullResults: State["mergeFullResults"],
