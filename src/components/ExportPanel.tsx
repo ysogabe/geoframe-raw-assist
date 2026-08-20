@@ -2,12 +2,22 @@ import type { ExportVariantChoice } from "../lib/app-state";
 import { isValidBatchName } from "../lib/app-state";
 import { rawPillClass } from "../lib/format";
 import { assetUrl } from "../lib/raw-api";
-import type { Analysis, CaptureId, DevelopedResult, ExportResponse, GroupInfo, ImportToPhotosResponse } from "../lib/types";
+import type {
+  Analysis,
+  CaptureId,
+  DevelopedResult,
+  ExportResponse,
+  GroupInfo,
+  ImportToPhotosResponse,
+  MergedResult,
+} from "../lib/types";
 
 export type ExportRow = {
   group: GroupInfo;
   captureId: CaptureId;
   developed: DevelopedResult | undefined;
+  /** グループの本合成の結果。プレビュー品質のものは入れない。 */
+  merged: MergedResult | undefined;
   variant: ExportVariantChoice;
 };
 
@@ -91,6 +101,20 @@ export function ExportPanel({
                       onClick={() => onChangeVariant(row.captureId, "developed")}
                     >
                       現像済み
+                    </button>
+                    <button
+                      className={row.variant === "merged" ? "active" : ""}
+                      role="radio"
+                      aria-checked={row.variant === "merged"}
+                      disabled={!row.merged}
+                      title={
+                        row.merged
+                          ? `${row.merged.filename}（${row.merged.frames}枚合成）`
+                          : "ブラケット合成の結果がありません"
+                      }
+                      onClick={() => onChangeVariant(row.captureId, "merged")}
+                    >
+                      {row.merged ? `合成 ${row.merged.frames}枚` : "合成"}
                     </button>
                   </div>
                 </li>

@@ -1,7 +1,9 @@
 import type {
   Adjustments,
   AnalysisStage,
+  DevelopedResult,
   GroupKind,
+  MergedResult,
   PhotoInfo,
   RawLevel,
   SourceFolderErrorReason,
@@ -92,6 +94,22 @@ export function formatPercent(ratio: number): number {
 
 export function formatScore(score: number): number {
   return Math.round(Math.min(Math.max(score, 0), 100));
+}
+
+/**
+ * 平均輝度は 8bit グレースケールの平均（0〜255、analysis.py の gray.mean()）。
+ * ブラケットのどのコマが明るい / 暗いかを見るだけなので小数は落とす。
+ */
+export function formatMeanLuma(value: number): number {
+  return Math.round(Math.min(Math.max(value, 0), 255));
+}
+
+/**
+ * 現像結果か合成結果かの判別。契約型は型定義のみで実行時の値を持てないため、
+ * 判別用のガードはここに置く。MergedResult だけが `capture_ids`（複数形）を持つ。
+ */
+export function isMergedResult(result: DevelopedResult | MergedResult): result is MergedResult {
+  return "capture_ids" in result;
 }
 
 /** 0..1 の confidence を % 表示に。 */

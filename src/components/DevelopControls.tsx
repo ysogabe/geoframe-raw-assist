@@ -19,6 +19,8 @@ type DevelopControlsProps = {
   elapsedLabel: string;
   hasPreview: boolean;
   hasFull: boolean;
+  /** ブラケット合成の実行中。重いRAWデコードを同時に走らせないため現像側も止める。 */
+  mergeBusy: boolean;
 };
 
 export function DevelopControls({
@@ -38,10 +40,11 @@ export function DevelopControls({
   elapsedLabel,
   hasPreview,
   hasFull,
+  mergeBusy,
 }: DevelopControlsProps) {
   const presets = health?.presets ?? [];
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
-  const busy = developMode !== null;
+  const busy = developMode !== null || mergeBusy;
   const disabled = engineStatus !== "ready" || !adjustments;
 
   return (

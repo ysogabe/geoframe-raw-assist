@@ -293,13 +293,19 @@ export type DevelopedResult = {
 // POST /api/export
 // ---------------------------------------------------------------------------
 
-export type ExportVariant = "camera_jpg" | "developed";
+/**
+ * 書き出しの種別。"merged" はブラケット合成の結果（POST /api/merge-bracket、
+ * 本ファイル末尾の追加セクション）を指す。
+ */
+export type ExportVariant = "camera_jpg" | "developed" | "merged";
 
 export type ExportItem = {
   capture_id: CaptureId;
   variant: ExportVariant;
   /** variant="developed" のとき必須。raw-develop が返した filename。 */
   developed_filename?: string;
+  /** variant="merged" のとき必須。merge-bracket が返した filename。 */
+  merged_filename?: string;
 };
 
 export type ExportRequest = {
@@ -441,4 +447,63 @@ export type SourceFolderErrorReason =
 /** POST /api/source-folder の失敗レスポンス（HTTP 400）。 */
 export type SourceFolderErrorResponse = ErrorResponse & {
   reason: SourceFolderErrorReason;
+};
+
+// ---------------------------------------------------------------------------
+// POST /api/merge-bracket — ブラケット合成
+//
+// 本セクションは凍結（2026-08-10）後の追加分である。既存の契約型に手を入れたのは
+// ExportVariant / ExportItem の 2 箇所だけで、いずれも合成結果を書き出せるように
+// するための最小の拡張（"merged" と merged_filename の追加）である。
+// Python 側の実装と対になっており、変更する場合は両方を同時に直すこと。
+// ---------------------------------------------------------------------------
+
+/**
+ * ブラケット合成のリクエスト。
+ * `capture_ids` は 2〜9 枚。範囲外はサーバが HTTP 400（ErrorResponse）を返すため、
+ * UI 側でも同じ範囲で実行ボタンを制御すること（押せるのに必ず失敗する状態を作らない）。
+ * フレーム数ぶんの RAW デコードが走るため、preview でも数秒、原寸なら数十秒かかる。
+ */
+export type MergeBracketRequest = {
+  capture_ids: CaptureId[];
+  preset: PresetName;
+  adjustments?: Partial<Adjustments>;
+  /** true でプレビュー品質（raw-develop と同じ扱い）。書き出しには使えない。 */
+  preview?: boolean;
+  force?: boolean;
+  /** 1200..6048。範囲外は HTTP 400 */
+  max_edge?: number;
+};
+
+/**
+ * ブラケット合成の結果。DevelopedResult と多くのフィールドを共有するが、
+ * 単写の `capture_id` ではなく合成に使った `capture_ids`（と `frames`）を持つ点、
+ * および位置合わせの実施有無 `aligned` を持つ点が異なる。
+ */
+export type MergedResult = {
+  /** 合成に使ったフレーム。リクエストで送った順。 */
+  capture_ids: CaptureId[];
+  /** capture_ids.length と同じ。2〜9。 */
+  frames: number;
+  preset: PresetName;
+  preset_label: string;
+  filename: string;
+  recipe_filename: string;
+  params_hash: string;
+  /** 解決後の全量 */
+  adjustments: Adjustments;
+  width: number;
+  height: number;
+  elapsed_seconds: number;
+  cached: boolean;
+  preview: boolean;
+  /** フレーム間の位置合わせを実施したか。手持ち撮影のブラケットで意味を持つ。 */
+  aligned: boolean;
+  lens_correction: LensCorrection;
+  exif_inherited: boolean;
+  /**
+   * 配信URL。DevelopedResult.output_url と同じくキャッシュバスター付きの完全URLで、
+   * そのまま <img src> に渡すこと。パスとして再構成してはならない。
+   */
+  output_url: string;
 };

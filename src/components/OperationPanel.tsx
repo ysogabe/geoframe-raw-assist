@@ -1,5 +1,5 @@
-import type { RefObject } from "react";
-import type { DevelopMode, EngineStatus } from "../lib/app-state";
+import { useRef, type RefObject } from "react";
+import type { ComparisonView, DevelopMode, EngineStatus } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -15,9 +15,20 @@ import {
   rawPillClass,
 } from "../lib/format";
 import { assetUrl, sourceJpgUrl } from "../lib/raw-api";
-import type { Adjustments, Analysis, CaptureId, DevelopedResult, GroupInfo, HealthResponse, PhotoInfo, PresetName } from "../lib/types";
+import type {
+  Adjustments,
+  Analysis,
+  CaptureId,
+  DevelopedResult,
+  GroupInfo,
+  HealthResponse,
+  MergedResult,
+  PhotoInfo,
+  PresetName,
+} from "../lib/types";
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
+import { BracketMerge } from "./BracketMerge";
 
 type OperationPanelProps = {
   analysis: Analysis;
@@ -42,6 +53,23 @@ type OperationPanelProps = {
   previewResult: DevelopedResult | undefined;
   fullResult: DevelopedResult | undefined;
   comparisonRef: RefObject<HTMLDivElement | null>;
+  /** 露出ブラケットのグループか。false なら合成の導線を一切出さない。 */
+  isBracket: boolean;
+  /** 以下はブラケット合成用（isBracket が false のときは使われない）。 */
+  mergeFrames: CaptureId[];
+  onToggleMergeFrame: (captureId: CaptureId) => void;
+  onResetMergeFrames: () => void;
+  onMerge: (mode: DevelopMode) => void;
+  /** このグループの合成が実行中ならそのモード。他グループの合成中は null。 */
+  mergeMode: DevelopMode | null;
+  /** どのグループであれ合成が走っているか。重い処理の同時実行を止めるのに使う。 */
+  mergeBusy: boolean;
+  mergeElapsedLabel: string;
+  mergeBlockReason: string | null;
+  mergePreviewResult: MergedResult | undefined;
+  mergeFullResult: MergedResult | undefined;
+  comparisonView: ComparisonView;
+  onChangeComparisonView: (view: ComparisonView) => void;
 };
 
 function ScoreRow({ label, value }: { label: string; value: number }) {
@@ -77,8 +105,28 @@ export function OperationPanel({
   previewResult,
   fullResult,
   comparisonRef,
+  isBracket,
+  mergeFrames,
+  onToggleMergeFrame,
+  onResetMergeFrames,
+  onMerge,
+  mergeMode,
+  mergeBusy,
+  mergeElapsedLabel,
+  mergeBlockReason,
+  mergePreviewResult,
+  mergeFullResult,
+  comparisonView,
+  onChangeComparisonView,
 }: OperationPanelProps) {
-  const result = fullResult ?? previewResult;
+  const mergePanelRef = useRef<HTMLElement>(null);
+  const developResult = fullResult ?? previewResult;
+  const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
+  // 現像と合成の両方があるときだけ切替タブを出す。片方しか無いときは自動でそちらを見せる。
+  const canToggleComparison = Boolean(developResult && mergedResult);
+  const showMerged = Boolean(mergedResult) && (comparisonView === "merged" || !developResult);
+  const result = showMerged ? mergedResult : developResult;
+  const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
 
   return (
     <section className="operation-screen screen-enter" aria-label="写真の操作パネル">
@@ -176,6 +224,25 @@ export function OperationPanel({
             </div>
           </div>
 
+          {isBracket && (
+            <div className="bracket-hint">
+              <span className="bracket-icon">▤</span>
+              <div>
+                <strong>露出ブラケットとして検出されています</strong>
+                <p>
+                  下の「ブラケット合成」でフレームを選ぶと、白飛びと黒つぶれを同時に抑えた1枚に合成できます。
+                </p>
+                <button
+                  type="button"
+                  className="bracket-jump"
+                  onClick={() => mergePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                >
+                  合成パネルへ移動 ↓
+                </button>
+              </div>
+            </div>
+          )}
+
           <DevelopControls
             engineStatus={engineStatus}
             engineVersion={engineVersion}
@@ -193,12 +260,39 @@ export function OperationPanel({
             elapsedLabel={elapsedLabel}
             hasPreview={Boolean(previewResult)}
             hasFull={Boolean(fullResult)}
+            mergeBusy={mergeBusy}
           />
           <p className="safety-note">元のJPG / ARWは変更されません（{groupKindLabel(group.kind)}）</p>
         </aside>
       </div>
 
-      <BeforeAfter captureId={captureId} result={result} comparisonRef={comparisonRef} />
+      {isBracket && (
+        <BracketMerge
+          analysis={analysis}
+          group={group}
+          frames={mergeFrames}
+          onToggleFrame={onToggleMergeFrame}
+          onResetFrames={onResetMergeFrames}
+          onMerge={onMerge}
+          mergeMode={mergeMode}
+          elapsedLabel={mergeElapsedLabel}
+          blockReason={mergeBlockReason}
+          busy={developMode !== null || mergeBusy}
+          engineStatus={engineStatus}
+          presetLabel={presetLabel}
+          hasPreview={Boolean(mergePreviewResult)}
+          hasFull={Boolean(mergeFullResult)}
+          panelRef={mergePanelRef}
+        />
+      )}
+
+      <BeforeAfter
+        captureId={captureId}
+        result={result}
+        comparisonRef={comparisonRef}
+        view={canToggleComparison ? (showMerged ? "merged" : "develop") : undefined}
+        onChangeView={canToggleComparison ? onChangeComparisonView : undefined}
+      />
     </section>
   );
 }
