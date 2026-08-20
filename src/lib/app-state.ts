@@ -26,6 +26,28 @@ export type ExportVariantChoice = "camera_jpg" | "developed" | "merged";
 /** 比較エリアに出す結果の種類。単写の現像結果とブラケット合成結果を切り替える。 */
 export type ComparisonView = "develop" | "merged";
 
+/**
+ * アプリ内の原寸ビューアに渡す 2 面。
+ *
+ * デスクトップシェル（Tauri/WKWebView）には別タブで開くリンク（target=_blank）を処理する
+ * 経路が無く、「原寸で見る」が無反応になっていた。外部ブラウザへ逃がすのではなく、
+ * 同じ拡大率・同じ位置のまま現像前後を見比べられるビューアを内製する。
+ */
+export type ViewerSource = {
+  /** 現像前（カメラJPG）の URL。ビューアの基準グリッドはこの画像の実解像度に固定する。 */
+  beforeUrl: string;
+  /** 現像後 / 合成後の URL。無い場合（まだ現像していない）は undefined。 */
+  afterUrl?: string;
+  beforeLabel: string;
+  afterLabel: string;
+  /** 開いた直後にどちらの面を見せるか。 */
+  initial: "before" | "after";
+  /** 現像結果がプレビュー品質か。ヘッダの .preview-tag の出し分けに使う。 */
+  preview: boolean;
+  /** ヘッダに出す見出し（撮影ID など）。 */
+  title: string;
+};
+
 const DEFAULT_PRESET: PresetName = "neutral_recovery";
 
 /**
@@ -81,6 +103,8 @@ export type State = {
   exportResult: ExportResponse | null;
   importing: boolean;
   importResult: ImportToPhotosResponse | null;
+  /** 原寸ビューアで開いている 2 面。null なら閉じている。 */
+  viewer: ViewerSource | null;
   notice: string;
   noticeTone: "info" | "error";
 };
@@ -121,6 +145,7 @@ export const initialState: State = {
   exportResult: null,
   importing: false,
   importResult: null,
+  viewer: null,
   notice: "",
   noticeTone: "info",
 };
@@ -162,6 +187,8 @@ export type Action =
   | { type: "import/start" }
   | { type: "import/ok"; result: ImportToPhotosResponse }
   | { type: "import/fail"; message: string }
+  | { type: "viewer/open"; source: ViewerSource }
+  | { type: "viewer/close" }
   | { type: "notice/set"; message: string; tone?: "info" | "error" }
   | { type: "notice/clear" };
 
@@ -463,6 +490,12 @@ export function reducer(state: State, action: Action): State {
 
     case "import/fail":
       return { ...state, importing: false, notice: action.message, noticeTone: "error" };
+
+    case "viewer/open":
+      return { ...state, viewer: action.source };
+
+    case "viewer/close":
+      return { ...state, viewer: null };
 
     case "notice/set":
       return { ...state, notice: action.message, noticeTone: action.tone ?? "info" };

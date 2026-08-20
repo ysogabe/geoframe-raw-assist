@@ -44,6 +44,7 @@ import { BootstrapGate } from "./components/BootstrapGate";
 import { GroupList } from "./components/GroupList";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
+import { FullSizeViewer } from "./components/FullSizeViewer";
 import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
@@ -528,6 +529,7 @@ export default function Home() {
             mergeFullResult={state.mergeFullResults[group.id]}
             comparisonView={state.comparisonView}
             onChangeComparisonView={(view) => dispatch({ type: "comparison/view", view })}
+            onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
           />
         ) : screen === "export" ? (
           <ExportPanel
@@ -558,6 +560,12 @@ export default function Home() {
           />
         )}
       </main>
+
+      {/* 原寸ビューア。showModal() でトップレイヤーに乗るので DOM 上の位置は問わない。
+          開くたびに新しく mount して、拡大率と面の選択を前回から持ち越さない。 */}
+      {state.viewer && (
+        <FullSizeViewer source={state.viewer} onClose={() => dispatch({ type: "viewer/close" })} />
+      )}
     </div>
   );
 }
