@@ -69,8 +69,9 @@ export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
  * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
  * `merged:12:DSC02943` まで含めれば衝突しない。
  *
- * `accept/merged` のトグルは groupId を直接見ていてこのキー文字列を使わないので、
- * ここを変えても「グループにつき合成は 1 件」という採用の意味は変わらない。
+ * `accept/merged` のトグルと isMergedAccepted も同じ 2 つ組（groupId + 先頭フレーム）で
+ * 同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合したグループで
+ * チップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
  */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
@@ -319,8 +320,12 @@ function groupIdByCapture(analysis: Analysis): Map<CaptureId, number> {
  * 3. 別々のグループから採用した 2 枚が同じグループに再結合する → **重複除去しない**
  *    （同一グループから複数枚採用するのは正当な状態であり、片方を消す理由がない）
  *
- * なお合成の成果物（MergedResult）は groupId ではなく先頭フレームで引き直すので
- * （mergedResultFor）、ここでグループ単位の合成結果を詰め替える必要はない。
+ * なお合成の成果物（MergedResult）はグループIDをキーに持ったまま詰め替えていないが、
+ * それでよい。引き当ては mergedResultFor を通し、そこで「そのグループの現在の合成
+ * （groupMergeResultOf）であり、かつ先頭フレームが採用時と一致すること」まで確かめる。
+ * IDの使い回しで別グループの合成が残っていても関門で落ちるし、フレーム構成の変わった
+ * 合成し直しは別物として「成果物が失われた」扱いになる。詰め替えを増やして状態を二重に
+ * 持つより、読み出し時に 1 箇所で検証する方が食い違いの余地が少ない。
  */
 function reconcileAccepted(
   accepted: AcceptedItem[],
@@ -498,13 +503,27 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 合成の採用はグループにつき 1 件。ここは acceptedKey を経由せず groupId を
-      // 直接見る（キーは先頭フレームも含むが、採用の同一性はグループにある）。
-      const already = state.accepted.some((item) => item.kind === "merged" && item.groupId === action.groupId);
+      // 同一性は acceptedKey と同じ groupId + leadCaptureId で見る。reconcileAccepted は
+      // 仕様どおり重複除去をしないので、同じ groupId に合成の採用が複数同居しうる
+      // （別々のグループで採用した 2 件の合成が、再解析で 1 グループへ再結合した場合）。
+      // groupId だけで判定すると、そのときチップを 1 回押しただけで 2 件とも消える。
+      const already = state.accepted.some(
+        (item) =>
+          item.kind === "merged" &&
+          item.groupId === action.groupId &&
+          item.leadCaptureId === action.leadCaptureId,
+      );
       return {
         ...state,
         accepted: already
-          ? state.accepted.filter((item) => !(item.kind === "merged" && item.groupId === action.groupId))
+          ? state.accepted.filter(
+              (item) =>
+                !(
+                  item.kind === "merged" &&
+                  item.groupId === action.groupId &&
+                  item.leadCaptureId === action.leadCaptureId
+                ),
+            )
           : [
               ...state.accepted,
               { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
@@ -741,15 +760,37 @@ export function groupMergeResultOf(
 /**
  * 採用した合成の成果物を引き直す。
  *
- * groupId ではなく **先頭フレーム** で引くのが要点。再解析でグループIDが振り直されても
- * 追従できるし、合成をやり直せば（同じ先頭フレームなら）新しい成果物を自動で拾う。
- * 逆に先頭フレームが変わる合成し直しは別物の合成なので、拾わないのが正しい。
+ * 以前は mergeFullResults を先頭フレームIDだけで **全件スキャン** していたが、再解析で
+ * グループIDが使い回されると、同じ先頭フレームIDを持つ古い（無関係になった）合成結果が
+ * 複数キーに残ることがあり、どちらが返るかは Object.values() の列挙順（整数キーは昇順）
+ * で決まってしまっていた。挿入順ではないので、多くの場合は **古い方（数値の小さいキー）
+ * が勝つ**。この結果は書き出し（exportRows）と一覧の枚数表示（acceptedSummaryOf）の
+ * 両方に流れ、しかもファイル名と capture_id は整合するのでサーバは 200 を返す。採用を
+ * 解除してやり直しても leadCaptureId は同じ値なので直らず、実質発見できなかった。
+ *
+ * 採用アイテムの groupId は reconcileAccepted が leadCaptureId から引き直した「現在
+ * 属しているグループ」なので、その groupId の「現在の」合成結果（groupMergeResultOf）を
+ * 見て、先頭フレームが一致するかだけ確認する。グローバルには探し直さない。
+ *
+ * undefined になる経路は 2 つあり、**どちらも「成果物が失われた」扱いで正しい**:
+ * 1. 合成が別のフレーム構成でやり直された（先頭フレームが変わった）→ 別物の合成
+ * 2. 再解析でグループIDがずれ、合成結果が **古いキーのまま取り残された**
+ *    （mergeFullResults は詰め替えない）。合成をやり直していなくてもこうなる。
+ *
+ * 2 の方は「無関係な合成を無言で書き出す」より安全なだけでなく、そのグループを合成し直せば
+ * 自然に直る: merge/ok は現在の groupId をキーに結果を入れるので、同じフレーム構成なら
+ * 先頭フレームも同じ値に戻り、この関数も isMergedAccepted も再び一致する。
+ *
+ * ExportPanel 側は merged: undefined を「成果物が失われている」行として理由付きで表示する
+ * （行は消さない）。
  */
 export function mergedResultFor(
   mergeFullResults: State["mergeFullResults"],
+  group: GroupInfo,
   leadCaptureId: CaptureId,
 ): MergedResult | undefined {
-  return Object.values(mergeFullResults).find((result) => result.capture_ids[0] === leadCaptureId);
+  const current = groupMergeResultOf(mergeFullResults, group);
+  return current && current.capture_ids[0] === leadCaptureId ? current : undefined;
 }
 
 /** 採用アイテムを 1 件でも持つグループID。 */
@@ -765,12 +806,15 @@ export function acceptedGroupIdSet(state: State): Set<number> {
  * 配列の長さの総和は state.accepted.length と一致する（= タブと Topbar の件数）。
  */
 export function acceptedSummaryOf(state: State, groupId: number): string[] {
+  // 成果物を引くにはグループが要る（mergedResultFor はグループの現在の合成だけを見る）。
+  // 解析がまだ無い・グループが消えた場合は枚数を出さず "合成" へ落とす。
+  const group = state.analysis?.groups.find((candidate) => candidate.id === groupId);
   return state.accepted
     .filter((item) => item.groupId === groupId)
     .map((item) => {
       if (item.kind === "photo") return item.captureId;
       // 合成の枚数は成果物から引く。採用時に控えても、合成し直したら古い枚数が残る。
-      const merged = mergedResultFor(state.mergeFullResults, item.leadCaptureId);
+      const merged = group ? mergedResultFor(state.mergeFullResults, group, item.leadCaptureId) : undefined;
       return merged ? `合成${merged.frames}枚` : "合成";
     });
 }
@@ -792,8 +836,17 @@ export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
   return state.accepted.some((item) => item.kind === "photo" && item.captureId === captureId);
 }
 
-export function isMergedAccepted(state: State, groupId: number): boolean {
-  return state.accepted.some((item) => item.kind === "merged" && item.groupId === groupId);
+/**
+ * その合成（グループ + 先頭フレーム）が採用済みか。
+ *
+ * groupId だけでは足りない。再結合で同じ groupId に合成の採用が複数並びうるし、
+ * `accept/merged` のトグルも同じ 2 つ組で同一性を見るため、判定をここだけ groupId に
+ * すると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ */
+export function isMergedAccepted(state: State, groupId: number, leadCaptureId: CaptureId): boolean {
+  return state.accepted.some(
+    (item) => item.kind === "merged" && item.groupId === groupId && item.leadCaptureId === leadCaptureId,
+  );
 }
 
 export function photoOf(analysis: Analysis | null, captureId: CaptureId | undefined): PhotoInfo | null {
@@ -820,14 +873,20 @@ export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
   );
 }
 
-/** 現像済み（本現像）または本合成の結果を持つグループID。 */
+/**
+ * 現像済み（本現像）または本合成の結果を持つグループID。
+ *
+ * 合成の有無も groupMergeResultOf の関門を通す。直接インデックスすると、再解析でIDが
+ * 使い回されたときに別グループの合成が残っているだけで「現像済み」に数えてしまう
+ * （タブの件数と、そのグループを開いたときの表示が食い違う）。
+ */
 export function developedGroupIds(state: State): number[] {
   const groups = state.analysis?.groups ?? [];
   return groups
     .filter(
       (group) =>
         group.capture_ids.some((captureId) => state.fullResults[captureId]) ||
-        Boolean(state.mergeFullResults[group.id]),
+        Boolean(groupMergeResultOf(state.mergeFullResults, group)),
     )
     .map((group) => group.id);
 }

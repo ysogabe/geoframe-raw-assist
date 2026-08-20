@@ -292,8 +292,9 @@ export default function Home() {
               key: acceptedKey(item),
               group,
               captureId: item.leadCaptureId,
-              // グループIDではなく先頭フレームで引く（再解析でIDが変わっても追える）。
-              merged: mergedResultFor(mergeFullResults, item.leadCaptureId),
+              // グループの「現在の」合成だけを見る。全件スキャンだと、IDが使い回されて
+              // 同じ先頭フレームの古い合成が別キーに残っているとき、そちらを拾ってしまう。
+              merged: mergedResultFor(mergeFullResults, group, item.leadCaptureId),
             },
           ];
       }
@@ -584,7 +585,12 @@ export default function Home() {
                 variant: state.fullResults[id] ? "developed" : "camera_jpg",
               })
             }
-            mergedAccepted={isMergedAccepted(state, group.id)}
+            mergedAccepted={
+              // 採用済み判定も採用の同一性（グループ + 先頭フレーム）で見る。groupId だけで
+              // 見ると、再結合で 2 件同居したときに片方の状態がもう片方に化ける。
+              // 本合成が無い状態ではチップ自体が disabled なので false でよい。
+              mergeFullResult ? isMergedAccepted(state, group.id, mergeFullResult.capture_ids[0]) : false
+            }
             onAcceptMerged={() => {
               // グループIDで直に引かない。IDが使い回されて別グループの合成が残っていると、
               // そのグループに属さない先頭フレームを採用として記録してしまう（書き出しは

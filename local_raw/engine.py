@@ -133,11 +133,23 @@ def _temp_path(path: Path, extension: str) -> Path:
 
 
 def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
+    """`recipe` を JSON として `recipe_path` にアトミック保存する。
+
+    一時ファイルは成功・失敗いずれの経路でも残さない（`os.replace` 成功後は一時ファイルが
+    存在しないため、`unlink(missing_ok=True)` は安全）。`_save_developed_jpeg` と同じ流儀。
+
+    `_temp_path` が `threading.get_ident()` から `uuid4()` に変わったことで、名前が二度と
+    衝突しなくなった代わりに、**失敗して残った一時ファイルが後続の書き込みで上書きされる
+    こともなくなった**。掃除しないと `outputs/` に永久に溜まる。
+    """
     temporary_path = _temp_path(recipe_path, "tmp.json")
-    temporary_path.write_text(
-        json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary_path, recipe_path)
+    try:
+        temporary_path.write_text(
+            json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary_path, recipe_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _params_hash(
