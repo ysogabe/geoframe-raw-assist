@@ -319,8 +319,12 @@ function groupIdByCapture(analysis: Analysis): Map<CaptureId, number> {
  * 3. 別々のグループから採用した 2 枚が同じグループに再結合する → **重複除去しない**
  *    （同一グループから複数枚採用するのは正当な状態であり、片方を消す理由がない）
  *
- * なお合成の成果物（MergedResult）は groupId ではなく先頭フレームで引き直すので
- * （mergedResultFor）、ここでグループ単位の合成結果を詰め替える必要はない。
+ * なお合成の成果物（MergedResult）はグループIDをキーに持ったまま詰め替えていないが、
+ * それでよい。引き当ては mergedResultFor を通し、そこで「そのグループの現在の合成
+ * （groupMergeResultOf）であり、かつ先頭フレームが採用時と一致すること」まで確かめる。
+ * IDの使い回しで別グループの合成が残っていても関門で落ちるし、フレーム構成の変わった
+ * 合成し直しは別物として「成果物が失われた」扱いになる。詰め替えを増やして状態を二重に
+ * 持つより、読み出し時に 1 箇所で検証する方が食い違いの余地が少ない。
  */
 function reconcileAccepted(
   accepted: AcceptedItem[],
@@ -741,15 +745,28 @@ export function groupMergeResultOf(
 /**
  * 採用した合成の成果物を引き直す。
  *
- * groupId ではなく **先頭フレーム** で引くのが要点。再解析でグループIDが振り直されても
- * 追従できるし、合成をやり直せば（同じ先頭フレームなら）新しい成果物を自動で拾う。
- * 逆に先頭フレームが変わる合成し直しは別物の合成なので、拾わないのが正しい。
+ * 以前は mergeFullResults を先頭フレームIDだけで **全件スキャン** していたが、再解析で
+ * グループIDが使い回されると、同じ先頭フレームIDを持つ古い（無関係になった）合成結果が
+ * 複数キーに残ることがあり、どちらが返るかは Object.values() の列挙順（整数キーは昇順）
+ * で決まってしまっていた。挿入順ではないので、多くの場合は **古い方（数値の小さいキー）
+ * が勝つ**。この結果は書き出し（exportRows）と一覧の枚数表示（acceptedSummaryOf）の
+ * 両方に流れ、しかもファイル名と capture_id は整合するのでサーバは 200 を返す。採用を
+ * 解除してやり直しても leadCaptureId は同じ値なので直らず、実質発見できなかった。
+ *
+ * 採用アイテムの groupId は reconcileAccepted が leadCaptureId から引き直した「現在
+ * 属しているグループ」なので、その groupId の「現在の」合成結果（groupMergeResultOf）を
+ * 見て、先頭フレームが一致するかだけ確認する。一致しなければ「グループの合成が別の
+ * フレーム構成でやり直された」ということなので、この採用アイテムの成果物は失われたものと
+ * して扱う（グローバルに探し直さない）。ExportPanel 側は merged: undefined を
+ * 「成果物が失われている」行として理由付きで表示する。
  */
 export function mergedResultFor(
   mergeFullResults: State["mergeFullResults"],
+  group: GroupInfo,
   leadCaptureId: CaptureId,
 ): MergedResult | undefined {
-  return Object.values(mergeFullResults).find((result) => result.capture_ids[0] === leadCaptureId);
+  const current = groupMergeResultOf(mergeFullResults, group);
+  return current && current.capture_ids[0] === leadCaptureId ? current : undefined;
 }
 
 /** 採用アイテムを 1 件でも持つグループID。 */
@@ -765,12 +782,15 @@ export function acceptedGroupIdSet(state: State): Set<number> {
  * 配列の長さの総和は state.accepted.length と一致する（= タブと Topbar の件数）。
  */
 export function acceptedSummaryOf(state: State, groupId: number): string[] {
+  // 成果物を引くにはグループが要る（mergedResultFor はグループの現在の合成だけを見る）。
+  // 解析がまだ無い・グループが消えた場合は枚数を出さず "合成" へ落とす。
+  const group = state.analysis?.groups.find((candidate) => candidate.id === groupId);
   return state.accepted
     .filter((item) => item.groupId === groupId)
     .map((item) => {
       if (item.kind === "photo") return item.captureId;
       // 合成の枚数は成果物から引く。採用時に控えても、合成し直したら古い枚数が残る。
-      const merged = mergedResultFor(state.mergeFullResults, item.leadCaptureId);
+      const merged = group ? mergedResultFor(state.mergeFullResults, group, item.leadCaptureId) : undefined;
       return merged ? `合成${merged.frames}枚` : "合成";
     });
 }

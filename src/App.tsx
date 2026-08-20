@@ -292,8 +292,9 @@ export default function Home() {
               key: acceptedKey(item),
               group,
               captureId: item.leadCaptureId,
-              // グループIDではなく先頭フレームで引く（再解析でIDが変わっても追える）。
-              merged: mergedResultFor(mergeFullResults, item.leadCaptureId),
+              // グループの「現在の」合成だけを見る。全件スキャンだと、IDが使い回されて
+              // 同じ先頭フレームの古い合成が別キーに残っているとき、そちらを拾ってしまう。
+              merged: mergedResultFor(mergeFullResults, group, item.leadCaptureId),
             },
           ];
       }
