@@ -719,6 +719,26 @@ export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
 }
 
 /**
+ * そのグループの合成結果。**グループに属さない合成は無いものとして扱う。**
+ *
+ * 合成の状態はグループIDをキーに持っており再解析で詰め替えていないため、IDが
+ * 使い回されると別グループの合成が残る。採用や表示の宛先にそのまま使うと、
+ * 見ていたグループと無関係な写真が採用・書き出しされる（サーバはファイル名と
+ * capture_id が一致するので 200 を返してしまい、気づけない）。
+ *
+ * 判定は「使ったフレームが **すべて** グループ内にあること」。先頭だけを見ると、
+ * フレーム構成が変わった中途半端な古い結果を通してしまう。
+ */
+export function groupMergeResultOf(
+  results: Record<number, MergedResult>,
+  group: GroupInfo,
+): MergedResult | undefined {
+  const merged = results[group.id];
+  if (!merged) return undefined;
+  return merged.capture_ids.every((captureId) => group.capture_ids.includes(captureId)) ? merged : undefined;
+}
+
+/**
  * 採用した合成の成果物を引き直す。
  *
  * groupId ではなく **先頭フレーム** で引くのが要点。再解析でグループIDが振り直されても
