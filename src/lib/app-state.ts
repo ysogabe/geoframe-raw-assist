@@ -22,9 +22,65 @@ export type EngineStatus = "checking" | "ready" | "offline";
 export type AnalysisState = "unknown" | "absent" | "running" | "ready" | "error";
 export type ListView = "suggestions" | "queue" | "accepted";
 export type DevelopMode = "preview" | "full";
-export type ExportVariantChoice = "camera_jpg" | "developed" | "merged";
-/** 比較エリアに出す結果の種類。単写の現像結果とブラケット合成結果を切り替える。 */
-export type ComparisonView = "develop" | "merged";
+
+/**
+ * 1 枚の写真を書き出すときの形式。合成は「写真の別形式」ではなく別種の採用なので、
+ * この union には入れない（AcceptedMerged 側が合成であること自体を表す）。
+ */
+export type PhotoExportVariant = "camera_jpg" | "developed";
+
+/**
+ * 採用した 1 枚の写真。
+ *
+ * 採用の同一性は `captureId` にある。表示カーソル（`viewing`）とは独立に固定するので、
+ * 「採用したあとに代表を変えると書き出される写真が無言で変わる」経路が消える。
+ * 一方で **成果物（filename）はスナップショットしない**。本現像をやり直したら新しい
+ * 結果を書き出したいし、`outputs/` には params_hash 違いが全部残るため、古い filename を
+ * 握ったままでも書き出しは成功してしまう（失敗しないぶん、UI 表示との食い違いに気づけない）。
+ */
+export type AcceptedPhoto = {
+  kind: "photo";
+  /** 表示・絞り込み用。再解析でIDが振り直されたら reconcile が書き換える。 */
+  groupId: number;
+  captureId: CaptureId;
+  variant: PhotoExportVariant;
+};
+
+/** 採用した 1 件のブラケット合成。 */
+export type AcceptedMerged = {
+  kind: "merged";
+  groupId: number;
+  /**
+   * 合成の先頭フレーム（= MergedResult.capture_ids[0] = ファイル名の先頭ID）。
+   * POST /api/export の capture_id はこれでなければサーバが 400 を返す。
+   * 採用した瞬間に確定させ、表示カーソルの変化から完全に切り離す。
+   */
+  leadCaptureId: CaptureId;
+};
+
+export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
+
+/** 採用アイテムの一意キー（React の key と、行単位の操作の宛先に使う）。 */
+export function acceptedKey(item: AcceptedItem): string {
+  switch (item.kind) {
+    case "photo":
+      return `photo:${item.captureId}`;
+    case "merged":
+      return `merged:${item.groupId}`;
+  }
+}
+
+/**
+ * グループ内で「今どの面を見ているか」。
+ *
+ * 以前は写真カーソル（グループ単位）と比較タブ（**グローバル**）に割れていたため、
+ * グループを跨ぐたびに比較タブだけがリセットされていた。1 本にまとめてグループ単位で
+ * 持てば、戻ってきたときに見ていた面がそのまま残る。
+ *
+ * 合成を見ている間は「今の写真」も合成の先頭フレームになる（viewingCaptureOf）。
+ * カーソルが 1 本である以上、左ペインだけ別の写真を指し続けることはない。
+ */
+export type ViewingItem = { kind: "photo"; captureId: CaptureId } | { kind: "merged" };
 
 /**
  * アプリ内の原寸ビューアに渡す 2 面。
@@ -73,9 +129,13 @@ export type State = {
   /** POST /api/source-folder の実行中。 */
   sourceFolderBusy: boolean;
   selectedGroupId: number | null;
-  /** グループごとの採用候補。未設定なら recommended_capture_id を使う。 */
-  selectedCaptures: Record<number, CaptureId>;
-  acceptedGroupIds: number[];
+  /** グループごとの表示カーソル。未設定なら recommended_capture_id を見ている。 */
+  viewing: Record<number, ViewingItem>;
+  /**
+   * 採用したもの。写真と合成を **1 本の配列** に採用順で混ぜて持つ。
+   * 別配列に分けると書き出し順を毎回決め直すことになるため。
+   */
+  accepted: AcceptedItem[];
   listView: ListView;
   presetName: PresetName;
   /** プリセット既定値からのユーザー変更分だけを保持し、そのまま送信する。 */
@@ -96,9 +156,7 @@ export type State = {
   mergeMode: DevelopMode | null;
   mergingGroupId: number | null;
   mergeStartedAt: number;
-  comparisonView: ComparisonView;
   batchName: string;
-  exportVariants: Record<CaptureId, ExportVariantChoice>;
   exporting: boolean;
   exportResult: ExportResponse | null;
   importing: boolean;
@@ -122,8 +180,8 @@ export const initialState: State = {
   sourceFolderUnavailable: false,
   sourceFolderBusy: false,
   selectedGroupId: null,
-  selectedCaptures: {},
-  acceptedGroupIds: [],
+  viewing: {},
+  accepted: [],
   listView: "suggestions",
   presetName: DEFAULT_PRESET,
   overrides: {},
@@ -138,9 +196,7 @@ export const initialState: State = {
   mergeMode: null,
   mergingGroupId: null,
   mergeStartedAt: 0,
-  comparisonView: "develop",
   batchName: "",
-  exportVariants: {},
   exporting: false,
   exportResult: null,
   importing: false,
@@ -165,8 +221,16 @@ export type Action =
   | { type: "screen/export" }
   | { type: "screen/operation"; groupId: number }
   | { type: "list/view"; view: ListView }
-  | { type: "group/chooseCapture"; groupId: number; captureId: CaptureId }
-  | { type: "group/accept"; groupId: number }
+  /** 表示カーソルを 1 枚の写真へ（フィルムストリップ / 比較タブの「単写の現像」）。 */
+  | { type: "view/capture"; groupId: number; captureId: CaptureId }
+  /** 表示カーソルを合成へ（比較タブの「ブラケット合成」）。 */
+  | { type: "view/merged"; groupId: number }
+  /** 写真の採用トグル。採用時点の variant は呼び出し側が決める（成果物の有無で既定が変わる）。 */
+  | { type: "accept/photo"; groupId: number; captureId: CaptureId; variant: PhotoExportVariant }
+  /** 合成の採用トグル。本合成の結果があるときだけ呼ばれる。 */
+  | { type: "accept/merged"; groupId: number; leadCaptureId: CaptureId }
+  /** 書き出し形式の変更。宛先は acceptedKey（capture でもグループでもない）。 */
+  | { type: "accept/variant"; key: string; variant: PhotoExportVariant }
   | { type: "preset/change"; presetName: PresetName }
   | { type: "adjust/change"; key: keyof Adjustments; value: Adjustments[keyof Adjustments] }
   | { type: "adjust/reset" }
@@ -178,9 +242,7 @@ export type Action =
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
   | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult }
   | { type: "merge/fail"; message: string }
-  | { type: "comparison/view"; view: ComparisonView }
   | { type: "export/batchName"; value: string }
-  | { type: "export/variant"; captureId: CaptureId; variant: ExportVariantChoice }
   | { type: "export/start" }
   | { type: "export/ok"; result: ExportResponse }
   | { type: "export/fail"; message: string }
@@ -225,6 +287,58 @@ function suggestPreset(health: HealthResponse | null, group: GroupInfo | undefin
   return presetFor(health, DEFAULT_PRESET) ? DEFAULT_PRESET : (health.presets[0]?.name ?? DEFAULT_PRESET);
 }
 
+/** capture_id → その写真が属するグループID。再解析後の結び直しに使う索引。 */
+function groupIdByCapture(analysis: Analysis): Map<CaptureId, number> {
+  const index = new Map<CaptureId, number>();
+  for (const group of analysis.groups) {
+    for (const captureId of group.capture_ids) index.set(captureId, group.id);
+  }
+  return index;
+}
+
+/**
+ * 再解析でグループIDが振り直されても採用を保つ（再結び付け）。
+ *
+ * 採用の同一性は写真なら capture_id、合成なら先頭フレームにある。同じフォルダの
+ * 再解析ならこれらは必ず生き残るので、そこから新しいグループを引き直すだけでよい。
+ *
+ * 気をつけるところが 3 つある（いずれも型検査では捕まらない）:
+ * 1. 採用済みの写真が新しい解析から消えている → そのアイテムを落とす（引けないので）
+ * 2. 採用済みの合成の先頭フレームが別のグループへ移った → groupId を書き換えて残す
+ * 3. 別々のグループから採用した 2 枚が同じグループに再結合する → **重複除去しない**
+ *    （同一グループから複数枚採用するのは正当な状態であり、片方を消す理由がない）
+ *
+ * なお合成の成果物（MergedResult）は groupId ではなく先頭フレームで引き直すので
+ * （mergedResultFor）、ここでグループ単位の合成結果を詰め替える必要はない。
+ */
+function reconcileAccepted(
+  accepted: AcceptedItem[],
+  analysis: Analysis,
+): { accepted: AcceptedItem[]; dropped: number } {
+  const index = groupIdByCapture(analysis);
+  const next: AcceptedItem[] = [];
+
+  for (const item of accepted) {
+    switch (item.kind) {
+      case "photo": {
+        const groupId = index.get(item.captureId);
+        // その写真自体が新しい解析に無い（フォルダから消えた等）。追跡できないので落とす。
+        if (groupId === undefined) break;
+        next.push(groupId === item.groupId ? item : { ...item, groupId });
+        break;
+      }
+      case "merged": {
+        const groupId = index.get(item.leadCaptureId);
+        if (groupId === undefined) break;
+        next.push(groupId === item.groupId ? item : { ...item, groupId });
+        break;
+      }
+    }
+  }
+
+  return { accepted: next, dropped: accepted.length - next.length };
+}
+
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "health/ok": {
@@ -245,13 +359,25 @@ export function reducer(state: State, action: Action): State {
     case "analysis/status": {
       const response = action.response;
       if (response.status === "ready") {
+        const analysis = response.analysis;
+        // 解析は 1 秒ポーリングで何度も同じ結果を返す。作り直しが起きたとき
+        // （generated_at が変わったとき）だけ採用を結び直す。毎回やると、同じ
+        // 内容の再取得でも配列の同一性が失われて useMemo が無駄に走る。
+        const regenerated = state.analysis !== null && state.analysis.generated_at !== analysis.generated_at;
+        const { accepted, dropped } = regenerated
+          ? reconcileAccepted(state.accepted, analysis)
+          : { accepted: state.accepted, dropped: 0 };
         return {
           ...state,
           analysisState: "ready",
-          analysis: response.analysis,
+          analysis,
           analysisProgress: null,
           analysisError: "",
           analyzeRequested: false,
+          accepted,
+          // 何件失われたかは伝える。黙って減っていると「書き出したら足りない」まで気づけない。
+          notice: dropped > 0 ? `再解析で見つからなくなった${dropped}件の採用を解除しました。` : state.notice,
+          noticeTone: dropped > 0 ? "error" : state.noticeTone,
         };
       }
       if (response.status === "running") {
@@ -324,29 +450,63 @@ export function reducer(state: State, action: Action): State {
         selectedGroupId: action.groupId,
         presetName: suggestPreset(state.health, group),
         overrides: {},
-        // 比較エリアはまず単写の現像側に戻す（前のグループの合成を見ていた状態を持ち越さない）。
-        comparisonView: "develop",
+        // 表示カーソルはグループ単位なのでここでは触らない。前に見ていた面のまま戻る。
       };
     }
 
     case "list/view":
       return { ...state, listView: action.view };
 
-    case "group/chooseCapture":
+    case "view/capture":
       return {
         ...state,
-        selectedCaptures: { ...state.selectedCaptures, [action.groupId]: action.captureId },
+        viewing: { ...state.viewing, [action.groupId]: { kind: "photo", captureId: action.captureId } },
       };
 
-    case "group/accept": {
-      const already = state.acceptedGroupIds.includes(action.groupId);
+    case "view/merged":
+      return { ...state, viewing: { ...state.viewing, [action.groupId]: { kind: "merged" } } };
+
+    case "accept/photo": {
+      const already = state.accepted.some(
+        (item) => item.kind === "photo" && item.captureId === action.captureId,
+      );
       return {
         ...state,
-        acceptedGroupIds: already
-          ? state.acceptedGroupIds.filter((id) => id !== action.groupId)
-          : [...state.acceptedGroupIds, action.groupId],
+        accepted: already
+          ? state.accepted.filter((item) => !(item.kind === "photo" && item.captureId === action.captureId))
+          : [
+              ...state.accepted,
+              {
+                kind: "photo",
+                groupId: action.groupId,
+                captureId: action.captureId,
+                variant: action.variant,
+              },
+            ],
       };
     }
+
+    case "accept/merged": {
+      // 合成の採用はグループにつき 1 件（acceptedKey もグループIDで作る）。
+      const already = state.accepted.some((item) => item.kind === "merged" && item.groupId === action.groupId);
+      return {
+        ...state,
+        accepted: already
+          ? state.accepted.filter((item) => !(item.kind === "merged" && item.groupId === action.groupId))
+          : [
+              ...state.accepted,
+              { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
+            ],
+      };
+    }
+
+    case "accept/variant":
+      return {
+        ...state,
+        accepted: state.accepted.map((item) =>
+          item.kind === "photo" && acceptedKey(item) === action.key ? { ...item, variant: action.variant } : item,
+        ),
+      };
 
     case "preset/change":
       return { ...state, presetName: action.presetName, overrides: {} };
@@ -371,10 +531,16 @@ export function reducer(state: State, action: Action): State {
       const { capture_id: captureId } = action.result;
       const elapsed = action.result.cached ? "保存済み結果" : `${action.result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
+      // 直前に合成を見ていても、現像を実行したらその写真の面へ切り替える。
+      // どのグループの話かは結果の capture_id から引く（アクションは持っていない）。
+      const developedGroup = state.analysis?.groups.find((item) => item.capture_ids.includes(captureId));
       // プレビュー（outputs/preview/）と本現像（outputs/developed/）は別枠で保持する。
       // 書き出しは本現像の filename しか受け付けないため、混ぜてはならない。
       return {
         ...state,
+        viewing: developedGroup
+          ? { ...state.viewing, [developedGroup.id]: { kind: "photo", captureId } }
+          : state.viewing,
         previewResults:
           action.mode === "preview"
             ? { ...state.previewResults, [captureId]: action.result }
@@ -383,8 +549,6 @@ export function reducer(state: State, action: Action): State {
           action.mode === "full" ? { ...state.fullResults, [captureId]: action.result } : state.fullResults,
         developMode: null,
         developingCapture: null,
-        // 直前に合成を見ていても、現像を実行したらその結果へ切り替える。
-        comparisonView: "develop",
         notice: `${captureId} の${modeLabel}現像が完了しました（${elapsed}）`,
         noticeTone: "info",
       };
@@ -440,7 +604,8 @@ export function reducer(state: State, action: Action): State {
             : state.mergeFullResults,
         mergeMode: null,
         mergingGroupId: null,
-        comparisonView: "merged",
+        // 合成したらそのグループの表示は合成側へ。他グループのカーソルは触らない。
+        viewing: { ...state.viewing, [action.groupId]: { kind: "merged" } },
         notice: `${result.frames}枚の${modeLabel}合成が完了しました（${elapsed}${result.aligned ? "・位置合わせあり" : ""}）`,
         noticeTone: "info",
       };
@@ -449,14 +614,8 @@ export function reducer(state: State, action: Action): State {
     case "merge/fail":
       return { ...state, mergeMode: null, mergingGroupId: null, notice: action.message, noticeTone: "error" };
 
-    case "comparison/view":
-      return { ...state, comparisonView: action.view };
-
     case "export/batchName":
       return { ...state, batchName: action.value, exportResult: null, importResult: null };
-
-    case "export/variant":
-      return { ...state, exportVariants: { ...state.exportVariants, [action.captureId]: action.variant } };
 
     case "export/start":
       return { ...state, exporting: true, exportResult: null, importResult: null };
@@ -512,8 +671,71 @@ export function reducer(state: State, action: Action): State {
 // 派生値
 // ---------------------------------------------------------------------------
 
-export function selectedCaptureOf(state: State, group: GroupInfo): CaptureId {
-  return state.selectedCaptures[group.id] ?? group.recommended_capture_id;
+/**
+ * グループ内で今見ている面。未設定なら推薦カットの写真。
+ *
+ * 再解析でグループの中身が入れ替わると、保存済みのカーソルがそのグループに属さない
+ * 写真を指すことがある。ここで弾いておけば、カーソル側を詰め替えなくても左ペインが
+ * 別グループの写真を指し続けることはない。
+ */
+export function viewingOf(state: State, group: GroupInfo): ViewingItem {
+  const current = state.viewing[group.id];
+  if (!current) return { kind: "photo", captureId: group.recommended_capture_id };
+  if (current.kind === "photo" && !group.capture_ids.includes(current.captureId)) {
+    return { kind: "photo", captureId: group.recommended_capture_id };
+  }
+  return current;
+}
+
+/**
+ * 今見ている写真。合成を見ている間は合成の先頭フレームを返す。
+ * 表示カーソルは 1 本なので、合成を見ているときは左ペインもその先頭フレームになる。
+ */
+export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
+  const current = viewingOf(state, group);
+  if (current.kind === "photo") return current.captureId;
+  // 合成の状態は **グループID をキー** に持っており、再解析では詰め替えていない
+  // （キーと構造を変えない約束のため）。IDが使い回されると、別のグループの合成が
+  // そのまま残っていることがある。ここで返した撮影IDは「この写真を採用」の宛先に
+  // なるので、グループに属さないIDを返すとそのグループの採用として別の写真が
+  // 記録されてしまう。必ずグループ内に絞ってから返す。
+  const merged = state.mergeFullResults[group.id] ?? state.mergePreviewResults[group.id];
+  const lead = [merged?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
+    (captureId) => captureId !== undefined && group.capture_ids.includes(captureId),
+  );
+  return lead ?? group.recommended_capture_id;
+}
+
+/**
+ * 採用した合成の成果物を引き直す。
+ *
+ * groupId ではなく **先頭フレーム** で引くのが要点。再解析でグループIDが振り直されても
+ * 追従できるし、合成をやり直せば（同じ先頭フレームなら）新しい成果物を自動で拾う。
+ * 逆に先頭フレームが変わる合成し直しは別物の合成なので、拾わないのが正しい。
+ */
+export function mergedResultFor(
+  mergeFullResults: State["mergeFullResults"],
+  leadCaptureId: CaptureId,
+): MergedResult | undefined {
+  return Object.values(mergeFullResults).find((result) => result.capture_ids[0] === leadCaptureId);
+}
+
+/** 採用アイテムを 1 件でも持つグループID。 */
+export function acceptedGroupIdSet(state: State): Set<number> {
+  return new Set(state.accepted.map((item) => item.groupId));
+}
+
+/** そのグループから採用している件数（1 グループから複数枚採用できる）。 */
+export function acceptedCountOf(state: State, groupId: number): number {
+  return state.accepted.filter((item) => item.groupId === groupId).length;
+}
+
+export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
+  return state.accepted.some((item) => item.kind === "photo" && item.captureId === captureId);
+}
+
+export function isMergedAccepted(state: State, groupId: number): boolean {
+  return state.accepted.some((item) => item.kind === "merged" && item.groupId === groupId);
 }
 
 export function photoOf(analysis: Analysis | null, captureId: CaptureId | undefined): PhotoInfo | null {
@@ -597,7 +819,10 @@ export function mergeBlockReason(frames: CaptureId[]): string | null {
 
 export function visibleGroups(state: State): GroupInfo[] {
   const groups = state.analysis?.groups ?? [];
-  if (state.listView === "accepted") return groups.filter((group) => state.acceptedGroupIds.includes(group.id));
+  if (state.listView === "accepted") {
+    const accepted = acceptedGroupIdSet(state);
+    return groups.filter((group) => accepted.has(group.id));
+  }
   if (state.listView === "queue") {
     const ids = new Set(developedGroupIds(state));
     return groups.filter((group) => ids.has(group.id));
