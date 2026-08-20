@@ -25,20 +25,27 @@ from . import config
 from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT
 
 EXPORT_ROOT = PROJECT_ROOT / "outputs" / "export"
+# 合成（Exposure Fusion）の出力先。`bracket.MERGED_ROOT` と同じ場所を指すが、
+# import すると cv2 まで引き込むのでここでローカルに導出する（`server.py` と同じ流儀）。
+MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"
 
 MANIFEST_VERSION = 1
 APP_NAME = "geoframe-raw-assist"
 MANIFEST_NAME = "manifest.json"
-VARIANTS = ("camera_jpg", "developed")
+VARIANTS = ("camera_jpg", "developed", "merged")
 
 MAX_BATCH_NAME_LENGTH = 64
 MAX_ITEMS = 500
+
+#: 合成JPEGのファイル名（`{先頭capture_id}-merged{枚数}-{preset}-{hash10}.jpg`）。
+_MERGED_FILENAME_PATTERN = re.compile(r"^(?P<capture_id>DSC\d{5})-merged\d+-.+\.jpg$", re.IGNORECASE)
 
 #: batch_name で許可しない文字（`_` に置換する）。
 _DISALLOWED_IN_BATCH_NAME = re.compile(r"[^A-Za-z0-9_-]")
 
 __all__ = [
     "EXPORT_ROOT",
+    "MERGED_ROOT",
     "MANIFEST_NAME",
     "export_batch",
     "export_dir_for",
@@ -100,6 +107,29 @@ def _validate_developed_filename(raw_filename: Any, capture_id: str) -> str:
         raise ValueError("現像済みファイル名が不正です。")
     if not filename.startswith(f"{capture_id}-") or not filename.lower().endswith(".jpg"):
         raise ValueError("現像済みファイル名が撮影IDと一致しません。")
+    if _MERGED_FILENAME_PATTERN.fullmatch(filename):
+        # 合成済みファイル名は `outputs/merged/` にあるので、ここで探しても必ず
+        # 「見つからない」で skip される。取り違えは沈黙させず変種の誤りとして返す。
+        raise ValueError("合成済みファイルは variant: merged で指定してください。")
+    return filename
+
+
+def _validate_merged_filename(raw_filename: Any, capture_id: str) -> str:
+    """合成済みJPEGのファイル名を検証する。
+
+    `_validate_developed_filename` と同じ趣旨だが、`-merged{枚数}-` の中置を必須にする。
+    前方一致だけだと現像済みファイル名が `merged` 経路を、合成ファイル名が `developed`
+    経路を素通りしてしまい、`OUTPUT_ROOT` と `MERGED_ROOT` の取り違えが起きる。
+    `capture_id` は**合成の先頭フレーム**（ファイル名の先頭ID）と一致させる。
+    """
+    if not isinstance(raw_filename, str) or not raw_filename.strip():
+        raise ValueError("合成済みファイル名を指定してください。")
+    filename = raw_filename.strip()
+    if "/" in filename or "\\" in filename or ".." in filename or "\x00" in filename:
+        raise ValueError("合成済みファイル名が不正です。")
+    matched = _MERGED_FILENAME_PATTERN.fullmatch(filename)
+    if matched is None or matched.group("capture_id").upper() != capture_id:
+        raise ValueError("合成済みファイル名が撮影IDと一致しません。")
     return filename
 
 
@@ -195,10 +225,14 @@ def _exif_info(
     return _exif_from_source(source_jpg)
 
 
-def _load_recipe(developed_filename: str) -> dict[str, Any] | None:
-    """現像JPEGに対応するレシピJSON（同一ステム + `.json`）を読む。"""
-    recipe_path = (OUTPUT_ROOT / f"{Path(developed_filename).stem}.json").resolve()
-    if recipe_path.parent != OUTPUT_ROOT.resolve() or not recipe_path.is_file():
+def _load_recipe(output_filename: str, root: Path) -> dict[str, Any] | None:
+    """出力JPEGに対応するレシピJSON（同一ステム + `.json`）を `root` から読む。
+
+    `root` は現像なら `OUTPUT_ROOT`、合成なら `MERGED_ROOT`。どちらも
+    `resolve()` 後の親一致でルート外への脱出を弾く。
+    """
+    recipe_path = (root / f"{Path(output_filename).stem}.json").resolve()
+    if recipe_path.parent != root.resolve() or not recipe_path.is_file():
         return None
     try:
         loaded = json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -264,7 +298,7 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         capture_id = _validate_capture_id(item.get("capture_id"))
         variant = item.get("variant")
         if variant not in VARIANTS:
-            raise ValueError("variant は camera_jpg か developed を指定してください。")
+            raise ValueError("variant は camera_jpg / developed / merged を指定してください。")
 
         source_jpg = _resolve_within(source_root, f"{capture_id}.JPG")
         source_arw = _resolve_within(source_root, f"{capture_id}.ARW")
@@ -274,6 +308,12 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
             source_path = source_jpg
             exported_name = f"{capture_id}.JPG"
             missing_reason = "元のJPGが見つかりません。"
+        elif variant == "merged":
+            merged_filename = _validate_merged_filename(item.get("merged_filename"), capture_id)
+            source_path = _resolve_within(MERGED_ROOT, merged_filename)
+            exported_name = merged_filename
+            missing_reason = "合成済みJPEGが見つかりません。"
+            recipe = _load_recipe(merged_filename, MERGED_ROOT)
         else:
             developed_filename = _validate_developed_filename(
                 item.get("developed_filename"), capture_id
@@ -281,7 +321,7 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
             source_path = _resolve_within(OUTPUT_ROOT, developed_filename)
             exported_name = developed_filename
             missing_reason = "現像済みJPEGが見つかりません。"
-            recipe = _load_recipe(developed_filename)
+            recipe = _load_recipe(developed_filename, OUTPUT_ROOT)
 
         if source_path is None or not source_path.is_file():
             skipped.append({"capture_id": capture_id, "reason": missing_reason})

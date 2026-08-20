@@ -29,6 +29,7 @@ from local_raw.export import export_batch, normalize_batch_name
 CAPTURE = "DSC02943"
 OTHER_CAPTURE = "DSC02944"
 DEVELOPED = f"{CAPTURE}-nightscape-a1b2c3d4e5.jpg"
+MERGED = f"{CAPTURE}-merged5-neutral_recovery-b2c3d4e5f6.jpg"
 
 
 class ExportTestCase(unittest.TestCase):
@@ -42,8 +43,9 @@ class ExportTestCase(unittest.TestCase):
         self.source_root = self.project_root / "sample" / "100MSDCF"
         self.output_root = self.project_root / "outputs" / "developed"
         self.export_root = self.project_root / "outputs" / "export"
+        self.merged_root = self.project_root / "outputs" / "merged"
         self.analysis_path = self.project_root / "outputs" / "analysis" / "analysis.json"
-        for directory in (self.source_root, self.output_root, self.export_root):
+        for directory in (self.source_root, self.output_root, self.export_root, self.merged_root):
             directory.mkdir(parents=True, exist_ok=True)
         self.analysis_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -54,12 +56,26 @@ class ExportTestCase(unittest.TestCase):
             json.dumps({"recipe_version": 2, "capture_id": CAPTURE, "params_hash": "a1b2c3d4e5"}),
             encoding="utf-8",
         )
+        (self.merged_root / MERGED).write_bytes(b"merged-jpeg-bytes")
+        (self.merged_root / f"{Path(MERGED).stem}.json").write_text(
+            json.dumps(
+                {
+                    "recipe_version": 1,
+                    "kind": "exposure_fusion",
+                    "capture_ids": [CAPTURE, OTHER_CAPTURE],
+                    "params_hash": "b2c3d4e5f6",
+                    "aligned": True,
+                }
+            ),
+            encoding="utf-8",
+        )
 
         patcher = patch.multiple(
             export_module,
             PROJECT_ROOT=self.project_root,
             OUTPUT_ROOT=self.output_root,
             EXPORT_ROOT=self.export_root,
+            MERGED_ROOT=self.merged_root,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -392,6 +408,68 @@ class BatchNameTests(ExportTestCase):
         result = export_batch("trip 08", self.both_items())
         self.assertEqual(result["export_dir"], "outputs/export/trip_08")
         self.assertTrue((self.export_root / "trip_08").is_dir())
+
+
+class MergedVariantTests(ExportTestCase):
+    """`variant: "merged"`（Exposure Fusion の出力）の書き出し。"""
+
+    def merged_item(self, filename=MERGED, capture_id=CAPTURE):
+        return {"capture_id": capture_id, "variant": "merged", "merged_filename": filename}
+
+    def test_copies_the_merged_jpeg(self):
+        result = export_batch("trip08", [self.merged_item()])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip08/{MERGED}"])
+        self.assertEqual(
+            (self.export_root / "trip08" / MERGED).read_bytes(), b"merged-jpeg-bytes"
+        )
+
+    def test_manifest_inlines_the_merge_recipe(self):
+        item = self.read_manifest(export_batch("trip08", [self.merged_item()]))["items"][0]
+        self.assertEqual(item["variant"], "merged")
+        self.assertEqual(item["exported_file"], MERGED)
+        self.assertEqual(item["recipe"]["kind"], "exposure_fusion")
+        self.assertEqual(item["recipe"]["capture_ids"], [CAPTURE, OTHER_CAPTURE])
+        self.assertTrue(item["recipe"]["aligned"])
+
+    def test_merged_and_developed_can_be_exported_together(self):
+        result = export_batch("trip08", self.both_items() + [self.merged_item()])
+        self.assertEqual(len(result["files"]), 3)
+        self.assertEqual(result["skipped"], [])
+
+    def test_missing_merged_file_is_skipped_not_raised(self):
+        result = export_batch(
+            "trip08", [self.merged_item(f"{CAPTURE}-merged5-neutral_recovery-0000000000.jpg")]
+        )
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["skipped"][0]["capture_id"], CAPTURE)
+
+    def test_rejects_escapes_and_wrong_shapes(self):
+        for filename in (
+            "../../etc/passwd",
+            f"subdir/{MERGED}",
+            "/etc/passwd",
+            f"{Path(MERGED).stem}.json",
+            DEVELOPED,  # `-merged{枚数}-` が無い現像済みファイル名
+            f"{CAPTURE}-merged-neutral_recovery-b2c3d4e5f6.jpg",  # 枚数が無い
+            None,
+            "",
+            123,
+        ):
+            with self.subTest(filename=filename), self.assertRaises(ValueError):
+                export_batch("trip08", [self.merged_item(filename)])
+
+    def test_rejects_another_captures_merge(self):
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.merged_item(capture_id=OTHER_CAPTURE)])
+
+    def test_merged_filename_is_not_accepted_as_developed(self):
+        """`merged` と `developed` のルートが取り違えられないこと。"""
+        with self.assertRaises(ValueError):
+            export_batch(
+                "trip08",
+                [{"capture_id": CAPTURE, "variant": "developed", "developed_filename": MERGED}],
+            )
 
 
 class DevelopedFilenameValidationTests(ExportTestCase):
