@@ -168,9 +168,6 @@ img { display: block; max-width: 100%; }
 .media-heading h2, .controls-heading h2 { margin: 5px 0 0; font-family: Georgia, "Yu Mincho", serif; font-size: 21px; font-weight: 500; }
 .operation-preview { height: auto; aspect-ratio: 3 / 2; }
 .operation-preview > img { object-fit: contain; background: #171d1b; }
-.operation-shot-picker { grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 10px; margin: 12px 0 0; }
-.operation-shot-picker .shot-open { height: auto; aspect-ratio: 3 / 2; }
-.operation-shot-picker .shot-id, .operation-shot-picker .merged-tag { right: 6px; bottom: 5px; padding: 3px 5px; }
 .controls-heading { padding-bottom: 13px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .controls-heading h2 { font-size: 18px; }
 .operation-actions { margin-top: 16px; }
@@ -228,6 +225,12 @@ img { display: block; max-width: 100%; }
 .shot-well { display: grid; align-content: center; justify-items: center; gap: 5px; width: 100%; height: 100%; padding: 6px 8px; background: #171d1b; color: #9db0aa; }
 .shot-well b { font-size: 19px; line-height: 1; }
 .shot-well em { font-style: normal; font-size: 10px; line-height: 1.4; text-align: center; }
+
+/* 操作パネル側の上書き。**.shot-picker の定義より後ろに置くこと** — 同じ詳細度なので、
+   前に置くと（以前の .operation-shot-picker small がそうだった）一切効かない。 */
+.operation-shot-picker { grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 10px; margin: 12px 0 0; }
+.operation-shot-picker .shot-open { height: auto; aspect-ratio: 3 / 2; }
+.operation-shot-picker .shot-id, .operation-shot-picker .merged-tag { right: 6px; bottom: 5px; padding: 3px 5px; }
 .analysis-card { background: #f4f6f2; border-radius: 9px; padding: 13px; }
 .analysis-title { display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 3px; }
 .analysis-title strong { font-size: 11px; }
