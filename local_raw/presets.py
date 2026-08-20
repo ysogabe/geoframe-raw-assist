@@ -110,7 +110,7 @@ PRESETS: dict[str, dict[str, Any]] = {
     "backlit_rescue": {
         "label": "逆光",
         "description": "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
-        "adjustments": _adjustments(0.2, 5, 60, 90, 1.04, 0.96, 1.08, 1.05, "light"),
+        "adjustments": _adjustments(0.35, 5, 80, 90, 1.04, 0.96, 1.08, 1.05, "light"),
     },
     "vivid_travel": {
         "label": "ビビッド",

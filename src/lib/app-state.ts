@@ -134,14 +134,30 @@ function presetFor(health: HealthResponse | null, name: PresetName): PresetInfo 
   return health?.presets.find((preset) => preset.name === name) ?? null;
 }
 
-/** RAW推薦の強さから初期プリセットを選ぶ。存在しない名前なら既定にフォールバックする。 */
+/**
+ * 推薦理由に対応するプリセットを選ぶ（契約 §3 の `reason_codes` / §5）。
+ *
+ * 以前は RAW 推薦の**強さ**だけを見ていたため、解析が「暗部の黒つぶれが 35.7%」と
+ * 言っている写真にも夜景プリセットが初期選択される、というちぐはぐが起きていた。
+ * 逆光は専用の検出コードを持たないので、**白飛びと黒つぶれが同時に立つこと**を
+ * そのシグナルとして扱う（明暗差が極端＝逆光の典型）。
+ */
+function presetForReasons(group: GroupInfo | undefined): PresetName {
+  const codes = group?.raw.reason_codes ?? [];
+  const blownHighlights = codes.includes("highlight_clipping");
+  const crushedShadows = codes.includes("deep_shadows");
+
+  if (blownHighlights && crushedShadows) return "backlit_rescue";
+  if (crushedShadows) return "shadow_rescue";
+  if (blownHighlights) return "highlight_rescue";
+  if (codes.includes("night_scene") || codes.includes("high_iso")) return "nightscape";
+  if (group?.raw.level === "none") return "landscape_clear";
+  return DEFAULT_PRESET;
+}
+
+/** 初期プリセットを決める。存在しない名前なら既定にフォールバックする。 */
 function suggestPreset(health: HealthResponse | null, group: GroupInfo | undefined): PresetName {
-  const wanted =
-    group?.raw.level === "strong"
-      ? "nightscape"
-      : group?.raw.level === "none"
-        ? "landscape_clear"
-        : DEFAULT_PRESET;
+  const wanted = presetForReasons(group);
   if (!health) return wanted;
   if (presetFor(health, wanted)) return wanted;
   return presetFor(health, DEFAULT_PRESET) ? DEFAULT_PRESET : (health.presets[0]?.name ?? DEFAULT_PRESET);
