@@ -16,6 +16,7 @@
     5. リサイズ（`max_edge`）
     6. shadow_lift LUT → Brightness → Contrast → Color → Sharpness
     7. save（EXIF は先頭フレームから継承 / sRGB ICC）
+       本合成は `outputs/merged/`、プレビュー合成は `outputs/merged_preview/` へ
 
 ⚠️ **`no_auto_bright=True` は本モジュールの要**。`engine._postprocess_params()` は
 自動明るさ補正を**有効**（`no_auto_bright=False`）にしており、フレームごとに露出が
@@ -86,6 +87,15 @@ LOGGER = logging.getLogger(__name__)
 
 MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"
 
+#: プレビュー品質の合成の出力先（契約 §4）。
+#:
+#: 本合成と**ディレクトリで分ける**のは、`params_hash` が違うだけの同居では
+#: 「そのJPEGが原寸なのかプレビューなのか」をサーバ側で判定できないため。
+#: 同居させると `POST /api/export` の `variant: "merged"` に長辺1600pxの合成を
+#: マスターとして書き出せてしまう（フロントが両者を別々に持つことでしか防げない）。
+#: 現像側が `outputs/developed/` と `outputs/preview/` に分けているのと同じ理由・同じ形。
+MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"
+
 #: 合成に使えるフレーム数の範囲。
 #:
 #: 上限 9 は「1グループ＝1シーン」を保証できないことへの防波堤。実データには
@@ -127,6 +137,7 @@ __all__ = [
     "ALIGN_VERSION",
     "BRACKET_VERSION",
     "MAX_FRAMES",
+    "MERGED_PREVIEW_ROOT",
     "MERGED_ROOT",
     "MIN_FRAMES",
     "RawDevelopmentError",
@@ -225,8 +236,12 @@ def _decode_frame(
         with rawpy.imread(str(source_path)) as raw:
             rgb = raw.postprocess(**_merge_postprocess_params(raw, adjustments, preview))
     except (rawpy.LibRawError, OSError) as error:
+        # 例外の詳細（`[Errno 13] ... '/Users/.../DSC04510.ARW'` のように内部の絶対パスを
+        # 含みうる）はレスポンスに載せず**ログにだけ**出す（契約 §0 / `server._fail()` と同じ流儀）。
+        # 例外連鎖（`from error`）は残すので、サーバログ側では原因を追える。
+        LOGGER.warning("RAWデコードに失敗しました（%s）: %s", source_path.name, error)
         raise RawDevelopmentError(
-            f"RAWデコードに失敗しました: {source_path.name} ({error})"
+            f"RAWデコードに失敗しました: {source_path.name}"
         ) from error
     return np.asarray(rgb, dtype=np.uint8)
 
@@ -429,7 +444,9 @@ def merge_bracket(
     直下に限定し、重複は拒否する。処理順序とパラメータの意図はモジュール docstring を参照。
     """
     if cv2 is None:
-        raise RawDevelopmentError(f"合成に必要な OpenCV を読み込めません: {_CV2_IMPORT_ERROR}")
+        # import 失敗の中身（dlopen が返すライブラリの絶対パス等）もレスポンスには載せない（契約 §0）。
+        LOGGER.warning("OpenCV を読み込めません: %s", _CV2_IMPORT_ERROR)
+        raise RawDevelopmentError("合成に必要な OpenCV を読み込めません。")
 
     normalized_ids = _validate_capture_ids(capture_ids)
     if preset_name not in PRESETS:
@@ -474,10 +491,14 @@ def merge_bracket(
         str(source_root),
     )
 
-    MERGED_ROOT.mkdir(parents=True, exist_ok=True)
+    # プレビュー合成と本合成は**ディレクトリで分ける**（`engine.develop_raw` と同じ形）。
+    # ファイル名は `params_hash` が違うので衝突しないが、それだけでは
+    # 「原寸かプレビューか」をサーバ側で判定できない（定数側のコメント参照）。
+    destination_root = MERGED_PREVIEW_ROOT if preview else MERGED_ROOT
+    destination_root.mkdir(parents=True, exist_ok=True)
     stem = f"{normalized_ids[0]}-merged{len(normalized_ids)}-{preset_name}-{params_hash}"
-    output_path = MERGED_ROOT / f"{stem}.jpg"
-    recipe_path = MERGED_ROOT / f"{stem}.json"
+    output_path = destination_root / f"{stem}.jpg"
+    recipe_path = destination_root / f"{stem}.json"
 
     if not force and output_path.is_file() and recipe_path.is_file():
         try:
@@ -612,7 +633,7 @@ def main() -> None:
     parser.add_argument(
         "--preview",
         action="store_true",
-        help="プレビュー合成（half_size・長辺1600px）。",
+        help="プレビュー合成（half_size・長辺1600px・outputs/merged_preview/ へ出力）。",
     )
     parser.add_argument(
         "--adjustments",
