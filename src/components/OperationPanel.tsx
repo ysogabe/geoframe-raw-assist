@@ -370,10 +370,6 @@ export function OperationPanel({
             onResetAdjustments={onResetAdjustments}
             photoAccepted={isPhotoAccepted(captureId)}
             onAcceptPhoto={() => onAcceptPhoto(captureId)}
-            // 採用できるのは本合成の結果だけ（プレビューは書き出しに使えない）。
-            canAcceptMerged={Boolean(mergeFullResult)}
-            mergedAccepted={mergedAccepted}
-            onAcceptMerged={onAcceptMerged}
             onDevelop={onDevelop}
             developMode={developMode}
             elapsedLabel={elapsedLabel}
@@ -401,6 +397,8 @@ export function OperationPanel({
           presetLabel={presetLabel}
           hasPreview={Boolean(mergePreviewResult)}
           hasFull={Boolean(mergeFullResult)}
+          accepted={mergedAccepted}
+          onAcceptMerged={onAcceptMerged}
           panelRef={mergePanelRef}
         />
       )}

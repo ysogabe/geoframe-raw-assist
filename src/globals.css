@@ -132,6 +132,12 @@ img { display: block; max-width: 100%; }
 .recommendation strong, .recommendation small { display: block; }
 .recommendation strong { font-size: 11px; }
 .recommendation small { color: var(--muted); font-size: 11px; line-height: 1.55; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 採用の内訳。件数バッジだけでは「何を採用したのか」が分からないので、
+   カードを開かずに読めるようにする。採用は一覧の中で唯一の緑ベタ（.accepted-badge）
+   と揃えたいが、本文中では読みやすさを優先してソフト緑にする。 */
+.accepted-summary { display: flex; align-items: baseline; gap: 5px; margin: 8px 0 0; padding: 4px 7px; border-radius: 5px; background: var(--green-soft); color: var(--green); font-size: 11px; font-weight: 800; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.accepted-summary > span { flex: 0 0 auto; }
+
 .group-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #ededE8; display: flex; align-items: center; justify-content: space-between; }
 .raw-pill { font-size: 11px; font-weight: 800; padding: 4px 7px; border-radius: 5px; }
 .raw-none { color: #63706c; background: #eef0ed; }
@@ -268,6 +274,9 @@ img { display: block; max-width: 100%; }
 .primary-action { background: var(--green); color: white; border: 1px solid var(--green); }
 .secondary-action { color: var(--green); background: white; border: 1px solid #9cbeb2; }
 .secondary-action:disabled { opacity: .4; cursor: not-allowed; }
+/* 採用トグル。未採用は「押してほしい」ので塗り、採用中は「もう済んでいる」ので
+   ソフト緑の輪郭に落とす（文言も「採用を外す」に変わる）。状態は aria-pressed が正。 */
+.accept-toggle.on { background: var(--green-soft); border-color: #9cbeb2; color: var(--green); }
 .safety-note { text-align: center; color: #8b9491; font-size: 11px; margin: 10px 0 0; }
 
 @media (max-width: 1100px) {
@@ -501,6 +510,11 @@ img { display: block; max-width: 100%; }
 .bracket-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 14px; }
 .bracket-actions button { border-radius: 8px; padding: 10px 12px; font-size: 11px; font-weight: 800; cursor: pointer; min-height: 40px; }
 .bracket-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.bracket-accept { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e6e1; }
+.bracket-accept button { flex: 0 0 auto; min-height: 40px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--green); background: var(--green); color: white; font-size: 11px; font-weight: 800; cursor: pointer; }
+.bracket-accept button:disabled { opacity: .4; cursor: not-allowed; }
+.bracket-accept small { min-width: 0; color: #8b9491; font-size: 11px; line-height: 1.5; }
+
 .bracket-block { margin: 8px 0 0; color: #a45d3d; font-size: 11px; font-weight: 800; text-align: center; }
 .bracket-merge .develop-hint { margin-top: 8px; }
 

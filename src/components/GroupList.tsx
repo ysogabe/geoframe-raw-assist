@@ -6,10 +6,12 @@ import type { Analysis, CaptureId, GroupInfo } from "../lib/types";
 type GroupListProps = {
   analysis: Analysis;
   visibleGroups: GroupInfo[];
-  /** カードの代表として出すカット。表示カーソルであって採用そのものではない。 */
-  viewingCaptureOf: (group: GroupInfo) => CaptureId;
-  /** そのグループから採用している件数。1 グループから複数枚採用できる。 */
-  acceptedCountOf: (group: GroupInfo) => number;
+  /** カードの代表として出すカット。採用があればその 1 件目、無ければ表示カーソル。 */
+  heroCaptureOf: (group: GroupInfo) => CaptureId;
+  /** 推薦カット。ヘロー（採用優先）とは別物なので分けて受け取る。 */
+  recommendedCaptureOf: (group: GroupInfo) => CaptureId;
+  /** そのグループの採用の内訳（例: ["DSC02943", "合成3枚"]）。件数もここから数える。 */
+  acceptedSummaryOf: (group: GroupInfo) => string[];
   /**
    * 採用アイテムの総数。**グループ数ではない**。
    * 一覧バッジ・このタブ・Topbar の 3 か所で同じ数が出ていないと、
@@ -25,8 +27,9 @@ type GroupListProps = {
 export function GroupList({
   analysis,
   visibleGroups,
-  viewingCaptureOf,
-  acceptedCountOf,
+  heroCaptureOf,
+  recommendedCaptureOf,
+  acceptedSummaryOf,
   acceptedItemCount,
   developedGroupIds,
   activeView,
@@ -46,26 +49,32 @@ export function GroupList({
 
       <div className="group-stack">
         {visibleGroups.length ? visibleGroups.map((group) => {
-          const captureId = viewingCaptureOf(group);
-          const hero = analysis.photos[captureId];
+          const heroCaptureId = heroCaptureOf(group);
+          const hero = analysis.photos[heroCaptureId];
+          // 推薦の行はあくまで「解析のおすすめ」。ヘローが採用側に寄っても動かさない。
+          const recommendedCaptureId = recommendedCaptureOf(group);
           const reason = group.recommendation_reasons[0]?.text ?? "";
           // 1 グループから複数枚採用できるので、バッジは二値ではなく件数を出す。
-          const acceptedCount = acceptedCountOf(group);
+          const acceptedSummary = acceptedSummaryOf(group);
           return (
             <article key={group.id} className="group-card" onClick={() => onOpenGroup(group.id)}>
               <div className="group-hero">
                 {hero ? (
-                  <img src={assetUrl(hero.thumb)} alt={`${group.title} ${captureId}`} loading="lazy" decoding="async" />
+                  <img src={assetUrl(hero.thumb)} alt={`${group.title} ${heroCaptureId}`} loading="lazy" decoding="async" />
                 ) : null}
                 <span className="photo-count">▧ {group.capture_ids.length}枚</span>
-                {acceptedCount > 0 && (
-                  <span className="accepted-badge">✓ 採用 {acceptedCount}件</span>
+                {acceptedSummary.length > 0 && (
+                  <span className="accepted-badge">✓ 採用 {acceptedSummary.length}件</span>
                 )}
               </div>
               <div className="group-copy">
                 <div className="group-meta"><span>{groupKindLabel(group.kind)}</span><small>信頼度 {formatConfidence(group.confidence)}%</small></div>
                 <h3>{group.title}</h3>
-                <div className="recommendation"><span className="spark">✦</span><p><strong>{captureId}</strong><small>{reason}</small></p></div>
+                <div className="recommendation"><span className="spark">✦</span><p><strong>{recommendedCaptureId}</strong><small>{reason}</small></p></div>
+                {/* 何を採用したのかは件数だけでは分からない。カードを開かずに読めるようにする。 */}
+                {acceptedSummary.length > 0 && (
+                  <p className="accepted-summary"><span aria-hidden="true">✓</span>採用: {acceptedSummary.join(" / ")}</p>
+                )}
                 <div className="group-footer">
                   <span className={rawPillClass(group.raw.level)}>{group.raw.label}</span>
                   <button onClick={(event) => { event.stopPropagation(); onOpenGroup(group.id); }}>操作パネルを開く <b>→</b></button>

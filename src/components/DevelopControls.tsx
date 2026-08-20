@@ -18,13 +18,6 @@ type DevelopControlsProps = {
    */
   photoAccepted: boolean;
   onAcceptPhoto: () => void;
-  /**
-   * 合成の採用。本合成の結果があるときだけボタンを出す（プレビューは書き出せない）。
-   * 表示中の面に依存させず常に並べるので、合成を見ていなくても採用できる。
-   */
-  canAcceptMerged: boolean;
-  mergedAccepted: boolean;
-  onAcceptMerged: () => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -46,9 +39,6 @@ export function DevelopControls({
   onResetAdjustments,
   photoAccepted,
   onAcceptPhoto,
-  canAcceptMerged,
-  mergedAccepted,
-  onAcceptMerged,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -161,15 +151,6 @@ export function DevelopControls({
         >
           {photoAccepted ? "採用を外す" : "この写真を採用する"}
         </button>
-        {canAcceptMerged && (
-          <button
-            className={`secondary-action accept-toggle${mergedAccepted ? " on" : ""}`}
-            onClick={onAcceptMerged}
-            aria-pressed={mergedAccepted}
-          >
-            {mergedAccepted ? "採用を外す" : "合成した1枚を採用する"}
-          </button>
-        )}
       </div>
     </>
   );

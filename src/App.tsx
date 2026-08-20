@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  acceptedCountOf,
   acceptedKey,
+  acceptedSummaryOf,
   activePreset,
   changedAdjustmentKeys,
   developedGroupIds,
   effectiveAdjustments,
+  heroCaptureOf,
   initialState,
   isBracketGroup,
   isMergedAccepted,
@@ -625,8 +626,9 @@ export default function Home() {
           <GroupList
             analysis={analysis}
             visibleGroups={groupsToShow}
-            viewingCaptureOf={(item) => viewingCaptureOf(state, item)}
-            acceptedCountOf={(item) => acceptedCountOf(state, item.id)}
+            heroCaptureOf={(item) => heroCaptureOf(state, item)}
+            recommendedCaptureOf={(item) => item.recommended_capture_id}
+            acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
             acceptedItemCount={accepted.length}
             developedGroupIds={developedIds}
             activeView={state.listView}
