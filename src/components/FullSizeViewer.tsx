@@ -349,6 +349,15 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
   const markReady = (target: Face) =>
     setReady((prev) => (prev[target] ? prev : { ...prev, [target]: true }));
 
+  /**
+   * ブラウザキャッシュから即座に埋まった画像は、React が onLoad を張るより先に
+   * 読み終わっていることがある。その場合 onLoad は二度と飛ばず、スピナーが残り続ける。
+   * mount 時点で complete なら、そこで読み込み済みとして扱う。
+   */
+  const readyRefFor = (target: Face) => (node: HTMLImageElement | null) => {
+    if (node?.complete && node.naturalWidth) markReady(target);
+  };
+
   return (
     <dialog
       ref={dialogRef}
@@ -472,6 +481,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
                   style={{ visibility: shown === "before" ? "visible" : "hidden" }}
                   draggable={false}
                   decoding="async"
+                  ref={readyRefFor("before")}
                   onLoad={() => markReady("before")}
                   onError={() => setFailure(`${source.beforeLabel}の画像を読み込めませんでした。`)}
                 />
@@ -484,6 +494,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
                   style={{ visibility: shown === "after" ? "visible" : "hidden" }}
                   draggable={false}
                   decoding="async"
+                  ref={readyRefFor("after")}
                   onLoad={() => markReady("after")}
                   onError={() => setFailure(`${source.afterLabel}の画像を読み込めませんでした。`)}
                 />
