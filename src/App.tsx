@@ -5,13 +5,17 @@ import {
   developedGroupIds,
   effectiveAdjustments,
   initialState,
+  isBracketGroup,
   isValidBatchName,
+  mergeBlockReason,
+  mergeFramesOf,
   photoOf,
   reducer,
   selectedCaptureOf,
   selectedGroup,
   visibleGroups,
   type DevelopMode,
+  type ExportVariantChoice,
 } from "./lib/app-state";
 import {
   developRaw,
@@ -22,6 +26,7 @@ import {
   importToPhotos,
   isEndpointUnavailable,
   isSourceFolderApiError,
+  mergeBracket,
   setSourceFolder,
   startAnalyze,
 } from "./lib/raw-api";
@@ -42,6 +47,9 @@ import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
+// Python 側の POST /api/merge-bracket が未実装（404）・停止中のとき。汎用の失敗文言だと
+// 「合成そのものが壊れている」と読めてしまうため、書き出しと同じ流儀で専用文を出す。
+const MERGE_UNAVAILABLE = "ブラケット合成機能を準備中です。しばらくしてからお試しください。";
 
 // ローカルRAWエンジンは rawpy/numpy/opencv/lensfunpy の import で起動に数秒かかる。
 // デスクトップシェルはウィンドウ表示とサイドカー起動をほぼ同時に行うため、初回の
@@ -69,7 +77,7 @@ export default function Home() {
   const [setupState, setSetupState] = useState<SetupState | null>(null);
   const comparisonRef = useRef<HTMLDivElement>(null);
 
-  const { analysis, health, screen, developMode } = state;
+  const { analysis, health, screen, developMode, mergeMode } = state;
 
   // ---- ローカルRAWエンジンの死活確認（起動直後は数秒未起動のため再試行あり） -----
   // Tauri内で初回セットアップ（venv作成/pip install）が進行中は、その分だけ
@@ -198,12 +206,12 @@ export default function Home() {
     };
   }, [state.engineStatus]);
 
-  // ---- 現像の経過秒表示（tick を進めるだけ。経過秒はレンダー時に導出する） ----
+  // ---- 現像・合成の経過秒表示（tick を進めるだけ。経過秒はレンダー時に導出する） ----
   useEffect(() => {
-    if (!developMode) return;
+    if (!developMode && !mergeMode) return;
     const timer = window.setInterval(() => setTick(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, [developMode]);
+  }, [developMode, mergeMode]);
 
   // ---- 派生値 --------------------------------------------------------------
   const group = selectedGroup(state);
@@ -214,6 +222,14 @@ export default function Home() {
   const groupsToShow = useMemo(() => visibleGroups(state), [state]);
   const developedIds = useMemo(() => developedGroupIds(state), [state]);
   const engineVersion = health ? `rawpy ${health.rawpy_version}` : "";
+  // ブラケット合成の導線は bracket グループ（または exposure_bracket の理由付き）にだけ出す。
+  const isBracket = group ? isBracketGroup(group) : false;
+  const mergeFrames = useMemo(() => (group ? mergeFramesOf(state, group) : []), [state, group]);
+  const mergeBlock = mergeBlockReason(mergeFrames);
+  // 合成中に別グループへ移動しても fetch は続く（結果は merge/ok の groupId に入る）。
+  // 実行中表示はそのグループにだけ出し、重い処理の同時実行防止は全体で効かせる。
+  const mergeBusy = mergeMode !== null;
+  const groupMergeMode = group && state.mergingGroupId === group.id ? mergeMode : null;
   const coverThumb = useMemo(() => {
     if (!analysis) return null;
     const first = analysis.groups[0];
@@ -228,8 +244,14 @@ export default function Home() {
       .map((item) => {
         const chosen = selectedCaptureOf(state, item);
         const developed = state.fullResults[chosen];
-        const variant = state.exportVariants[chosen] ?? (developed ? "developed" : "camera_jpg");
-        return { group: item, captureId: chosen, developed, variant: developed ? variant : "camera_jpg" };
+        // 合成結果はグループ単位。書き出せるのは本合成（プレビューは品質が足りない）。
+        const merged = state.mergeFullResults[item.id];
+        const fallback: ExportVariantChoice = developed ? "developed" : merged ? "merged" : "camera_jpg";
+        const requested = state.exportVariants[chosen] ?? fallback;
+        // 実体の無い選択（結果を出す前に選んだ / 後から状態が消えた）は必ず落とす。
+        const missing =
+          (requested === "developed" && !developed) || (requested === "merged" && !merged);
+        return { group: item, captureId: chosen, developed, merged, variant: missing ? fallback : requested };
       });
   }, [analysis, state]);
 
@@ -329,14 +351,58 @@ export default function Home() {
     }
   }
 
+  async function runMerge(mode: DevelopMode) {
+    if (!group || !isBracketGroup(group)) return;
+    // 合成はフレーム数ぶんのRAWデコードで数十秒かかる。ボタンは実行中に無効化しているが、
+    // 多重起動はコストが大きいのでここでも弾く。
+    if (state.developMode || state.mergeMode) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください", tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) {
+      dispatch({ type: "notice/set", message: "プリセットを取得できていません。", tone: "error" });
+      return;
+    }
+    const frames = mergeFramesOf(state, group);
+    // サーバは 2〜9 枚の外を HTTP 400 で弾く。ボタン側でも止めているが、
+    // 念のためここでも同じ条件で握って「押せるのに必ず失敗する」経路を塞ぐ。
+    const blocked = mergeBlockReason(frames);
+    if (blocked) {
+      dispatch({ type: "notice/set", message: blocked, tone: "error" });
+      return;
+    }
+
+    dispatch({ type: "merge/start", mode, groupId: group.id });
+    try {
+      const result = await mergeBracket(frames, preset.name, {
+        adjustments: state.overrides,
+        preview: mode === "preview",
+        maxEdge: mode === "preview" ? undefined : 6000,
+      });
+      dispatch({ type: "merge/ok", mode, groupId: group.id, result });
+      window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
+    } catch (error) {
+      dispatch({
+        type: "merge/fail",
+        message: isEndpointUnavailable(error) ? MERGE_UNAVAILABLE : messageOf(error, "ブラケット合成に失敗しました"),
+      });
+    }
+  }
+
   async function runExport() {
     if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
     dispatch({ type: "export/start" });
-    const items: ExportItem[] = exportRows.map((row) =>
-      row.variant === "developed" && row.developed
-        ? { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename }
-        : { capture_id: row.captureId, variant: "camera_jpg" },
-    );
+    const items: ExportItem[] = exportRows.map((row) => {
+      if (row.variant === "developed" && row.developed) {
+        return { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename };
+      }
+      if (row.variant === "merged" && row.merged) {
+        return { capture_id: row.captureId, variant: "merged", merged_filename: row.merged.filename };
+      }
+      return { capture_id: row.captureId, variant: "camera_jpg" };
+    });
     try {
       const result = await exportSelection(state.batchName, items);
       dispatch({ type: "export/ok", result });
@@ -368,6 +434,9 @@ export default function Home() {
     (setupState.stage === "creating-venv" || setupState.stage === "installing-deps" || setupState.stage === "failed");
   const elapsed = developMode ? Math.max(0, (tick - state.developStartedAt) / 1000) : 0;
   const elapsedLabel = `${elapsed.toFixed(1)}秒`;
+  // 合成は現像と別の開始時刻を持つ（同じラベルを使い回すと違う数字が出る）。
+  const mergeElapsed = mergeBusy ? Math.max(0, (tick - state.mergeStartedAt) / 1000) : 0;
+  const mergeElapsedLabel = `${mergeElapsed.toFixed(1)}秒`;
 
   return (
     <div className="app-shell">
@@ -446,6 +515,19 @@ export default function Home() {
             previewResult={state.previewResults[captureId]}
             fullResult={state.fullResults[captureId]}
             comparisonRef={comparisonRef}
+            isBracket={isBracket}
+            mergeFrames={mergeFrames}
+            onToggleMergeFrame={(id) => dispatch({ type: "merge/toggleFrame", groupId: group.id, captureId: id })}
+            onResetMergeFrames={() => dispatch({ type: "merge/resetFrames", groupId: group.id })}
+            onMerge={(mode) => void runMerge(mode)}
+            mergeMode={groupMergeMode}
+            mergeBusy={mergeBusy}
+            mergeElapsedLabel={mergeElapsedLabel}
+            mergeBlockReason={mergeBlock}
+            mergePreviewResult={state.mergePreviewResults[group.id]}
+            mergeFullResult={state.mergeFullResults[group.id]}
+            comparisonView={state.comparisonView}
+            onChangeComparisonView={(view) => dispatch({ type: "comparison/view", view })}
           />
         ) : screen === "export" ? (
           <ExportPanel

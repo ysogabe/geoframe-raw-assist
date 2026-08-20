@@ -10,6 +10,7 @@ import type {
   GroupInfo,
   HealthResponse,
   ImportToPhotosResponse,
+  MergedResult,
   PhotoInfo,
   PresetInfo,
   PresetName,
@@ -21,9 +22,18 @@ export type EngineStatus = "checking" | "ready" | "offline";
 export type AnalysisState = "unknown" | "absent" | "running" | "ready" | "error";
 export type ListView = "suggestions" | "queue" | "accepted";
 export type DevelopMode = "preview" | "full";
-export type ExportVariantChoice = "camera_jpg" | "developed";
+export type ExportVariantChoice = "camera_jpg" | "developed" | "merged";
+/** 比較エリアに出す結果の種類。単写の現像結果とブラケット合成結果を切り替える。 */
+export type ComparisonView = "develop" | "merged";
 
 const DEFAULT_PRESET: PresetName = "neutral_recovery";
+
+/**
+ * ブラケット合成に渡せるフレーム数（契約: POST /api/merge-bracket）。
+ * 範囲外はサーバが HTTP 400 を返すため、UI 側も同じ範囲で実行を止める。
+ */
+export const MERGE_MIN_FRAMES = 2;
+export const MERGE_MAX_FRAMES = 9;
 
 export type State = {
   screen: Screen;
@@ -53,6 +63,18 @@ export type State = {
   developStartedAt: number;
   previewResults: Record<CaptureId, DevelopedResult>;
   fullResults: Record<CaptureId, DevelopedResult>;
+  /**
+   * ブラケット合成の状態は **グループ単位** で持つ（capture_id 単位ではない）。
+   * 合成は複数フレームの産物であり、どの 1 枚にも属さないため。
+   */
+  mergeSelections: Record<number, CaptureId[]>;
+  mergePreviewResults: Record<number, MergedResult>;
+  /** 書き出し（variant="merged"）に使えるのは本合成の結果だけ。プレビューと混ぜてはならない。 */
+  mergeFullResults: Record<number, MergedResult>;
+  mergeMode: DevelopMode | null;
+  mergingGroupId: number | null;
+  mergeStartedAt: number;
+  comparisonView: ComparisonView;
   batchName: string;
   exportVariants: Record<CaptureId, ExportVariantChoice>;
   exporting: boolean;
@@ -86,6 +108,13 @@ export const initialState: State = {
   developStartedAt: 0,
   previewResults: {},
   fullResults: {},
+  mergeSelections: {},
+  mergePreviewResults: {},
+  mergeFullResults: {},
+  mergeMode: null,
+  mergingGroupId: null,
+  mergeStartedAt: 0,
+  comparisonView: "develop",
   batchName: "",
   exportVariants: {},
   exporting: false,
@@ -119,6 +148,12 @@ export type Action =
   | { type: "develop/start"; mode: DevelopMode; captureId: CaptureId }
   | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult }
   | { type: "develop/fail"; message: string }
+  | { type: "merge/toggleFrame"; groupId: number; captureId: CaptureId }
+  | { type: "merge/resetFrames"; groupId: number }
+  | { type: "merge/start"; mode: DevelopMode; groupId: number }
+  | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult }
+  | { type: "merge/fail"; message: string }
+  | { type: "comparison/view"; view: ComparisonView }
   | { type: "export/batchName"; value: string }
   | { type: "export/variant"; captureId: CaptureId; variant: ExportVariantChoice }
   | { type: "export/start" }
@@ -262,6 +297,8 @@ export function reducer(state: State, action: Action): State {
         selectedGroupId: action.groupId,
         presetName: suggestPreset(state.health, group),
         overrides: {},
+        // 比較エリアはまず単写の現像側に戻す（前のグループの合成を見ていた状態を持ち越さない）。
+        comparisonView: "develop",
       };
     }
 
@@ -319,6 +356,8 @@ export function reducer(state: State, action: Action): State {
           action.mode === "full" ? { ...state.fullResults, [captureId]: action.result } : state.fullResults,
         developMode: null,
         developingCapture: null,
+        // 直前に合成を見ていても、現像を実行したらその結果へ切り替える。
+        comparisonView: "develop",
         notice: `${captureId} の${modeLabel}現像が完了しました（${elapsed}）`,
         noticeTone: "info",
       };
@@ -326,6 +365,65 @@ export function reducer(state: State, action: Action): State {
 
     case "develop/fail":
       return { ...state, developMode: null, developingCapture: null, notice: action.message, noticeTone: "error" };
+
+    case "merge/toggleFrame": {
+      const group = state.analysis?.groups.find((item) => item.id === action.groupId);
+      if (!group) return state;
+      const current = new Set(mergeFramesOf(state, group));
+      if (current.has(action.captureId)) current.delete(action.captureId);
+      else current.add(action.captureId);
+      // 撮影順（group.capture_ids の並び）を保ったまま作り直す。チェックした順ではない。
+      const next = group.capture_ids.filter((id) => current.has(id));
+      return { ...state, mergeSelections: { ...state.mergeSelections, [action.groupId]: next } };
+    }
+
+    case "merge/resetFrames": {
+      const group = state.analysis?.groups.find((item) => item.id === action.groupId);
+      if (!group) return state;
+      return {
+        ...state,
+        mergeSelections: { ...state.mergeSelections, [action.groupId]: defaultMergeFrames(group) },
+      };
+    }
+
+    case "merge/start":
+      return {
+        ...state,
+        mergeMode: action.mode,
+        mergingGroupId: action.groupId,
+        mergeStartedAt: Date.now(),
+        notice: `ブラケットを${action.mode === "preview" ? "プレビュー" : "本"}合成しています…`,
+        noticeTone: "info",
+      };
+
+    case "merge/ok": {
+      const { result } = action;
+      const elapsed = result.cached ? "保存済み結果" : `${result.elapsed_seconds.toFixed(1)}秒`;
+      const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
+      // プレビューと本合成は別枠。書き出しは本合成の filename しか受け付けないため混ぜない。
+      return {
+        ...state,
+        mergePreviewResults:
+          action.mode === "preview"
+            ? { ...state.mergePreviewResults, [action.groupId]: result }
+            : state.mergePreviewResults,
+        mergeFullResults:
+          action.mode === "full"
+            ? { ...state.mergeFullResults, [action.groupId]: result }
+            : state.mergeFullResults,
+        mergeMode: null,
+        mergingGroupId: null,
+        comparisonView: "merged",
+        notice: `${result.frames}枚の${modeLabel}合成が完了しました（${elapsed}${result.aligned ? "・位置合わせあり" : ""}）`,
+        noticeTone: "info",
+      };
+    }
+
+    case "merge/fail":
+      return { ...state, mergeMode: null, mergingGroupId: null, notice: action.message, noticeTone: "error" };
+
+    case "comparison/view":
+      return { ...state, comparisonView: action.view };
 
     case "export/batchName":
       return { ...state, batchName: action.value, exportResult: null, importResult: null };
@@ -409,12 +507,59 @@ export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
   );
 }
 
-/** 現像済み（本現像）の結果を持つグループID。 */
+/** 現像済み（本現像）または本合成の結果を持つグループID。 */
 export function developedGroupIds(state: State): number[] {
   const groups = state.analysis?.groups ?? [];
   return groups
-    .filter((group) => group.capture_ids.some((captureId) => state.fullResults[captureId]))
+    .filter(
+      (group) =>
+        group.capture_ids.some((captureId) => state.fullResults[captureId]) ||
+        Boolean(state.mergeFullResults[group.id]),
+    )
     .map((group) => group.id);
+}
+
+// ---------------------------------------------------------------------------
+// ブラケット合成
+// ---------------------------------------------------------------------------
+
+/**
+ * 合成の導線を出してよいグループか。
+ * グループ種別が bracket か、RAW 推薦の理由に exposure_bracket が入っていれば対象。
+ * （解析は「露出を変えて撮影されています」を理由コード側にも立てるため、両方を見る）
+ */
+export function isBracketGroup(group: GroupInfo): boolean {
+  return group.kind === "bracket" || group.raw.reason_codes.includes("exposure_bracket");
+}
+
+/**
+ * 既定の合成対象フレーム。9枚以下なら全部、10枚以上なら先頭9枚。
+ *
+ * 実データには 5枚AEB × 4セットが 1 グループ（20枚）にまとまった例があり、全部を
+ * 混ぜると別シーンが合成されてしまう。既定を上限で切っておけば「押した瞬間に必ず
+ * 400」にはならないが、**先頭9枚もシーンをまたぐ**ため、UI 側で選び直しを促すこと。
+ */
+export function defaultMergeFrames(group: GroupInfo): CaptureId[] {
+  return group.capture_ids.slice(0, MERGE_MAX_FRAMES);
+}
+
+/** 現在の合成対象フレーム。ユーザーが触っていなければ既定値。 */
+export function mergeFramesOf(state: State, group: GroupInfo): CaptureId[] {
+  return state.mergeSelections[group.id] ?? defaultMergeFrames(group);
+}
+
+/**
+ * 合成を実行できない理由。実行できるなら null。
+ * サーバは 2〜9 枚の外を HTTP 400 で弾くので、UI 側でも同じ条件でボタンを止める。
+ */
+export function mergeBlockReason(frames: CaptureId[]): string | null {
+  if (frames.length < MERGE_MIN_FRAMES) {
+    return `合成には${MERGE_MIN_FRAMES}枚以上の選択が必要です（選択中 ${frames.length}枚）。`;
+  }
+  if (frames.length > MERGE_MAX_FRAMES) {
+    return `一度に合成できるのは${MERGE_MAX_FRAMES}枚までです（選択中 ${frames.length}枚）。減らしてください。`;
+  }
+  return null;
 }
 
 export function visibleGroups(state: State): GroupInfo[] {

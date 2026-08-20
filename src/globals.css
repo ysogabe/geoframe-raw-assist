@@ -434,3 +434,53 @@ img { display: block; max-width: 100%; }
 .source-folder-button span { color: #5ebc9c; font-size: 13px; }
 .source-folder-button:hover:not(:disabled) { background: #263431; color: #fff; }
 .source-folder-button:disabled { opacity: .42; cursor: not-allowed; }
+
+/* ---- ブラケット合成 ------------------------------------------------------
+   操作パネルの下段に全幅で置く。20枚のグループでも一覧できるよう、フレームは
+   auto-fill の多段グリッドにして縦に伸びすぎないようにしている。 */
+.bracket-hint { display: flex; align-items: flex-start; gap: 10px; padding: 12px; margin-top: 10px; border: 1px solid #9fcabb; background: var(--green-soft); border-radius: 9px; }
+.bracket-icon { flex: 0 0 auto; width: 25px; height: 25px; background: var(--green); color: white; border-radius: 5px; display: grid; place-items: center; font-size: 12px; }
+.bracket-hint strong { font-size: 11px; }
+.bracket-hint p { margin: 4px 0 0; color: #3f5a52; font-size: 11px; line-height: 1.5; }
+.bracket-jump { margin-top: 6px; padding: 0; border: 0; background: transparent; color: var(--green); font-size: 11px; font-weight: 800; text-decoration: underline; cursor: pointer; }
+
+.bracket-merge { margin-top: 22px; padding: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 10px 32px rgba(43,54,50,.07); scroll-margin-top: 18px; }
+.bracket-head { display: flex; justify-content: space-between; align-items: end; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.bracket-head h3 { margin: 5px 0 0; font-family: Georgia, "Yu Mincho", serif; font-size: 18px; font-weight: 500; }
+.bracket-count { flex: 0 0 auto; color: var(--green); background: var(--green-soft); border-radius: 6px; padding: 4px 8px; font-size: 11px; font-weight: 800; }
+.bracket-lead { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.bracket-warning { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #ead9bf; border-left-width: 3px; border-left-color: #d58b43; background: #fbf4e9; border-radius: 7px; color: #746b5d; font-size: 11px; line-height: 1.6; }
+.bracket-warning strong { color: #7a5a2c; }
+
+.bracket-frames { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 7px; }
+.bracket-frames li { border: 1px solid var(--line); border-radius: 8px; background: #fafaf7; }
+.bracket-frames li.selected { border-color: var(--green); background: var(--green-soft); }
+.bracket-frames label { display: grid; grid-template-columns: auto 58px minmax(0, 1fr); align-items: center; gap: 3px 9px; padding: 7px 9px; cursor: pointer; }
+.bracket-frames input { grid-row: 1 / span 2; width: 15px; height: 15px; accent-color: var(--green); cursor: pointer; }
+.bracket-frames input:disabled { cursor: not-allowed; }
+.bracket-thumb { grid-row: 1 / span 2; aspect-ratio: 3 / 2; border-radius: 5px; overflow: hidden; background: #171d1b; }
+.bracket-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.bracket-id { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bracket-id strong { font-size: 11px; }
+.bracket-id small { color: #7d8783; font-size: 10px; font-weight: 800; }
+.bracket-stats { display: flex; flex-wrap: wrap; gap: 2px 10px; color: #7d8783; font-size: 10px; }
+.bracket-stats b { color: #4f5d59; }
+.bracket-legend { margin: 8px 0 0; color: #8b9491; font-size: 10px; }
+
+.bracket-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 14px; }
+.bracket-actions button { border-radius: 8px; padding: 10px 12px; font-size: 11px; font-weight: 800; cursor: pointer; min-height: 40px; }
+.bracket-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.bracket-block { margin: 8px 0 0; color: #a45d3d; font-size: 11px; font-weight: 800; text-align: center; }
+.bracket-merge .develop-hint { margin-top: 8px; }
+
+.comparison-switch { display: flex; gap: 5px; margin-bottom: 11px; }
+.comparison-switch button { border: 1px solid #b7d3c8; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.comparison-switch button.active { border-color: var(--green); background: var(--green); color: white; }
+.merged-tag { color: var(--green) !important; background: var(--green-soft); border-radius: 4px; padding: 2px 5px; font-size: 10px; font-weight: 800; }
+.merged-tag.ok { color: white !important; background: var(--green); }
+.merged-frames { margin: 8px 0 0; color: #5f6d69; font-size: 10px; line-height: 1.6; word-break: break-all; }
+
+@media (max-width: 860px) {
+  .bracket-actions { grid-template-columns: 1fr; }
+  .bracket-frames { grid-template-columns: 1fr; }
+}

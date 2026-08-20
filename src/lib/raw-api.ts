@@ -8,6 +8,7 @@ import type {
   ExportResponse,
   HealthResponse,
   ImportToPhotosResponse,
+  MergedResult,
   PresetName,
   SourceFolderErrorReason,
   SourceFolderInfo,
@@ -128,6 +129,32 @@ export async function developRaw(
   if (options.force) body.force = true;
   if (typeof options.maxEdge === "number") body.max_edge = options.maxEdge;
   return (await postJson("/api/raw-develop", body, "RAW現像に失敗しました。")) as DevelopedResult;
+}
+
+/**
+ * ブラケット合成のオプション。DevelopOptions と同じ形にしてある（呼び出し側が
+ * 現像と合成で同じ組み立てを使えるようにするため）。
+ */
+export type MergeBracketOptions = DevelopOptions;
+
+/**
+ * 露出ブラケットの複数フレームを 1 枚に合成する。
+ *
+ * `captureIds` は 2〜9 枚。範囲外はサーバが HTTP 400 を返すので、呼び出し側は
+ * ボタンの活性制御でそこへ到達させないこと。フレーム数ぶんの RAW デコードが
+ * 走るため、preview でも数秒、原寸なら数十秒かかる（実行中表示は必須）。
+ */
+export async function mergeBracket(
+  captureIds: CaptureId[],
+  preset: PresetName,
+  options: MergeBracketOptions = {},
+): Promise<MergedResult> {
+  const body: Record<string, unknown> = { capture_ids: captureIds, preset };
+  if (options.adjustments && Object.keys(options.adjustments).length > 0) body.adjustments = options.adjustments;
+  if (options.preview) body.preview = true;
+  if (options.force) body.force = true;
+  if (typeof options.maxEdge === "number") body.max_edge = options.maxEdge;
+  return (await postJson("/api/merge-bracket", body, "ブラケット合成に失敗しました。")) as MergedResult;
 }
 
 export async function exportSelection(batchName: string, items: ExportItem[]): Promise<ExportResponse> {
