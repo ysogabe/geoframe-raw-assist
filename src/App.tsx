@@ -432,7 +432,6 @@ export default function Home() {
 
   async function runExport() {
     if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
-    dispatch({ type: "export/start" });
     const items: ExportItem[] = exportRows.flatMap<ExportItem>((row) => {
       switch (row.kind) {
         case "merged":
@@ -451,6 +450,17 @@ export default function Home() {
           return [{ capture_id: row.captureId, variant: "camera_jpg" }];
       }
     });
+    // 成果物の無い行しか無いと、空のリクエストを投げて「0件を書き出しました」になる。
+    // 何が起きたか分からない成功より、押した理由を否定して理由を出すほうがよい。
+    if (items.length === 0) {
+      dispatch({
+        type: "notice/set",
+        message: "採用したものの成果物が見つかりません。合成し直して採用し直してください。",
+        tone: "error",
+      });
+      return;
+    }
+    dispatch({ type: "export/start" });
     try {
       const result = await exportSelection(state.batchName, items);
       dispatch({ type: "export/ok", result });
