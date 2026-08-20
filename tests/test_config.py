@@ -7,6 +7,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -77,6 +78,59 @@ class SetAndReadTests(ConfigTestCase):
         config.set_source_root(str(first))
         config.set_source_root(str(second))
         self.assertEqual(config.source_root(), second)
+
+
+class WriteConfigConcurrencyTests(ConfigTestCase):
+    """修正: _write_config の一時ファイル名が同時実行で衝突しない（engine._temp_path と同方式）。
+
+    ThreadingHTTPServer はリクエストごとに短命スレッドを作る。旧実装は `pid` と
+    `threading.get_ident()` だけで一時ファイル名を決めており、CPython はスレッド終了後に
+    識別子を再利用するため、連続リクエストで同名の一時ファイルに書き込みが衝突し得た。
+    今は呼び出しごとに `uuid4()` を振るので、別スレッドから同時に呼ばれても全て別パスになる。
+    """
+
+    def test_temp_names_differ_across_concurrent_threads(self):
+        """複数スレッドから同時に _write_config を呼んでも一時ファイル名は全て別々。
+
+        `os.replace` に渡される src（= 一時ファイルパス）を捕まえて、全スレッドで別々の
+        パスが使われたことを検証する。書き込み自体はアトミックなので最終的な config.json は
+        どれか1回分の結果が残り、一時ファイルは残らない。
+        """
+        folder = self.make_folder("card-a")
+        payload = {
+            "config_version": config.CONFIG_VERSION,
+            config.SOURCE_ROOT_KEY: str(folder),
+        }
+        captured: list[Path] = []
+        lock = threading.Lock()
+        original_replace = os.replace
+        barrier = threading.Barrier(4)
+
+        def capturing_replace(src, dst):
+            with lock:
+                captured.append(Path(src))
+            return original_replace(src, dst)
+
+        def worker():
+            barrier.wait()
+            config._write_config(payload)
+
+        with mock.patch.object(os, "replace", capturing_replace):
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(len(captured), 4, "4スレッド全てが書き込みを完了する")
+        self.assertEqual(
+            len(set(captured)),
+            4,
+            "同時に呼ばれた別スレッドの一時ファイル名は全て別々であるべき",
+        )
+        self.assertTrue(self.config_path.is_file())
+        self.assertEqual(config.source_root(), folder)
+        self.assertEqual(list(self.config_path.parent.glob("*.tmp.json")), [])
 
 
 class FallbackTests(ConfigTestCase):
