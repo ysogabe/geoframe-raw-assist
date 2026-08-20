@@ -694,8 +694,16 @@ export function viewingOf(state: State, group: GroupInfo): ViewingItem {
 export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
   const current = viewingOf(state, group);
   if (current.kind === "photo") return current.captureId;
+  // 合成の状態は **グループID をキー** に持っており、再解析では詰め替えていない
+  // （キーと構造を変えない約束のため）。IDが使い回されると、別のグループの合成が
+  // そのまま残っていることがある。ここで返した撮影IDは「この写真を採用」の宛先に
+  // なるので、グループに属さないIDを返すとそのグループの採用として別の写真が
+  // 記録されてしまう。必ずグループ内に絞ってから返す。
   const merged = state.mergeFullResults[group.id] ?? state.mergePreviewResults[group.id];
-  return merged?.capture_ids[0] ?? mergeFramesOf(state, group)[0] ?? group.recommended_capture_id;
+  const lead = [merged?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
+    (captureId) => captureId !== undefined && group.capture_ids.includes(captureId),
+  );
+  return lead ?? group.recommended_capture_id;
 }
 
 /**
