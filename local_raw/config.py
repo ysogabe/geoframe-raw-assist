@@ -21,6 +21,7 @@ import json
 import os
 import stat as stat_module
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -139,7 +140,7 @@ def _read_config() -> dict[str, Any]:
 def _write_config(payload: dict[str, Any]) -> None:
     """tmp + `os.replace` のアトミック書き込み（`engine._save_recipe` と同方式）。"""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = CONFIG_PATH.with_suffix(f".{os.getpid()}-{threading.get_ident()}.tmp.json")
+    temporary = CONFIG_PATH.with_suffix(f".{os.getpid()}-{uuid.uuid4().hex}.tmp.json")
     try:
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
