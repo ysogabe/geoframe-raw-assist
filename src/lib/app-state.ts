@@ -856,9 +856,22 @@ export function defaultMergeFrames(group: GroupInfo): CaptureId[] {
   return group.capture_ids.slice(0, MERGE_MAX_FRAMES);
 }
 
-/** 現在の合成対象フレーム。ユーザーが触っていなければ既定値。 */
+/**
+ * 現在の合成対象フレーム。ユーザーが触っていなければ既定値。
+ *
+ * 選択は **グループID をキー** に持っており、再解析では詰め替えていない
+ * （キーと構造を変えない約束のため）。IDが使い回されると、別のグループで選んだ
+ * 撮影IDがそのまま残る。ここで返した配列は runMerge がそのまま /api/merge へ
+ * 送るので、絞らないと無関係な写真同士を合成しにいく。必ずグループ内に絞る。
+ */
 export function mergeFramesOf(state: State, group: GroupInfo): CaptureId[] {
-  return state.mergeSelections[group.id] ?? defaultMergeFrames(group);
+  const selected = state.mergeSelections[group.id];
+  if (!selected) return defaultMergeFrames(group);
+  const valid = selected.filter((id) => group.capture_ids.includes(id));
+  // 全部がグループの外だった（= 丸ごと別グループの選択が残っていた）ときだけ既定値へ
+  // 戻す。1枚でもグループ内に残っていればそれを尊重する。ユーザーが選び直した途中の
+  // 状態を黙って全部リセットする方が分かりにくいため。
+  return valid.length > 0 ? valid : defaultMergeFrames(group);
 }
 
 /**

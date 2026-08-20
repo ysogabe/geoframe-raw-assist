@@ -248,7 +248,9 @@ export function OperationPanel({
                   title={mergeFullResult ? undefined : "本合成すると採用できます"}
                   onClick={onAcceptMerged}
                 >
-                  <span aria-hidden="true">✓</span>
+                  {/* 未採用に✓を出すと、グループの大半が採用済みに見えてしまう。
+                      採用済みだけ✓、未採用は中立の空丸にする。 */}
+                  <span aria-hidden="true">{mergedAccepted ? "✓" : "○"}</span>
                 </button>
               </li>
             )}
@@ -281,7 +283,7 @@ export function OperationPanel({
                     aria-label={accepted ? `${id} の採用を外す` : `${id} を採用する`}
                     onClick={() => onAcceptPhoto(id)}
                   >
-                    <span aria-hidden="true">✓</span>
+                    <span aria-hidden="true">{accepted ? "✓" : "○"}</span>
                   </button>
                 </li>
               );
