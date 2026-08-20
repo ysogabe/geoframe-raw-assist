@@ -259,11 +259,11 @@ class ShadowLiftTableTests(unittest.TestCase):
 class TempPathTests(unittest.TestCase):
     """修正1: 同一 params_hash の同時リクエストで一時ファイル名が衝突しない。"""
 
-    def test_encodes_pid_and_current_thread_ident(self):
+    def test_encodes_pid_and_a_per_call_unique_component(self):
         result = _temp_path(Path("/outputs/DSC00001-neutral_recovery-abc123.jpg"), "tmp.jpg")
-        self.assertEqual(
+        self.assertRegex(
             result.name,
-            f"DSC00001-neutral_recovery-abc123.{os.getpid()}-{threading.get_ident()}.tmp.jpg",
+            rf"^DSC00001-neutral_recovery-abc123\.{os.getpid()}-[0-9a-f]{{32}}\.tmp\.jpg$",
         )
 
     def test_differs_across_concurrent_threads(self):
@@ -285,10 +285,13 @@ class TempPathTests(unittest.TestCase):
         self.assertEqual(len(results), 4)
         self.assertEqual(len(set(results)), 4, "同時に呼ばれた別スレッドの一時パスは全て別々であるべき")
 
-    def test_repeated_call_on_same_thread_is_stable(self):
-        # 同一スレッド内の呼び出しは同じ pid-tid になる(衝突対策はスレッド単位で十分)。
+    def test_repeated_call_on_same_thread_returns_distinct_paths(self):
+        # 呼び出しごとに UUID を振るので、同一スレッド内で連続して呼んでも別のパスになる。
+        # （旧実装は同一スレッドで同じパスを返しており、それはスレッドID再利用で衝突し得る
+        #   依存だった。呼び出し元はどちらも「一時パスへ書いて os.replace する」の1回完結なので、
+        #   同一スレッド内の安定性に依存したロジックは無い。）
         path = Path("/outputs/DSC00001-neutral_recovery-abc123.jpg")
-        self.assertEqual(_temp_path(path, "tmp.jpg"), _temp_path(path, "tmp.jpg"))
+        self.assertNotEqual(_temp_path(path, "tmp.jpg"), _temp_path(path, "tmp.jpg"))
 
 
 class SaveDevelopedJpegTests(unittest.TestCase):

@@ -14,8 +14,8 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -118,13 +118,18 @@ def _sha256(path: Path) -> str:
 
 
 def _temp_path(path: Path, extension: str) -> Path:
-    """`path` と同じ場所に、プロセス/スレッドで一意な一時ファイルパスを作る。
+    """`path` と同じ場所に、呼び出しごとに一意な一時ファイルパスを作る。
 
     同一 params_hash の同時リクエスト（ThreadingHTTPServer への二重クリック等）でも
-    `pid-tid` を挟むことで一時ファイル名が衝突しないようにする。`os.replace` によるアトミック
-    置換自体は変わらず、衝突が起きるのは書き込み中の一時ファイル名だけだったのを塞ぐ。
+    `pid` と `uuid4()` の組み合わせで一時ファイル名が衝突しないようにする。CPython は
+    短命スレッドの終了後に `threading.get_ident()` の値を再利用し得るため、これだけに
+    依存した命名は同時実行環境で衝突の余地がある。呼び出しごとに新しい UUID を振るので
+    別スレッドから同時に呼ばれても、同一スレッド内で連続して呼ばれても全て別のパスになる。
+    `os.replace` によるアトミック置換自体は変わらず、衝突が起きるのは書き込み中の一時
+    ファイル名だけだったのを塞ぐ。元の stem と一時ファイル用拡張子は名前に残す
+    （デバッグ時に何の一時ファイルか判別できるようにするため）。
     """
-    return path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.{extension}")
+    return path.with_suffix(f".{os.getpid()}-{uuid.uuid4().hex}.{extension}")
 
 
 def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
