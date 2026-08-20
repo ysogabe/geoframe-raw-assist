@@ -99,7 +99,12 @@ export function ExportPanel({
                     {photo ? <img src={assetUrl(photo.thumb)} alt={row.captureId} loading="lazy" decoding="async" /> : null}
                   </div>
                   <div className="export-info">
-                    <strong>{row.captureId}</strong>
+                    {/* この画面の行は全部が採用アイテムだが、バッジはタイル・一覧カードと
+                        同じ見た目で出しておく（「採用」の印が画面ごとに違うと読み替えが要る）。 */}
+                    <span className="export-title">
+                      <strong>{row.captureId}</strong>
+                      <span className="accepted-badge inline">✓ 採用</span>
+                    </span>
                     <small>{row.group.title}</small>
                     <span className={rawPillClass(row.group.raw.level)}>{row.group.raw.label}</span>
                   </div>

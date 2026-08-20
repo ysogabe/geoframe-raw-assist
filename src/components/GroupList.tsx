@@ -73,7 +73,13 @@ export function GroupList({
                 <div className="recommendation"><span className="spark">✦</span><p><strong>{recommendedCaptureId}</strong><small>{reason}</small></p></div>
                 {/* 何を採用したのかは件数だけでは分からない。カードを開かずに読めるようにする。 */}
                 {acceptedSummary.length > 0 && (
-                  <p className="accepted-summary"><span aria-hidden="true">✓</span>採用: {acceptedSummary.join(" / ")}</p>
+                  <p className="accepted-summary">
+                    <span aria-hidden="true">✓</span>
+                    {/* テキストを span で包むのは省略記号のため。text-overflow は
+                        インライン内容を直に持つブロックにしか効かず、flex の
+                        無名アイテムのままだと（採用が多いカードでこそ）ばっさり切れる。 */}
+                    <span className="accepted-summary-text">採用: {acceptedSummary.join(" / ")}</span>
+                  </p>
                 )}
                 <div className="group-footer">
                   <span className={rawPillClass(group.raw.level)}>{group.raw.label}</span>
