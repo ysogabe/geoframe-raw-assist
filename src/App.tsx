@@ -6,6 +6,7 @@ import {
   changedAdjustmentKeys,
   developedGroupIds,
   effectiveAdjustments,
+  groupMergeResultOf,
   heroCaptureOf,
   initialState,
   isBracketGroup,
@@ -239,6 +240,11 @@ export default function Home() {
   const isBracket = group ? isBracketGroup(group) : false;
   const mergeFrames = useMemo(() => (group ? mergeFramesOf(state, group) : []), [state, group]);
   const mergeBlock = mergeBlockReason(mergeFrames);
+  // 表示に回す合成もグループの関門を通す。属さない合成は「まだ本合成していない」扱いに
+  // なり、タイルはプレースホルダ・採用チップは disabled になる。古い他グループの合成を
+  // 見せて採用させるより、無いことにする方が安全。
+  const mergePreviewResult = group ? groupMergeResultOf(state.mergePreviewResults, group) : undefined;
+  const mergeFullResult = group ? groupMergeResultOf(state.mergeFullResults, group) : undefined;
   // 合成中に別グループへ移動しても fetch は続く（結果は merge/ok の groupId に入る）。
   // 実行中表示はそのグループにだけ出し、重い処理の同時実行防止は全体で効かせる。
   const mergeBusy = mergeMode !== null;
@@ -580,7 +586,10 @@ export default function Home() {
             }
             mergedAccepted={isMergedAccepted(state, group.id)}
             onAcceptMerged={() => {
-              const merged = state.mergeFullResults[group.id];
+              // グループIDで直に引かない。IDが使い回されて別グループの合成が残っていると、
+              // そのグループに属さない先頭フレームを採用として記録してしまう（書き出しは
+              // ファイル名と capture_id が揃うのでサーバも通り、無言で別の写真が出る）。
+              const merged = groupMergeResultOf(state.mergeFullResults, group);
               if (!merged) return;
               // 先頭フレームは合成した瞬間の値で固定する（表示カーソルから引かない）。
               dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
@@ -600,8 +609,8 @@ export default function Home() {
             mergeBusy={mergeBusy}
             mergeElapsedLabel={mergeElapsedLabel}
             mergeBlockReason={mergeBlock}
-            mergePreviewResult={state.mergePreviewResults[group.id]}
-            mergeFullResult={state.mergeFullResults[group.id]}
+            mergePreviewResult={mergePreviewResult}
+            mergeFullResult={mergeFullResult}
             viewing={viewing}
             onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
             onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
