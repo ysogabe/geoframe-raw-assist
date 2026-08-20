@@ -1,6 +1,6 @@
 """プリセット定義と Adjustments の解決。
 
-契約: docs/API_CONTRACT.md §2（Adjustments の型と範囲）・§5（プリセット9種）・§9（module 契約）
+契約: docs/API_CONTRACT.md §2（Adjustments の型と範囲）・§5（プリセット11種）・§9（module 契約）
 """
 
 from __future__ import annotations
@@ -101,6 +101,16 @@ PRESETS: dict[str, dict[str, Any]] = {
         "label": "白飛び救済",
         "description": "飛びかけた空や光源の階調を最大限引き戻す",
         "adjustments": _adjustments(-0.5, 0, 40, 100, 1.05, 1.0, 1.0, 1.02, "light"),
+    },
+    "shadow_rescue": {
+        "label": "黒つぶれ救済",
+        "description": "つぶれた暗部を大きく持ち上げ、増えるノイズを抑える",
+        "adjustments": _adjustments(0.3, 0, 80, 65, 1.05, 0.98, 1.06, 1.02, "full"),
+    },
+    "backlit_rescue": {
+        "label": "逆光",
+        "description": "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
+        "adjustments": _adjustments(0.2, 5, 60, 90, 1.04, 0.96, 1.08, 1.05, "light"),
     },
     "vivid_travel": {
         "label": "ビビッド",

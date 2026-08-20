@@ -24,6 +24,7 @@ from local_raw.presets import (
     ADJUSTMENT_KEYS,
     ADJUSTMENT_RANGES,
     DEFAULT_PRESET,
+    NOISE_REDUCTION_CHOICES,
     PRESETS,
     preset_infos,
     resolve_adjustments,
@@ -47,8 +48,19 @@ class RawEngineValidationTests(unittest.TestCase):
 
 
 class PresetDefinitionTests(unittest.TestCase):
-    def test_has_nine_presets(self):
-        self.assertEqual(len(PRESETS), 9)
+    def test_has_eleven_presets(self):
+        self.assertEqual(len(PRESETS), 11)
+
+    def test_contains_rescue_presets(self):
+        """暗部・逆光の救済プリセット（契約 §5）。UI は PRESETS の順序で並ぶ。"""
+        for name in ("highlight_rescue", "shadow_rescue", "backlit_rescue"):
+            with self.subTest(preset=name):
+                self.assertIn(name, PRESETS)
+        order = list(PRESETS)
+        self.assertEqual(
+            order[order.index("highlight_rescue") : order.index("highlight_rescue") + 3],
+            ["highlight_rescue", "shadow_rescue", "backlit_rescue"],
+        )
 
     def test_default_preset_exists(self):
         self.assertIn(DEFAULT_PRESET, PRESETS)
@@ -68,9 +80,16 @@ class PresetDefinitionTests(unittest.TestCase):
                     self.assertGreaterEqual(preset["adjustments"][key], minimum)
                     self.assertLessEqual(preset["adjustments"][key], maximum)
 
+    def test_preset_noise_reduction_is_a_valid_choice(self):
+        for name, preset in PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertIn(
+                    preset["adjustments"]["noise_reduction"], NOISE_REDUCTION_CHOICES
+                )
+
     def test_preset_infos_matches_contract_shape(self):
         infos = preset_infos()
-        self.assertEqual(len(infos), 9)
+        self.assertEqual(len(infos), len(PRESETS))
         for info in infos:
             self.assertEqual(set(info), {"name", "label", "description", "adjustments"})
             self.assertEqual(set(info["adjustments"]), set(ADJUSTMENT_KEYS))
