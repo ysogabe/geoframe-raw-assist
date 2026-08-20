@@ -564,15 +564,17 @@ export default function Home() {
               dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
             }
             onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
-            photoAccepted={isPhotoAccepted(state, captureId)}
-            onAcceptPhoto={() =>
+            isPhotoAccepted={(id) => isPhotoAccepted(state, id)}
+            onAcceptPhoto={(id) =>
               dispatch({
                 type: "accept/photo",
                 groupId: group.id,
-                captureId,
+                // 宛先は **引数の撮影ID**。フィルムストリップは表示中でない写真も採用できるので、
+                // ここで表示カーソル（captureId）を使うと別の写真の採用として記録される。
+                captureId: id,
                 // 採用した時点で本現像があるならそれを既定にする。以後は行の選択が正で、
                 // あとから本現像しても勝手に昇格させない（無言で書き出す物を変えないため）。
-                variant: state.fullResults[captureId] ? "developed" : "camera_jpg",
+                variant: state.fullResults[id] ? "developed" : "camera_jpg",
               })
             }
             mergedAccepted={isMergedAccepted(state, group.id)}
