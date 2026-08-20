@@ -13,6 +13,11 @@
 > `params_hash` に現像元フォルダのパスを追加（§1）、`SOURCE_ROOT` 定数を
 > `config.source_root()` の呼び出し時解決へ置換（§9）。
 > `Analysis.source.root` の整形を `SourceFolderInfo.display_path` と共通化（§3）。
+>
+> **追補 2026-08-20（ブラケット露出合成・ユーザー承認済み）**:
+> `POST /api/merge-bracket` と `GET /merged/` を §1 に追加、`outputs/merged/` と
+> 合成JPEGの命名を §4 に追加、`POST /api/export` の `variant` に `"merged"` を追加（§1）。
+> 合成方式は Exposure Fusion（Mertens）で、HDR + トーンマッピングは採用しない。
 
 ---
 
@@ -175,18 +180,81 @@ rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォル�
 - **ヒット判定はレシピJSON内の `params_hash` の完全一致**で行う
   （現行の「id+preset のみ」でのキャッシュ判定はバグとして廃止する）。
 
+### `POST /api/merge-bracket`
+
+```
+body { capture_ids:string[], preset:string, adjustments?:Partial<Adjustments>,
+       preview?:boolean, force?:boolean, max_edge?:number }
+→ MergedResult
+```
+
+```
+MergedResult = {
+  capture_ids:string[],     // 昇順に正規化して返す
+  frames:number,
+  preset, preset_label,
+  filename:string,          // {先頭id}-merged{枚数}-{preset}-{hash10}.jpg
+  recipe_filename:string,
+  params_hash:string,
+  adjustments:Adjustments,  // 解決後の全量（Partial ではない）
+  width, height, elapsed_seconds, cached:boolean, preview:boolean,
+  aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
+  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  exif_inherited:boolean,
+  output_url:string         // /merged/<file>?v=<st_mtime_ns>
+}
+```
+
+露出を変えて撮ったブラケット（解析の `exposure_bracket`）を **Exposure Fusion（Mertens）**
+で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。出力先は `outputs/merged/`。
+
+- **フレーム数は 2〜9 枚**。範囲外は 400（`"合成できるのは2〜9枚です。"`）。
+  上限があるのは「1グループ＝1シーン」を保証できないため（実データに1グループ20枚＝
+  別シーンの AEB 4セット分が存在する）。**どのフレームを混ぜるかの選択はフロントの責務**で、
+  エンジンは受け取ったものを合成する。
+- `capture_ids` は現像元フォルダ直下に限定し（`resolve()` 後の親一致）、重複は 400。
+  戻り値・ファイル名・EXIF 継承元・位置合わせの基準は**昇順に正規化した順**に揃える。
+- 処理順序（固定）: rawpy(**`no_auto_bright=True`**) → lensfun補正 → AlignMTB →
+  MergeMertens → クリップ → resize → shadow_lift LUT → Brightness → Contrast →
+  Color → Sharpness → save(exif, icc)
+- **`no_auto_bright=True` が要**。`develop_raw` 側の自動明るさ補正はフレームごとに露出を
+  正規化するため、そのまま流用すると**ブラケットの露出差が消えて合成が無意味になる**
+  （実測: 同ブラケット5枚を `develop_raw` すると平均輝度が 46.7〜49.4 に揃ってしまう）。
+- `Adjustments` のうち **`exposure` と `highlight_recovery` は使わない**（どちらも rawpy 段で
+  フレームごとの露出を動かすパラメータであり、合成の前提を壊すため）。`wb_temp` /
+  `noise_reduction` は全フレームに同一に効くので反映する。トーン調整は**合成結果に対して
+  1回だけ**適用する。
+- EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
+- `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
+  ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
+
+#### キャッシュキー
+
+`params_hash` = `sha1(canonical JSON of { **ソート済み capture_ids**, 解決後 adjustments,
+preset名, max_edge, preview, lensfun 適用可否, 位置合わせの版,
+rawpy/Pillow/OpenCV/bracket バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
+
+- `capture_ids` と現像元フォルダのパスを**必ず含める**。`capture_id` はカメラの連番なので、
+  含めないと別フォルダの同じIDに対して**他人の写真の合成結果が `cached: true` で返る**。
+- ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
+
 ### `POST /api/export`
 
 ```
 body { batch_name:string,   // [A-Za-z0-9_-]+ に正規化
        items: ExportItem[] }
-ExportItem = { capture_id:string, variant:"camera_jpg"|"developed",
-               developed_filename?:string }   // variant="developed" 時必須（raw-develop の filename）
+ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
+               developed_filename?:string,   // variant="developed" 時必須（raw-develop の filename）
+               merged_filename?:string }     // variant="merged" 時必須（merge-bracket の filename）
 → { export_dir:string, manifest_path:string, files:string[],
     skipped:{capture_id:string, reason:string}[] }
 ```
 
 `outputs/export/<batch_name>/` へ `shutil.copy2` + `manifest.json` 生成（マニフェスト仕様はプラン §3）。**元ファイルは非破壊**。
+
+`variant:"merged"` は `outputs/merged/` 配下を対象とし、`"developed"` と同じ構造で扱う
+（`resolve()` 後の親一致で確認・レシピJSONを manifest に取り込む）。`merged_filename` は
+`{capture_id}-merged{枚数}-` で始まること（中置が無い現像済みファイル名は 400）。
 
 ### `POST /api/import-to-photos`
 
@@ -204,6 +272,7 @@ body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist
 |---|---|---|
 | `GET /outputs/<file>` | `outputs/developed/` | 既存 |
 | `GET /preview/<file>` | `outputs/preview/` | 新規（Wave 1-B） |
+| `GET /merged/<file>` | `outputs/merged/` | 新規（2026-08-20 追補） |
 | `GET /thumbs/<file>` | `outputs/thumbnails/` | 新規（Wave 1-B） |
 | `GET /source-jpg/<DSCxxxxx.JPG>` | 現像元フォルダ（`config.source_root()`。既定 `sample/100MSDCF/`） | 既存 |
 
@@ -286,6 +355,7 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 | 種別 | 命名 |
 |---|---|
 | 現像JPEG | `{capture_id}-{preset}-{hash10}.jpg` 例: `DSC02943-nightscape-a1b2c3d4e5.jpg` |
+| 合成JPEG | `{先頭capture_id}-merged{枚数}-{preset}-{hash10}.jpg` 例: `DSC04510-merged5-neutral_recovery-a1b2c3d4e5.jpg` |
 | レシピJSON | 上記と同一ステム + `.json` |
 | サムネイル | `{root_key}-{capture_id}.webp`（長辺640 / quality 80） |
 | 解析キャッシュ | `analysis.json` |
@@ -309,6 +379,7 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 outputs/
   developed/    本現像JPEG + レシピJSON          → GET /outputs/
   preview/      プレビュー現像(half_size,1600px) → GET /preview/
+  merged/       ブラケット露出合成JPEG + レシピJSON → GET /merged/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
@@ -455,6 +526,20 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 - 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
 - `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
   — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
+
+### `local_raw/bracket.py`（2026-08-20 追補）
+
+ブラケット露出合成（Exposure Fusion / Mertens）。`server.py` は呼び出し時に import する。
+
+- `MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"`（`/merged/` 配信元）
+- `MIN_FRAMES = 2` / `MAX_FRAMES = 9`
+- `merge_bracket(capture_ids: list[str], preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
+  — 戻り値は契約 `MergedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側が付与**する（`/merged/<filename>` + `?v=<mtime_ns>`）
+- 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
+  `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。LUT とトーンは
+  `engine._shadow_lift_table()` / `engine._apply_tone()` を再利用する
+- `cv2.createAlignMTB().process(src, dst)` は **src と同じリストを渡して in-place で受ける**。
+  空リストは何も書かれず、事前確保したリストは**1枚が全面0になる**（実測 OpenCV 5.0.0）
 
 ### `local_raw/lens.py`（所有: Wave 1-A）
 
