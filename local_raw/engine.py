@@ -44,7 +44,12 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 
 #: レシピ形式 / 現像パイプラインの版。params_hash に含めるので、
 #: ここを上げると既存キャッシュは自動的に無効になる。
-ENGINE_VERSION = 2
+#:
+#: ENGINE_VERSION 3: レンズ補正のビネット処理を修正したので出力が変わる
+#: （lensfunpy の pixel_format を実バッファの dtype に合わせた。local_raw/lens.py 参照）。
+#: 修正前は補正が効くレンズで画像左端およそ25%が白飛びの帯になっており、その壊れた
+#: JPEG がキャッシュに残っている。版を上げて既存の現像キャッシュを無効化する。
+ENGINE_VERSION = 3
 RECIPE_VERSION = 2
 
 DEFAULT_MAX_EDGE = 6000
