@@ -85,12 +85,18 @@ class BracketTestCase(unittest.TestCase):
         self.project_root = Path(temporary.name).resolve()
         self.source_root = self.project_root / "DCIM" / "100MSDCF"
         self.merged_root = self.project_root / "outputs" / "merged"
+        self.merged_preview_root = self.project_root / "outputs" / "merged_preview"
         self.source_root.mkdir(parents=True, exist_ok=True)
         self.merged_root.mkdir(parents=True, exist_ok=True)
+        self.merged_preview_root.mkdir(parents=True, exist_ok=True)
         for capture_id in CAPTURES:
             (self.source_root / f"{capture_id}.ARW").write_bytes(f"raw-{capture_id}".encode())
 
-        merged_patcher = mock.patch.object(bracket_module, "MERGED_ROOT", self.merged_root)
+        merged_patcher = mock.patch.multiple(
+            bracket_module,
+            MERGED_ROOT=self.merged_root,
+            MERGED_PREVIEW_ROOT=self.merged_preview_root,
+        )
         merged_patcher.start()
         self.addCleanup(merged_patcher.stop)
         # 現像元フォルダはモジュール定数ではなく呼び出し時に解決されるので関数を差し替える。
@@ -120,13 +126,17 @@ class BracketTestCase(unittest.TestCase):
         step = (self.BRIGHT_GAIN / self.DARK_GAIN) ** (1.0 / max(1, len(CAPTURES) - 1))
         return expose(self.radiance, self.BRIGHT_GAIN / (step**index))
 
+    def output_root(self, result: dict) -> Path:
+        """結果が保存されたディレクトリ（プレビュー合成と本合成で分かれる）。"""
+        return self.merged_preview_root if result["preview"] else self.merged_root
+
     def merged_array(self, result: dict) -> np.ndarray:
-        with Image.open(self.merged_root / result["filename"]) as image:
+        with Image.open(self.output_root(result) / result["filename"]) as image:
             return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
     def read_recipe(self, result: dict) -> dict:
         return json.loads(
-            (self.merged_root / result["recipe_filename"]).read_text(encoding="utf-8")
+            (self.output_root(result) / result["recipe_filename"]).read_text(encoding="utf-8")
         )
 
 
@@ -138,7 +148,7 @@ class FrameCountTests(BracketTestCase):
     def test_accepts_two_frames(self):
         result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
         self.assertEqual(result["frames"], 2)
-        self.assertTrue((self.merged_root / result["filename"]).is_file())
+        self.assertTrue((self.output_root(result) / result["filename"]).is_file())
 
     def test_rejects_ten_frames(self):
         ten = [f"DSC0{4510 + offset}" for offset in range(10)]
@@ -407,7 +417,14 @@ class MergedOutputTests(BracketTestCase):
 
     def test_leaves_no_temporary_files(self):
         merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
-        self.assertEqual([path.name for path in self.merged_root.glob("*tmp*")], [])
+        # 出力先はプレビューと本合成で分かれるので、**両方**を見る（片方だけだと
+        # 保存先が変わったときに空のディレクトリを見て素通りする）。
+        leftovers = [
+            path.name
+            for root in (self.merged_root, self.merged_preview_root)
+            for path in root.glob("*tmp*")
+        ]
+        self.assertEqual(leftovers, [])
 
     def test_second_call_is_served_from_cache(self):
         first = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
@@ -441,6 +458,109 @@ class MergedOutputTests(BracketTestCase):
     def test_respects_max_edge(self):
         result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True, max_edge=1200)
         self.assertLessEqual(max(result["width"], result["height"]), 1200)
+
+
+class OutputRootTests(BracketTestCase):
+    """プレビュー合成と本合成が**別ディレクトリ**に保存されること（契約 §4）。
+
+    ファイル名は `params_hash` の違いで衝突しないが、同居しているとサーバ側で
+    「原寸かプレビューか」を判定できず、`POST /api/export` にプレビューを
+    マスターとして書き出せてしまう。分離はその防御そのものなので固定する。
+    """
+
+    def test_preview_merge_is_written_to_the_preview_root(self):
+        result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        self.assertTrue(result["preview"])
+        for name in (result["filename"], result["recipe_filename"]):
+            with self.subTest(name=name):
+                self.assertTrue((self.merged_preview_root / name).is_file())
+                self.assertFalse((self.merged_root / name).exists())
+
+    def test_full_merge_is_written_to_the_merged_root(self):
+        result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET)
+        self.assertFalse(result["preview"])
+        for name in (result["filename"], result["recipe_filename"]):
+            with self.subTest(name=name):
+                self.assertTrue((self.merged_root / name).is_file())
+                self.assertFalse((self.merged_preview_root / name).exists())
+
+    def test_preview_and_full_merges_do_not_share_a_directory(self):
+        preview = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        full = merge_bracket(CAPTURES[:2], DEFAULT_PRESET)
+        self.assertNotEqual(preview["filename"], full["filename"])
+        self.assertEqual(
+            [path.name for path in sorted(self.merged_root.glob("*.jpg"))], [full["filename"]]
+        )
+        self.assertEqual(
+            [path.name for path in sorted(self.merged_preview_root.glob("*.jpg"))],
+            [preview["filename"]],
+        )
+
+    def test_cache_hit_reports_the_directory_it_was_served_from(self):
+        """キャッシュヒットでも `preview` は保たれる（保存先の判定に使うため）。"""
+        first = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        second = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        self.assertTrue(second["cached"])
+        self.assertTrue(second["preview"])
+        self.assertEqual(second["filename"], first["filename"])
+        self.assertTrue((self.merged_preview_root / second["filename"]).is_file())
+
+    def test_export_recognises_the_preview_flag_in_the_real_recipe(self):
+        """`export._recipe_is_preview()` が**実際に書かれるレシピの形**を見ていること。
+
+        フラグは `output.preview` にある。ここが食い違うと export 側の二段目の防御が
+        黙って死ぬので、実物のレシピを渡して確かめる。
+        """
+        from local_raw.export import _recipe_is_preview
+
+        preview_recipe = self.read_recipe(
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        )
+        full_recipe = self.read_recipe(merge_bracket(CAPTURES[:2], DEFAULT_PRESET))
+        self.assertTrue(preview_recipe["output"]["preview"])
+        self.assertTrue(_recipe_is_preview(preview_recipe))
+        self.assertFalse(_recipe_is_preview(full_recipe))
+
+
+class DecodeErrorMessageTests(unittest.TestCase):
+    """エラー本文に内部の絶対パスを載せないこと（契約 §0）。
+
+    `BracketTestCase` は `_decode_frame` ごと差し替えるので、本物の
+    `_decode_frame` を見たいここでは継承せず `rawpy.imread` だけを差し替える。
+    """
+
+    #: rawpy が実際に返す形の例外文言（絶対パス入り）。
+    SECRET_PATH = "/private/tmp/secret/DSC00001.ARW"
+
+    def test_decode_failure_reports_only_the_filename(self):
+        with mock.patch.object(
+            bracket_module.rawpy,
+            "imread",
+            side_effect=OSError(f"[Errno 13] Permission denied: '{self.SECRET_PATH}'"),
+        ):
+            with self.assertRaises(RawDevelopmentError) as raised:
+                bracket_module._decode_frame(
+                    Path(self.SECRET_PATH), resolve_adjustments(DEFAULT_PRESET), True
+                )
+
+        message = str(raised.exception)
+        self.assertNotIn("/", message, "レスポンスに出る文言にパス区切りを含めないこと")
+        self.assertNotIn(self.SECRET_PATH, message)
+        self.assertIn("DSC00001.ARW", message)
+        # 例外連鎖は残す（サーバログ側で原因を追えなくならないため）。
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+        self.assertIn(self.SECRET_PATH, str(raised.exception.__cause__))
+
+    def test_missing_opencv_reports_a_fixed_message(self):
+        dlopen_error = "dlopen(/opt/homebrew/lib/libopencv_core.dylib, 0x0002): not found"
+        with mock.patch.object(bracket_module, "cv2", None), mock.patch.object(
+            bracket_module, "_CV2_IMPORT_ERROR", dlopen_error
+        ):
+            with self.assertRaises(RawDevelopmentError) as raised:
+                merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertNotIn("/", str(raised.exception))
+        self.assertNotIn(dlopen_error, str(raised.exception))
 
 
 class MergedRecipeTests(BracketTestCase):
@@ -512,7 +632,7 @@ class AlignmentTests(BracketTestCase):
         ):
             result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
         self.assertFalse(result["aligned"])
-        self.assertTrue((self.merged_root / result["filename"]).is_file())
+        self.assertTrue((self.output_root(result) / result["filename"]).is_file())
 
     def test_empty_alignment_output_is_treated_as_failure(self):
         """空リストを渡すと OpenCV は何も書かずに戻る（長さ0で「成功」してしまう）。"""
@@ -520,7 +640,7 @@ class AlignmentTests(BracketTestCase):
             factory.return_value.process.side_effect = lambda src, dst: dst.clear()
             result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
         self.assertFalse(result["aligned"])
-        self.assertTrue((self.merged_root / result["filename"]).is_file())
+        self.assertTrue((self.output_root(result) / result["filename"]).is_file())
 
     def test_alignment_is_attempted_and_reported(self):
         result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
@@ -563,9 +683,11 @@ class AlignmentTests(BracketTestCase):
     def test_repeated_merges_are_byte_identical(self):
         """同じ入力なら毎回同じ JPEG になること（キャッシュの再現性の前提）。"""
         first = merge_bracket(CAPTURES[:3], DEFAULT_PRESET, preview=True, force=True)
-        first_bytes = (self.merged_root / first["filename"]).read_bytes()
+        first_bytes = (self.output_root(first) / first["filename"]).read_bytes()
         second = merge_bracket(CAPTURES[:3], DEFAULT_PRESET, preview=True, force=True)
-        self.assertEqual((self.merged_root / second["filename"]).read_bytes(), first_bytes)
+        self.assertEqual(
+            (self.output_root(second) / second["filename"]).read_bytes(), first_bytes
+        )
 
 
 class MergePostprocessParamsTests(unittest.TestCase):

@@ -463,6 +463,89 @@ class MergedVariantTests(ExportTestCase):
         with self.assertRaises(ValueError):
             export_batch("trip08", [self.merged_item(capture_id=OTHER_CAPTURE)])
 
+    def write_merged(self, filename, recipe):
+        """`outputs/merged/` に合成JPEGとレシピJSONを1組置く。"""
+        (self.merged_root / filename).write_bytes(b"merged-jpeg-bytes")
+        (self.merged_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps(recipe), encoding="utf-8"
+        )
+
+    def test_rejects_a_preview_quality_merge(self):
+        """プレビュー合成（長辺1600px）はマスターとして書き出さない（二段目の防御）。
+
+        プレビューは `outputs/merged_preview/` に分けたので通常ここへは来ないが、
+        分離前の出力が `outputs/merged/` に残っていても素通りしないことを固定する。
+        レシピの形は `bracket.py` が実際に書くもの（フラグは `output.preview`）。
+        """
+        filename = f"{CAPTURE}-merged5-neutral_recovery-c3d4e5f6a7.jpg"
+        self.write_merged(
+            filename,
+            {
+                "recipe_version": 1,
+                "kind": "exposure_fusion",
+                "capture_ids": [CAPTURE, OTHER_CAPTURE],
+                "params_hash": "c3d4e5f6a7",
+                "output": {"max_edge": 1600, "preview": True},
+            },
+        )
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.merged_item(filename)])
+        # 400 で終わるので1件も書き出されないこと（コピーはループを抜けた後）。
+        self.assertFalse((self.export_root / "trip08" / filename).exists())
+
+    def test_does_not_reach_into_the_merged_preview_directory(self):
+        """一段目の防御: プレビュー合成は `outputs/merged_preview/` にあり参照されない。
+
+        実物のプレビュー合成（`outputs/merged/` には存在しない）を名指ししても、
+        「見つからない」として skip されるだけでコピーは起きない。
+        `..` で隣のディレクトリへ出ようとするものはファイル名検証で 400。
+        """
+        merged_preview_root = self.project_root / "outputs" / "merged_preview"
+        merged_preview_root.mkdir(parents=True, exist_ok=True)
+        filename = f"{CAPTURE}-merged5-neutral_recovery-a7b8c9d0e1.jpg"
+        (merged_preview_root / filename).write_bytes(b"preview-merged-jpeg-bytes")
+
+        result = export_batch("trip08", [self.merged_item(filename)])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["skipped"][0]["reason"], "合成済みJPEGが見つかりません。")
+        self.assertFalse((self.export_root / "trip08" / filename).exists())
+
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.merged_item(f"../merged_preview/{filename}")])
+
+    def test_rejects_a_preview_flag_at_the_recipe_root(self):
+        """レシピ直下に `preview` があっても拒否する（形が変わっても防御が死なないこと）。"""
+        filename = f"{CAPTURE}-merged5-neutral_recovery-d4e5f6a7b8.jpg"
+        self.write_merged(filename, {"recipe_version": 1, "preview": True})
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.merged_item(filename)])
+
+    def test_full_merge_with_an_explicit_preview_false_is_exported(self):
+        """`preview: false` の本合成は従来どおり通ること（過剰に弾かないこと）。"""
+        filename = f"{CAPTURE}-merged5-neutral_recovery-e5f6a7b8c9.jpg"
+        self.write_merged(
+            filename,
+            {
+                "recipe_version": 1,
+                "kind": "exposure_fusion",
+                "params_hash": "e5f6a7b8c9",
+                "output": {"max_edge": 6000, "preview": False},
+            },
+        )
+        result = export_batch("trip08", [self.merged_item(filename)])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip08/{filename}"])
+
+    def test_missing_merged_file_with_a_preview_recipe_is_still_skipped(self):
+        """レシピだけがあってJPEGが無い場合は「無い」として skip する（400 にしない）。"""
+        filename = f"{CAPTURE}-merged5-neutral_recovery-f6a7b8c9d0.jpg"
+        (self.merged_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps({"output": {"preview": True}}), encoding="utf-8"
+        )
+        result = export_batch("trip08", [self.merged_item(filename)])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["skipped"][0]["capture_id"], CAPTURE)
+
     def test_merged_filename_is_not_accepted_as_developed(self):
         """`merged` と `developed` のルートが取り違えられないこと。"""
         with self.assertRaises(ValueError):

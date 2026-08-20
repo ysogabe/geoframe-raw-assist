@@ -18,6 +18,11 @@
 > `POST /api/merge-bracket` と `GET /merged/` を §1 に追加、`outputs/merged/` と
 > 合成JPEGの命名を §4 に追加、`POST /api/export` の `variant` に `"merged"` を追加（§1）。
 > 合成方式は Exposure Fusion（Mertens）で、HDR + トーンマッピングは採用しない。
+>
+> **追補 2026-08-20b（プレビュー合成の分離・セキュリティレビュー対応）**:
+> プレビュー合成の出力先を `outputs/merged_preview/` に分離して `GET /merged-preview/` を
+> §1 に追加、§4 のディレクトリ規約に `outputs/merged_preview/` を追加、
+> `POST /api/export` の `variant:"merged"` を**本合成限定**と明記（§1）。
 
 ---
 
@@ -201,12 +206,23 @@ MergedResult = {
   aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
   lens_correction:{applied:boolean, reason?:string, lens?:string},
   exif_inherited:boolean,
-  output_url:string         // /merged/<file>?v=<st_mtime_ns>
+  output_url:string         // 本合成 /merged/<file>?v=<st_mtime_ns>
+                            // プレビュー /merged-preview/<file>?v=<st_mtime_ns>
 }
 ```
 
 露出を変えて撮ったブラケット（解析の `exposure_bracket`）を **Exposure Fusion（Mertens）**
-で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。出力先は `outputs/merged/`。
+で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。
+
+- `preview:true` → rawpy `half_size=True` + `max_edge=1600`、出力先 `outputs/merged_preview/`。
+  本合成は `outputs/merged/`（2026-08-20b 追補）。**プレビューと本合成はディレクトリで分ける**:
+  `params_hash` が違うのでファイル名は衝突しないが、同居しているとサーバ側で「原寸か
+  プレビューか」を判定できず、`POST /api/export` の `variant:"merged"` に長辺1600pxの合成を
+  マスターとして書き出せてしまう（現像側の `outputs/developed/` と `outputs/preview/` と同じ形）。
+- `output_url` はサーバ側が `preview` の値でルートを切り替えて付与する
+  （`preview:true` は `/merged-preview/<filename>`、それ以外は `/merged/<filename>`。
+  いずれもキャッシュバスター `?v=<st_mtime_ns>` 付き）。フロントは `output_url` を
+  **そのまま `<img src>` に使うこと**。パスとして再構成しない。
 
 - **フレーム数は 2〜9 枚**。範囲外は 400（`"合成できるのは2〜9枚です。"`）。
   上限があるのは「1グループ＝1シーン」を保証できないため（実データに1グループ20枚＝
@@ -256,6 +272,13 @@ ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
 （`resolve()` 後の親一致で確認・レシピJSONを manifest に取り込む）。`merged_filename` は
 `{capture_id}-merged{枚数}-` で始まること（中置が無い現像済みファイル名は 400）。
 
+`variant:"merged"` は**本合成限定**（2026-08-20b 追補）。プレビュー合成は
+`outputs/merged_preview/` にあり、ここでは参照しないので構造的に書き出せない。
+加えて二段目の防御として、**取り込むレシピJSON が `preview:true`（`output.preview`）の場合は
+400** とする（`"プレビュー品質の合成は書き出せません。本合成をやり直してください。"`）。
+「ファイルが単に無い」は `skipped[]`、「入力の取り違え・検証違反」は 400 という
+既存の切り分けに従う（`variant` の取り違えを 400 にしているのと同じ扱い）。
+
 ### `POST /api/import-to-photos`
 
 ```
@@ -273,6 +296,7 @@ body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist
 | `GET /outputs/<file>` | `outputs/developed/` | 既存 |
 | `GET /preview/<file>` | `outputs/preview/` | 新規（Wave 1-B） |
 | `GET /merged/<file>` | `outputs/merged/` | 新規（2026-08-20 追補） |
+| `GET /merged-preview/<file>` | `outputs/merged_preview/` | 新規（2026-08-20b 追補） |
 | `GET /thumbs/<file>` | `outputs/thumbnails/` | 新規（Wave 1-B） |
 | `GET /source-jpg/<DSCxxxxx.JPG>` | 現像元フォルダ（`config.source_root()`。既定 `sample/100MSDCF/`） | 既存 |
 
@@ -380,6 +404,7 @@ outputs/
   developed/    本現像JPEG + レシピJSON          → GET /outputs/
   preview/      プレビュー現像(half_size,1600px) → GET /preview/
   merged/       ブラケット露出合成JPEG + レシピJSON → GET /merged/
+  merged_preview/ 合成プレビュー(half_size,1600px)  → GET /merged-preview/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
@@ -531,10 +556,15 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 
 ブラケット露出合成（Exposure Fusion / Mertens）。`server.py` は呼び出し時に import する。
 
-- `MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"`（`/merged/` 配信元）
+- `MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"`（`/merged/` 配信元。**本合成のみ**）
+- `MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"`
+  （`/merged-preview/` 配信元。2026-08-20b 追補）
 - `MIN_FRAMES = 2` / `MAX_FRAMES = 9`
 - `merge_bracket(capture_ids: list[str], preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
-  — 戻り値は契約 `MergedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側が付与**する（`/merged/<filename>` + `?v=<mtime_ns>`）
+  — 戻り値は契約 `MergedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側が付与**する: `preview == true` のファイルは `/merged-preview/<filename>`、それ以外は `/merged/<filename>`（いずれも `?v=<mtime_ns>` 付き。`develop_raw` の `/preview/` と `/outputs/` の切り替えと同じ形）
+- 保存先も `preview` で分ける（`preview == true` → `MERGED_PREVIEW_ROOT`）。同居させると
+  サーバ側で原寸とプレビューを区別できず、`POST /api/export` にプレビューをマスターとして
+  書き出せてしまう
 - 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
   `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。LUT とトーンは
   `engine._shadow_lift_table()` / `engine._apply_tone()` を再利用する

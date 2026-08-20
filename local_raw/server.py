@@ -39,6 +39,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "developed"
 PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"
 MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"
+# プレビュー合成は本合成と別ディレクトリ（契約 §4）。分けないと `POST /api/export` の
+# `variant: "merged"` にプレビュー解像度の合成を書き出せてしまう（`bracket.py` の定数参照）。
+MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"
 THUMBS_ROOT = analysis.THUMBS_ROOT
 
 
@@ -217,6 +220,12 @@ def handle_merged(req: RawAssistHandler, parsed: ParseResult) -> None:
     req._serve_from_root(MERGED_ROOT, "/merged/", parsed, "合成画像が見つかりません。")
 
 
+def handle_merged_preview(req: RawAssistHandler, parsed: ParseResult) -> None:
+    req._serve_from_root(
+        MERGED_PREVIEW_ROOT, "/merged-preview/", parsed, "合成プレビューが見つかりません。"
+    )
+
+
 def handle_thumbs(req: RawAssistHandler, parsed: ParseResult) -> None:
     req._serve_from_root(THUMBS_ROOT, "/thumbs/", parsed, "サムネイルが見つかりません。")
 
@@ -327,18 +336,23 @@ def handle_merge_bracket(req: RawAssistHandler, parsed: ParseResult) -> None:
         adjustments = payload.get("adjustments")
         if adjustments is not None and not isinstance(adjustments, dict):
             raise ValueError("adjustments はオブジェクトで指定してください。")
+        preview = bool(payload.get("preview", False))
         result = merge_bracket(
             payload.get("capture_ids"),
             str(payload.get("preset", "neutral_recovery")),
             adjustments=adjustments,
-            preview=bool(payload.get("preview", False)),
+            preview=preview,
             force=bool(payload.get("force", False)),
             max_edge=int(payload.get("max_edge", 6000)),
         )
-        output_path = MERGED_ROOT / result["filename"]
+        # プレビュー合成と本合成は別ディレクトリなので、URL のルートも `preview` で切り替える
+        # （`handle_raw_develop` の `/preview/` と `/outputs/` の切り替えと同じ形）。
+        route = "/merged-preview/" if result.get("preview", preview) else "/merged/"
+        root = MERGED_PREVIEW_ROOT if result.get("preview", preview) else MERGED_ROOT
+        output_path = root / result["filename"]
         cache_buster = f"?v={output_path.stat().st_mtime_ns}" if output_path.is_file() else ""
         result["output_url"] = (
-            f"http://{HOST}:{PORT}/merged/{quote(result['filename'])}{cache_buster}"
+            f"http://{HOST}:{PORT}{route}{quote(result['filename'])}{cache_buster}"
         )
         req._json(HTTPStatus.OK, result)
     except (
@@ -397,6 +411,7 @@ GET_EXACT: dict[str, Handler] = {
 GET_PREFIX: list[tuple[str, Handler]] = [
     ("/outputs/", handle_outputs),
     ("/preview/", handle_preview),
+    ("/merged-preview/", handle_merged_preview),
     ("/merged/", handle_merged),
     ("/thumbs/", handle_thumbs),
     ("/source-jpg/", handle_source_jpg),
@@ -413,7 +428,14 @@ POST_ROUTES: dict[str, Handler] = {
 
 
 def main() -> None:
-    for directory in (OUTPUT_ROOT, PREVIEW_ROOT, MERGED_ROOT, THUMBS_ROOT, analysis.ANALYSIS_ROOT):
+    for directory in (
+        OUTPUT_ROOT,
+        PREVIEW_ROOT,
+        MERGED_ROOT,
+        MERGED_PREVIEW_ROOT,
+        THUMBS_ROOT,
+        analysis.ANALYSIS_ROOT,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((HOST, PORT), RawAssistHandler)
     print(f"RAW engine ready: http://{HOST}:{PORT} (rawpy {rawpy.__version__})", flush=True)

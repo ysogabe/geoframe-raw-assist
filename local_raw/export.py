@@ -25,8 +25,10 @@ from . import config
 from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT
 
 EXPORT_ROOT = PROJECT_ROOT / "outputs" / "export"
-# 合成（Exposure Fusion）の出力先。`bracket.MERGED_ROOT` と同じ場所を指すが、
+# 合成（Exposure Fusion）の**本合成**の出力先。`bracket.MERGED_ROOT` と同じ場所を指すが、
 # import すると cv2 まで引き込むのでここでローカルに導出する（`server.py` と同じ流儀）。
+# プレビュー合成（`outputs/merged_preview/`）は**意図的にここへ含めない**。書き出しは
+# 原寸のマスターだけを対象にするため、プレビューは構造的に対象外にする（契約 §1・§4）。
 MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"
 
 MANIFEST_VERSION = 1
@@ -241,6 +243,24 @@ def _load_recipe(output_filename: str, root: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def _recipe_is_preview(recipe: dict[str, Any] | None) -> bool:
+    """レシピJSONがプレビュー品質の出力を指しているか。
+
+    プレビュー合成は `outputs/merged_preview/` に分けたので、`MERGED_ROOT` だけを見る
+    限りここへは来ないはず。**書き出しは GeoFrame へ渡す最終工程**なので、ディレクトリ
+    分離をすり抜けた場合（分離前の古い出力が残っている等）に備えた二段目の防御として持つ。
+
+    フラグが実際に書かれる位置は `output.preview`（`engine` / `bracket` のレシピで共通）。
+    直下の `preview` も見るのは、レシピの形が変わったときに防御が黙って死なないため。
+    """
+    if not isinstance(recipe, dict):
+        return False
+    if bool(recipe.get("preview")):
+        return True
+    output = recipe.get("output")
+    return isinstance(output, dict) and bool(output.get("preview"))
+
+
 def _resolve_within(root: Path, filename: str) -> Path | None:
     """`root` 直下のファイルとして解決する。root を出るものは None。"""
     try:
@@ -326,6 +346,13 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         if source_path is None or not source_path.is_file():
             skipped.append({"capture_id": capture_id, "reason": missing_reason})
             continue
+        if variant == "merged" and _recipe_is_preview(recipe):
+            # プレビュー品質（長辺1600px）の合成をマスターとして書き出させない。
+            # 「ファイルが単に無い」ではなく**入力の取り違え**なので skipped ではなく
+            # `ValueError`（→400）にする（`_validate_developed_filename` が変種の取り違えを
+            # 沈黙させず 400 にするのと同じ判断）。コピーはループを抜けた後にまとめて行うので、
+            # ここで送出してもバッチは1件も書き出さずに終わる。
+            raise ValueError("プレビュー品質の合成は書き出せません。本合成をやり直してください。")
         if exported_name in planned_names:
             skipped.append({"capture_id": capture_id, "reason": "同じファイルが重複しています。"})
             continue
