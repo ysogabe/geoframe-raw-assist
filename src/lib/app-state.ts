@@ -60,13 +60,24 @@ export type AcceptedMerged = {
 
 export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
 
-/** 採用アイテムの一意キー（React の key と、行単位の操作の宛先に使う）。 */
+/**
+ * 採用アイテムの一意キー（React の key と、行単位の操作の宛先に使う）。
+ *
+ * 合成のキーに **先頭フレームまで混ぜている** のは、グループIDだけだと衝突するから。
+ * 再解析の再結び付け（reconcileAccepted）は仕様どおり重複除去をしないので、別々の
+ * グループで採用した 2 件の合成が再解析で 1 グループへ再結合すると `merged:12` が
+ * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
+ * `merged:12:DSC02943` まで含めれば衝突しない。
+ *
+ * `accept/merged` のトグルは groupId を直接見ていてこのキー文字列を使わないので、
+ * ここを変えても「グループにつき合成は 1 件」という採用の意味は変わらない。
+ */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
     case "photo":
       return `photo:${item.captureId}`;
     case "merged":
-      return `merged:${item.groupId}`;
+      return `merged:${item.groupId}:${item.leadCaptureId}`;
   }
 }
 
@@ -303,8 +314,8 @@ function groupIdByCapture(analysis: Analysis): Map<CaptureId, number> {
  * 再解析ならこれらは必ず生き残るので、そこから新しいグループを引き直すだけでよい。
  *
  * 気をつけるところが 3 つある（いずれも型検査では捕まらない）:
- * 1. 採用済みの写真が新しい解析から消えている → そのアイテムを落とす（引けないので）
- * 2. 採用済みの合成の先頭フレームが別のグループへ移った → groupId を書き換えて残す
+ * 1. 採用した写真が新しい解析から消えている → そのアイテムを落とす（引けないので）
+ * 2. 採用した合成の先頭フレームが別のグループへ移った → groupId を書き換えて残す
  * 3. 別々のグループから採用した 2 枚が同じグループに再結合する → **重複除去しない**
  *    （同一グループから複数枚採用するのは正当な状態であり、片方を消す理由がない）
  *
@@ -487,7 +498,8 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 合成の採用はグループにつき 1 件（acceptedKey もグループIDで作る）。
+      // 合成の採用はグループにつき 1 件。ここは acceptedKey を経由せず groupId を
+      // 直接見る（キーは先頭フレームも含むが、採用の同一性はグループにある）。
       const already = state.accepted.some((item) => item.kind === "merged" && item.groupId === action.groupId);
       return {
         ...state,

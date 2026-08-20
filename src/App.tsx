@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   acceptedCountOf,
-  acceptedGroupIdSet,
   acceptedKey,
   activePreset,
   changedAdjustmentKeys,
@@ -626,7 +625,7 @@ export default function Home() {
             visibleGroups={groupsToShow}
             viewingCaptureOf={(item) => viewingCaptureOf(state, item)}
             acceptedCountOf={(item) => acceptedCountOf(state, item.id)}
-            acceptedGroupCount={acceptedGroupIdSet(state).size}
+            acceptedItemCount={accepted.length}
             developedGroupIds={developedIds}
             activeView={state.listView}
             onChangeView={(view) => dispatch({ type: "list/view", view })}

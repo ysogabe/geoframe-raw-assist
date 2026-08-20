@@ -10,8 +10,12 @@ type GroupListProps = {
   viewingCaptureOf: (group: GroupInfo) => CaptureId;
   /** そのグループから採用している件数。1 グループから複数枚採用できる。 */
   acceptedCountOf: (group: GroupInfo) => number;
-  /** 採用アイテムを持つグループ数（「採用済み」タブに出る件数と一致させる）。 */
-  acceptedGroupCount: number;
+  /**
+   * 採用アイテムの総数。**グループ数ではない**。
+   * 一覧バッジ・このタブ・Topbar の 3 か所で同じ数が出ていないと、
+   * 「採用 1」と表示されたまま 2 枚書き出される、という食い違いが起きる。
+   */
+  acceptedItemCount: number;
   developedGroupIds: number[];
   activeView: ListView;
   onChangeView: (view: ListView) => void;
@@ -23,7 +27,7 @@ export function GroupList({
   visibleGroups,
   viewingCaptureOf,
   acceptedCountOf,
-  acceptedGroupCount,
+  acceptedItemCount,
   developedGroupIds,
   activeView,
   onChangeView,
@@ -36,7 +40,7 @@ export function GroupList({
         <div className="view-tabs" role="tablist" aria-label="表示切替">
           <button className={activeView === "suggestions" ? "active" : ""} onClick={() => onChangeView("suggestions")}>すべて <span>{analysis.groups.length}</span></button>
           <button className={activeView === "queue" ? "active" : ""} onClick={() => onChangeView("queue")}>現像済み <span>{developedGroupIds.length}</span></button>
-          <button className={activeView === "accepted" ? "active" : ""} onClick={() => onChangeView("accepted")}>採用済み <span>{acceptedGroupCount}</span></button>
+          <button className={activeView === "accepted" ? "active" : ""} onClick={() => onChangeView("accepted")}>採用 <span>{acceptedItemCount}</span></button>
         </div>
       </div>
 
@@ -45,7 +49,7 @@ export function GroupList({
           const captureId = viewingCaptureOf(group);
           const hero = analysis.photos[captureId];
           const reason = group.recommendation_reasons[0]?.text ?? "";
-          // 1 グループから複数枚採用できるようになったので、二値のバッジでは足りない。
+          // 1 グループから複数枚採用できるので、バッジは二値ではなく件数を出す。
           const acceptedCount = acceptedCountOf(group);
           return (
             <article key={group.id} className="group-card" onClick={() => onOpenGroup(group.id)}>
@@ -55,7 +59,7 @@ export function GroupList({
                 ) : null}
                 <span className="photo-count">▧ {group.capture_ids.length}枚</span>
                 {acceptedCount > 0 && (
-                  <span className="accepted-badge">✓ {acceptedCount > 1 ? `採用 ${acceptedCount}件` : "採用済み"}</span>
+                  <span className="accepted-badge">✓ 採用 {acceptedCount}件</span>
                 )}
               </div>
               <div className="group-copy">

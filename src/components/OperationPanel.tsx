@@ -47,7 +47,7 @@ type OperationPanelProps = {
   onChangePreset: (presetName: PresetName) => void;
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
-  /** 表示中の写真そのものが採用済みか（グループ単位のフラグではない）。 */
+  /** 表示中の写真そのものを採用しているか（グループ単位のフラグではない）。 */
   photoAccepted: boolean;
   onAcceptPhoto: () => void;
   mergedAccepted: boolean;
