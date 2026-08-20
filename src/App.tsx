@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  acceptedCountOf,
-  acceptedGroupIdSet,
   acceptedKey,
+  acceptedSummaryOf,
   activePreset,
   changedAdjustmentKeys,
   developedGroupIds,
   effectiveAdjustments,
+  heroCaptureOf,
   initialState,
   isBracketGroup,
   isMergedAccepted,
@@ -565,15 +565,17 @@ export default function Home() {
               dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
             }
             onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
-            photoAccepted={isPhotoAccepted(state, captureId)}
-            onAcceptPhoto={() =>
+            isPhotoAccepted={(id) => isPhotoAccepted(state, id)}
+            onAcceptPhoto={(id) =>
               dispatch({
                 type: "accept/photo",
                 groupId: group.id,
-                captureId,
+                // 宛先は **引数の撮影ID**。フィルムストリップは表示中でない写真も採用できるので、
+                // ここで表示カーソル（captureId）を使うと別の写真の採用として記録される。
+                captureId: id,
                 // 採用した時点で本現像があるならそれを既定にする。以後は行の選択が正で、
                 // あとから本現像しても勝手に昇格させない（無言で書き出す物を変えないため）。
-                variant: state.fullResults[captureId] ? "developed" : "camera_jpg",
+                variant: state.fullResults[id] ? "developed" : "camera_jpg",
               })
             }
             mergedAccepted={isMergedAccepted(state, group.id)}
@@ -624,9 +626,10 @@ export default function Home() {
           <GroupList
             analysis={analysis}
             visibleGroups={groupsToShow}
-            viewingCaptureOf={(item) => viewingCaptureOf(state, item)}
-            acceptedCountOf={(item) => acceptedCountOf(state, item.id)}
-            acceptedGroupCount={acceptedGroupIdSet(state).size}
+            heroCaptureOf={(item) => heroCaptureOf(state, item)}
+            recommendedCaptureOf={(item) => item.recommended_capture_id}
+            acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+            acceptedItemCount={accepted.length}
             developedGroupIds={developedIds}
             activeView={state.listView}
             onChangeView={(view) => dispatch({ type: "list/view", view })}

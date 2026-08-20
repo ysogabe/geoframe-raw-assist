@@ -116,13 +116,16 @@ img { display: block; max-width: 100%; }
 .group-stack { display: grid; gap: 13px; }
 .group-card { min-height: 180px; display: grid; grid-template-columns: 220px 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
 .group-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(38,49,46,.09); }
-.group-card.selected { border-color: #65a891; box-shadow: 0 0 0 2px rgba(72,147,122,.11), 0 10px 30px rgba(38,49,46,.08); }
 .group-hero { position: relative; min-height: 180px; overflow: hidden; background: #dfe3df; }
 .group-hero img { width: 100%; height: 100%; position: absolute; object-fit: contain; background: #151c1a; transition: filter .2s ease; }
 .group-card:hover .group-hero img { filter: brightness(1.03); }
 .photo-count, .accepted-badge { position: absolute; backdrop-filter: blur(8px); border-radius: 5px; color: white; font-size: 10px; font-weight: 800; padding: 5px 7px; }
 .photo-count { left: 10px; bottom: 10px; background: rgba(19,27,25,.74); }
-.accepted-badge { right: 10px; top: 10px; background: rgba(35,119,94,.88); }
+/* 採用バッジ。タイル（.shot-accept[aria-pressed="true"]）・一覧カード・書き出し行で
+   同じ緑・同じ角丸・同じ字面にする。半透明だと下の写真によって色が変わるので不透明。 */
+.accepted-badge { right: 10px; top: 10px; background: var(--green); }
+/* 書き出し行のように写真に重ねない場所ではフローに置く。 */
+.accepted-badge.inline { position: static; flex: 0 0 auto; }
 .group-copy { padding: 17px 18px 14px; display: flex; min-width: 0; flex-direction: column; }
 .group-meta { display: flex; align-items: center; justify-content: space-between; color: #8a9390; font-size: 11px; }
 .group-meta span { color: var(--green); background: var(--green-soft); border-radius: 4px; padding: 3px 6px; font-weight: 800; }
@@ -133,6 +136,13 @@ img { display: block; max-width: 100%; }
 .recommendation strong, .recommendation small { display: block; }
 .recommendation strong { font-size: 11px; }
 .recommendation small { color: var(--muted); font-size: 11px; line-height: 1.55; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 採用の内訳。件数バッジだけでは「何を採用したのか」が分からないので、
+   カードを開かずに読めるようにする。採用は一覧の中で唯一の緑ベタ（.accepted-badge）
+   と揃えたいが、本文中では読みやすさを優先してソフト緑にする。 */
+.accepted-summary { display: flex; align-items: baseline; gap: 5px; margin: 8px 0 0; padding: 4px 7px; border-radius: 5px; background: var(--green-soft); color: var(--green); font-size: 11px; font-weight: 800; }
+.accepted-summary > span:first-child { flex: 0 0 auto; }
+.accepted-summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .group-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #ededE8; display: flex; align-items: center; justify-content: space-between; }
 .raw-pill { font-size: 11px; font-weight: 800; padding: 4px 7px; border-radius: 5px; }
 .raw-none { color: #63706c; background: #eef0ed; }
@@ -163,9 +173,6 @@ img { display: block; max-width: 100%; }
 .media-heading h2, .controls-heading h2 { margin: 5px 0 0; font-family: Georgia, "Yu Mincho", serif; font-size: 21px; font-weight: 500; }
 .operation-preview { height: auto; aspect-ratio: 3 / 2; }
 .operation-preview > img { object-fit: contain; background: #171d1b; }
-.operation-shot-picker { grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 10px; margin: 12px 0 0; }
-.operation-shot-picker button { height: auto; aspect-ratio: 3 / 2; }
-.operation-shot-picker small { right: 6px; bottom: 5px; padding: 3px 5px; }
 .controls-heading { padding-bottom: 13px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .controls-heading h2 { font-size: 18px; }
 .operation-actions { margin-top: 16px; }
@@ -185,12 +192,50 @@ img { display: block; max-width: 100%; }
 .preview-grade small { font-size: 10px; line-height: 1; color: #b7c9c3; }
 .preview-grade strong { font-family: Georgia, serif; font-size: 17px; line-height: 1.05; }
 .filename { position: absolute; left: 9px; bottom: 9px; border-radius: 5px; background: rgba(20,29,27,.78); backdrop-filter: blur(5px); color: white; font-size: 10px; padding: 5px 7px; }
-.shot-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 9px 0 16px; }
-.shot-picker button { position: relative; height: auto; aspect-ratio: 3 / 2; border: 2px solid transparent; padding: 0; border-radius: 7px; overflow: hidden; background: #171d1b; cursor: pointer; opacity: .72; }
-.shot-picker button.active { border-color: var(--green); opacity: 1; box-shadow: 0 0 0 2px rgba(40,119,98,.1); }
+/* --- フィルムストリップ -----------------------------------------------------
+   1 タイルに「表示」と「採用」の 2 つのボタンが載るので、要素セレクタ
+   （.shot-picker button / span / small）ではなくクラスでスコープを絞る。
+   絞らないと、タイルに要素を足すたびに無関係な span まで推薦チップの見た目を拾う。
+
+   3 つの状態は色ではなく **チャネル** で分ける（緑が 3 つ並ばないように）:
+     表示中 = 外枠 + 不透明度 / 推薦 = 左上のアンバーチップ / 採用 = 右上の緑チップ + 内側リング
+--------------------------------------------------------------------------- */
+.shot-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 9px 0 16px; list-style: none; padding: 0; }
+/* チップの位置基準はタイル（<li>）側。ボタンが 2 つある以上ボタンには置けない。 */
+.shot-tile { position: relative; margin: 0; min-width: 0; }
+.shot-picker .shot-open { display: block; width: 100%; position: relative; height: auto; aspect-ratio: 3 / 2; border: 2px solid transparent; padding: 0; border-radius: 7px; overflow: hidden; background: #171d1b; cursor: pointer; opacity: .72; }
+/* 表示中: 外枠と不透明度。採用（チップ）とも推薦（アンバー）とも別のチャネル。 */
+.shot-picker .shot-open[aria-current="true"] { border-color: var(--green); opacity: 1; box-shadow: 0 0 0 2px rgba(40,119,98,.1); }
+.shot-picker .shot-open:disabled { cursor: not-allowed; }
 .shot-picker img { width: 100%; height: 100%; object-fit: contain; background: #171d1b; }
-.shot-picker span { position: absolute; top: 4px; left: 4px; background: var(--green); color: white; border-radius: 3px; padding: 2px 4px; font-size: 10px; font-weight: 800; }
-.shot-picker small { position: absolute; right: 4px; bottom: 3px; background: rgba(17,27,24,.72); color: white; border-radius: 3px; padding: 2px 3px; font-size: 10px; }
+/* 推薦: アンバーのチップ。アプリ内の推薦表現（.spark）と同じ色に揃えた。 */
+.shot-picker .shot-recommended { position: absolute; z-index: 2; top: 4px; left: 4px; display: inline-flex; align-items: center; gap: 3px; background: var(--amber); color: white; border-radius: 3px; padding: 2px 4px; font-size: 10px; font-weight: 800; pointer-events: none; }
+.shot-picker .shot-recommended i { font-style: normal; }
+.shot-picker .shot-id { position: absolute; z-index: 2; right: 4px; bottom: 3px; background: rgba(17,27,24,.72); color: white; border-radius: 3px; padding: 2px 3px; font-size: 10px; pointer-events: none; }
+/* 採用: 右上の緑ベタチップ。未採用でも輪郭だけ出しておく（押せることが見えないと押されない）。 */
+.shot-picker .shot-accept { position: absolute; z-index: 3; right: 4px; top: 4px; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 5px; background: rgba(19,29,26,.62); color: rgba(255,255,255,.72); font-size: 11px; font-weight: 800; line-height: 1; cursor: pointer; }
+.shot-picker .shot-accept:hover:not(:disabled) { border-color: white; color: white; }
+.shot-picker .shot-accept[aria-pressed="true"] { border-color: var(--green); background: var(--green); color: white; }
+.shot-picker .shot-accept:disabled { opacity: .4; cursor: not-allowed; }
+/* 採用したタイルは画像の内側にもリングを入れる。チップは 22px しかないので、
+   一覧を流し見したときに見落とす。 */
+.shot-tile.accepted .shot-open { box-shadow: inset 0 0 0 2px var(--green); }
+.shot-tile.accepted .shot-open[aria-current="true"] { box-shadow: inset 0 0 0 2px var(--green), 0 0 0 2px rgba(40,119,98,.1); }
+
+/* 合成タイル。写真と同じ形・同じ場所で採用できることが要点なので、
+   種類の違いは左端の破線マーカーと「合成 N枚」タグだけで示す。 */
+.shot-merged::before { content: ""; position: absolute; z-index: 2; left: -5px; top: 3px; bottom: 3px; border-left: 2px dashed #a9b5b1; }
+.shot-merged .merged-tag { position: absolute; z-index: 2; right: 4px; bottom: 3px; pointer-events: none; }
+/* 本合成前のダーク井戸。合成はまだ無いが「ここに置き場所がある」ことは見せる。 */
+.shot-well { display: grid; align-content: center; justify-items: center; gap: 5px; width: 100%; height: 100%; padding: 6px 8px; background: #171d1b; color: #9db0aa; }
+.shot-well b { font-size: 19px; line-height: 1; }
+.shot-well em { font-style: normal; font-size: 10px; line-height: 1.4; text-align: center; }
+
+/* 操作パネル側の上書き。**.shot-picker の定義より後ろに置くこと** — 同じ詳細度なので、
+   前に置くと（以前の .operation-shot-picker small がそうだった）一切効かない。 */
+.operation-shot-picker { grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 10px; margin: 12px 0 0; }
+.operation-shot-picker .shot-open { height: auto; aspect-ratio: 3 / 2; }
+.operation-shot-picker .shot-id, .operation-shot-picker .merged-tag { right: 6px; bottom: 5px; padding: 3px 5px; }
 .analysis-card { background: #f4f6f2; border-radius: 9px; padding: 13px; }
 .analysis-title { display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 3px; }
 .analysis-title strong { font-size: 11px; }
@@ -237,6 +282,9 @@ img { display: block; max-width: 100%; }
 .primary-action { background: var(--green); color: white; border: 1px solid var(--green); }
 .secondary-action { color: var(--green); background: white; border: 1px solid #9cbeb2; }
 .secondary-action:disabled { opacity: .4; cursor: not-allowed; }
+/* 採用トグル。未採用は「押してほしい」ので塗り、採用中は「もう済んでいる」ので
+   ソフト緑の輪郭に落とす（文言も「採用を外す」に変わる）。状態は aria-pressed が正。 */
+.accept-toggle.on { background: var(--green-soft); border-color: #9cbeb2; color: var(--green); }
 .safety-note { text-align: center; color: #8b9491; font-size: 11px; margin: 10px 0 0; }
 
 @media (max-width: 1100px) {
@@ -297,7 +345,7 @@ img { display: block; max-width: 100%; }
   .operation-media-card, .operation-controls-card { padding: 13px; }
   .operation-preview { height: auto; }
   .operation-shot-picker { gap: 6px; }
-  .operation-shot-picker button { height: auto; }
+  .operation-shot-picker .shot-open { height: auto; }
   .operation-comparison { padding: 10px; }
   .operation-comparison .before-after-grid { gap: 7px; }
 }
@@ -382,6 +430,7 @@ img { display: block; max-width: 100%; }
 .export-thumb { width: 66px; aspect-ratio: 3 / 2; border-radius: 6px; overflow: hidden; background: #171d1b; }
 .export-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .export-info { min-width: 0; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.export-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .export-info strong { font-size: 13px; }
 .export-info small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .export-variant { display: flex; gap: 4px; flex-shrink: 0; }
@@ -470,6 +519,11 @@ img { display: block; max-width: 100%; }
 .bracket-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 14px; }
 .bracket-actions button { border-radius: 8px; padding: 10px 12px; font-size: 11px; font-weight: 800; cursor: pointer; min-height: 40px; }
 .bracket-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.bracket-accept { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e6e1; }
+.bracket-accept button { flex: 0 0 auto; min-height: 40px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--green); background: var(--green); color: white; font-size: 11px; font-weight: 800; cursor: pointer; }
+.bracket-accept button:disabled { opacity: .4; cursor: not-allowed; }
+.bracket-accept small { min-width: 0; color: #8b9491; font-size: 11px; line-height: 1.5; }
+
 .bracket-block { margin: 8px 0 0; color: #a45d3d; font-size: 11px; font-weight: 800; text-align: center; }
 .bracket-merge .develop-hint { margin-top: 8px; }
 

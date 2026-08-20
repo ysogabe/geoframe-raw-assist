@@ -47,9 +47,13 @@ type OperationPanelProps = {
   onChangePreset: (presetName: PresetName) => void;
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
-  /** 表示中の写真そのものが採用済みか（グループ単位のフラグではない）。 */
-  photoAccepted: boolean;
-  onAcceptPhoto: () => void;
+  /**
+   * その撮影IDを採用しているか。フィルムストリップは 1 枚ずつ採用できるので、
+   * 「表示中の 1 枚」ではなくタイルごとに引ける関数で受け取る。
+   */
+  isPhotoAccepted: (captureId: CaptureId) => boolean;
+  /** 写真の採用トグル。**引数の撮影ID**が宛先（表示カーソルではない）。 */
+  onAcceptPhoto: (captureId: CaptureId) => void;
   mergedAccepted: boolean;
   onAcceptMerged: () => void;
   onDevelop: (mode: DevelopMode) => void;
@@ -105,7 +109,7 @@ export function OperationPanel({
   onChangePreset,
   onChangeAdjustment,
   onResetAdjustments,
-  photoAccepted,
+  isPhotoAccepted,
   onAcceptPhoto,
   mergedAccepted,
   onAcceptMerged,
@@ -135,6 +139,8 @@ export function OperationPanel({
   const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
   // 現像と合成の両方があるときだけ切替タブを出す。片方しか無いときは自動でそちらを見せる。
   const canToggleComparison = Boolean(developResult && mergedResult);
+  // 合成タイルに出す枚数。まだ合成していなければ「これから合成する枚数」を出す。
+  const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
   const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
   const result = showMerged ? mergedResult : developResult;
   const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
@@ -196,24 +202,91 @@ export function OperationPanel({
             </button>
           </div>
 
-          <div className="shot-picker operation-shot-picker" role="radiogroup" aria-label="代表写真を選択">
+          {/*
+            フィルムストリップ。以前はラジオグループとして組んでいたが、ラジオは
+            「1 つだけ選ぶ」を表すので複数採用と両立しない（そもそもラジオの中に
+            2 つ目のボタンを置くのは無効な ARIA でもある）。
+            素の <ul> に戻し、タイルごとに「表示を切り替える」ボタンと
+            「採用をトグルする」ボタンを 1 つずつ置く。状態は色ではなく
+            aria-current（表示中）と aria-pressed（採用）で読める。
+          */}
+          <ul className="shot-picker operation-shot-picker" aria-label="このグループの写真">
+            {/*
+              合成はブラケットのグループでだけ、**写真と同じ形の先頭タイル**として常に出す。
+              合成したのに採用し忘れたグループが無言で書き出しから落ちる、という欠陥が
+              「未点灯の採用チップが見えている」だけで構造的に消える。
+            */}
+            {isBracket && (
+              <li className={`shot-tile shot-merged${mergedAccepted ? " accepted" : ""}`}>
+                <button
+                  type="button"
+                  className="shot-open"
+                  aria-current={viewing.kind === "merged" ? "true" : undefined}
+                  aria-label="ブラケット合成の結果を表示する"
+                  // 合成結果が 1 つも無いと表示を切り替えても比較欄は変わらない（左ペインだけ
+                  // 動いて見える）。押せないようにしておく。
+                  disabled={!mergedResult}
+                  onClick={onViewMerged}
+                >
+                  {mergeFullResult ? (
+                    <img src={mergeFullResult.output_url} alt="ブラケット合成の結果" decoding="async" />
+                  ) : (
+                    <span className="shot-well">
+                      <b aria-hidden="true">▤</b>
+                      <em>本合成すると採用できます</em>
+                    </span>
+                  )}
+                </button>
+                <span className="merged-tag">合成 {mergedFrameCount}枚</span>
+                <button
+                  type="button"
+                  className="shot-accept"
+                  aria-pressed={mergedAccepted}
+                  aria-label={mergedAccepted ? "合成の採用を外す" : "合成した1枚を採用する"}
+                  // 書き出しに使えるのは本合成の結果だけ。プレビューでは採用させない。
+                  disabled={!mergeFullResult}
+                  title={mergeFullResult ? undefined : "本合成すると採用できます"}
+                  onClick={onAcceptMerged}
+                >
+                  <span aria-hidden="true">✓</span>
+                </button>
+              </li>
+            )}
+
             {group.capture_ids.map((id) => {
               const candidate = analysis.photos[id];
+              // 合成を見ている間はどの写真タイルも「表示中」ではない（カーソルは 1 本）。
+              const isViewing = viewing.kind === "photo" && viewing.captureId === id;
+              const accepted = isPhotoAccepted(id);
               return (
-                <button
-                  key={id}
-                  className={captureId === id ? "active" : ""}
-                  onClick={() => onViewCapture(group.id, id)}
-                  role="radio"
-                  aria-checked={captureId === id}
-                >
-                  {candidate ? <img src={assetUrl(candidate.thumb)} alt={id} loading="lazy" decoding="async" /> : null}
-                  {id === group.recommended_capture_id && <span>推薦</span>}
-                  <small>{id}</small>
-                </button>
+                <li key={id} className={`shot-tile${accepted ? " accepted" : ""}`}>
+                  <button
+                    type="button"
+                    className="shot-open"
+                    aria-current={isViewing ? "true" : undefined}
+                    aria-label={`${id} を表示する`}
+                    onClick={() => onViewCapture(group.id, id)}
+                  >
+                    {candidate ? <img src={assetUrl(candidate.thumb)} alt="" loading="lazy" decoding="async" /> : null}
+                  </button>
+                  {/* 推薦はアンバー。緑は「表示中」と「採用」で使い切っているため。 */}
+                  {id === group.recommended_capture_id && (
+                    <span className="shot-recommended"><i aria-hidden="true">✦</i> 推薦</span>
+                  )}
+                  <small className="shot-id">{id}</small>
+                  <button
+                    type="button"
+                    className="shot-accept"
+                    aria-pressed={accepted}
+                    aria-label={accepted ? `${id} の採用を外す` : `${id} を採用する`}
+                    onClick={() => onAcceptPhoto(id)}
+                  >
+                    <span aria-hidden="true">✓</span>
+                  </button>
+                </li>
               );
             })}
-          </div>
+          </ul>
 
           {photo && (
             <dl className="exif-grid">
@@ -295,12 +368,8 @@ export function OperationPanel({
             onChangePreset={onChangePreset}
             onChangeAdjustment={onChangeAdjustment}
             onResetAdjustments={onResetAdjustments}
-            photoAccepted={photoAccepted}
-            onAcceptPhoto={onAcceptPhoto}
-            // 採用できるのは本合成の結果だけ（プレビューは書き出しに使えない）。
-            canAcceptMerged={Boolean(mergeFullResult)}
-            mergedAccepted={mergedAccepted}
-            onAcceptMerged={onAcceptMerged}
+            photoAccepted={isPhotoAccepted(captureId)}
+            onAcceptPhoto={() => onAcceptPhoto(captureId)}
             onDevelop={onDevelop}
             developMode={developMode}
             elapsedLabel={elapsedLabel}
@@ -328,6 +397,8 @@ export function OperationPanel({
           presetLabel={presetLabel}
           hasPreview={Boolean(mergePreviewResult)}
           hasFull={Boolean(mergeFullResult)}
+          accepted={mergedAccepted}
+          onAcceptMerged={onAcceptMerged}
           panelRef={mergePanelRef}
         />
       )}

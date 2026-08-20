@@ -60,13 +60,24 @@ export type AcceptedMerged = {
 
 export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
 
-/** 採用アイテムの一意キー（React の key と、行単位の操作の宛先に使う）。 */
+/**
+ * 採用アイテムの一意キー（React の key と、行単位の操作の宛先に使う）。
+ *
+ * 合成のキーに **先頭フレームまで混ぜている** のは、グループIDだけだと衝突するから。
+ * 再解析の再結び付け（reconcileAccepted）は仕様どおり重複除去をしないので、別々の
+ * グループで採用した 2 件の合成が再解析で 1 グループへ再結合すると `merged:12` が
+ * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
+ * `merged:12:DSC02943` まで含めれば衝突しない。
+ *
+ * `accept/merged` のトグルは groupId を直接見ていてこのキー文字列を使わないので、
+ * ここを変えても「グループにつき合成は 1 件」という採用の意味は変わらない。
+ */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
     case "photo":
       return `photo:${item.captureId}`;
     case "merged":
-      return `merged:${item.groupId}`;
+      return `merged:${item.groupId}:${item.leadCaptureId}`;
   }
 }
 
@@ -303,8 +314,8 @@ function groupIdByCapture(analysis: Analysis): Map<CaptureId, number> {
  * 再解析ならこれらは必ず生き残るので、そこから新しいグループを引き直すだけでよい。
  *
  * 気をつけるところが 3 つある（いずれも型検査では捕まらない）:
- * 1. 採用済みの写真が新しい解析から消えている → そのアイテムを落とす（引けないので）
- * 2. 採用済みの合成の先頭フレームが別のグループへ移った → groupId を書き換えて残す
+ * 1. 採用した写真が新しい解析から消えている → そのアイテムを落とす（引けないので）
+ * 2. 採用した合成の先頭フレームが別のグループへ移った → groupId を書き換えて残す
  * 3. 別々のグループから採用した 2 枚が同じグループに再結合する → **重複除去しない**
  *    （同一グループから複数枚採用するのは正当な状態であり、片方を消す理由がない）
  *
@@ -487,7 +498,8 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 合成の採用はグループにつき 1 件（acceptedKey もグループIDで作る）。
+      // 合成の採用はグループにつき 1 件。ここは acceptedKey を経由せず groupId を
+      // 直接見る（キーは先頭フレームも含むが、採用の同一性はグループにある）。
       const already = state.accepted.some((item) => item.kind === "merged" && item.groupId === action.groupId);
       return {
         ...state,
@@ -725,9 +737,35 @@ export function acceptedGroupIdSet(state: State): Set<number> {
   return new Set(state.accepted.map((item) => item.groupId));
 }
 
-/** そのグループから採用している件数（1 グループから複数枚採用できる）。 */
-export function acceptedCountOf(state: State, groupId: number): number {
-  return state.accepted.filter((item) => item.groupId === groupId).length;
+/**
+ * そのグループの採用の内訳ラベル（例: `["DSC02943", "合成3枚"]`）。
+ *
+ * 件数も一覧カードの 1 行もこれ 1 本から作る。件数だけ別に数えると、バッジは「2件」
+ * なのに内訳が 1 つしか出ない、という食い違いが生まれる余地が残るため。
+ * 配列の長さの総和は state.accepted.length と一致する（= タブと Topbar の件数）。
+ */
+export function acceptedSummaryOf(state: State, groupId: number): string[] {
+  return state.accepted
+    .filter((item) => item.groupId === groupId)
+    .map((item) => {
+      if (item.kind === "photo") return item.captureId;
+      // 合成の枚数は成果物から引く。採用時に控えても、合成し直したら古い枚数が残る。
+      const merged = mergedResultFor(state.mergeFullResults, item.leadCaptureId);
+      return merged ? `合成${merged.frames}枚` : "合成";
+    });
+}
+
+/**
+ * 一覧カードの代表として出す撮影ID。
+ *
+ * 採用があれば **最初に採用したアイテム**、無ければ表示カーソル。採用したものが
+ * 一覧に出ていないと「採用したはずのカットが見当たらない」ように見えるため、
+ * 採用は表示カーソルより優先する。
+ */
+export function heroCaptureOf(state: State, group: GroupInfo): CaptureId {
+  const first = state.accepted.find((item) => item.groupId === group.id);
+  if (first) return first.kind === "photo" ? first.captureId : first.leadCaptureId;
+  return viewingCaptureOf(state, group);
 }
 
 export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {

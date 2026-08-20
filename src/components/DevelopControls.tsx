@@ -13,18 +13,11 @@ type DevelopControlsProps = {
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
   /**
-   * 今表示している写真そのものが採用済みか。
+   * 今表示している写真そのものを採用しているか。
    * 以前はグループ単位のフラグで、「この写真を採用」という文言が実態と食い違っていた。
    */
   photoAccepted: boolean;
   onAcceptPhoto: () => void;
-  /**
-   * 合成の採用。本合成の結果があるときだけボタンを出す（プレビューは書き出せない）。
-   * 表示中の面に依存させず常に並べるので、合成を見ていなくても採用できる。
-   */
-  canAcceptMerged: boolean;
-  mergedAccepted: boolean;
-  onAcceptMerged: () => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -46,9 +39,6 @@ export function DevelopControls({
   onResetAdjustments,
   photoAccepted,
   onAcceptPhoto,
-  canAcceptMerged,
-  mergedAccepted,
-  onAcceptMerged,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -153,14 +143,14 @@ export function DevelopControls({
       </div>
 
       <div className="operation-actions">
-        <button className="primary-action" onClick={onAcceptPhoto}>
-          {photoAccepted ? "✓ この写真を採用済み" : "この写真を採用"}
+        {/* 採用は二値のトグル。色だけでなく aria-pressed でも状態が読めるようにする。 */}
+        <button
+          className={`primary-action accept-toggle${photoAccepted ? " on" : ""}`}
+          onClick={onAcceptPhoto}
+          aria-pressed={photoAccepted}
+        >
+          {photoAccepted ? "採用を外す" : "この写真を採用する"}
         </button>
-        {canAcceptMerged && (
-          <button className="secondary-action" onClick={onAcceptMerged}>
-            {mergedAccepted ? "✓ 合成を採用済み" : "合成した1枚を採用"}
-          </button>
-        )}
       </div>
     </>
   );
