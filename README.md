@@ -82,7 +82,8 @@ outputs/
 ├── thumbnails/<folder>-<ID>.webp   一覧表示用サムネイル（長辺640）
 ├── preview/<ID>-<preset>-<hash>.jpg  プレビュー現像（長辺1600）
 ├── developed/<ID>-<preset>-<hash>.jpg  本現像（原寸）
-├── merged/<先頭ID>-merged<枚数>-<preset>-<hash>.jpg  ブラケット合成
+├── merged/<先頭ID>-merged<枚数>-<preset>-<hash>.jpg  ブラケット合成（原寸・書き出し可）
+├── merged_preview/ 同名                ブラケット合成のプレビュー（長辺1600・書き出し不可）
 │   └── 同名 .json                  レシピ（元ARWのSHA-256・調整値・レンズ補正・EXIF）
 └── export/<バッチ名>/
     ├── <現像ファイル名>.jpg
