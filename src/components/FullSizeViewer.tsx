@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useId, useRef, useState, type PointerEvent, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type { ViewerSource } from "../lib/app-state";
 
 type Face = "before" | "after";
@@ -108,11 +116,32 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
   // ---- ダイアログの開閉 ----------------------------------------------------
   useEffect(() => {
     const dialog = dialogRef.current;
-    if (dialog && !dialog.open) dialog.showModal();
-    // アンマウント時に close() は呼ばない。close イベントはタスクとして非同期に飛ぶため、
-    // StrictMode の二重実行で「開き直した直後に閉じる」経路ができてしまう。
-    // 実際の閉じる操作（Escape / 背景クリック / 閉じるボタン）は必ず close() を通るので、
-    // フォーカスの復帰はそちらで担保されている。
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+
+    // 背景（::backdrop）クリックで閉じる。React の onClick はルートへの委譲なので、
+    // トップレイヤーに乗った <dialog> の背景クリックが届くかがエンジン依存になる。
+    // ここだけは要素へ直接張る。
+    // あわせて「押した場所も背景か」を見る。ステージ内で掴んで背景で離したドラッグは
+    // 合成クリックの target が <dialog> になり、パンの途中で閉じてしまうため。
+    let pressedBackdrop = false;
+    const onPointerDown = (event: Event) => {
+      pressedBackdrop = event.target === dialog;
+    };
+    const onClick = (event: Event) => {
+      if (pressedBackdrop && event.target === dialog) dialog.close();
+    };
+    dialog.addEventListener("pointerdown", onPointerDown);
+    dialog.addEventListener("click", onClick);
+
+    return () => {
+      dialog.removeEventListener("pointerdown", onPointerDown);
+      dialog.removeEventListener("click", onClick);
+      // close() は呼ばない。close イベントはタスクとして非同期に飛ぶため、StrictMode の
+      // 二重実行で「開き直した直後に閉じる」経路ができてしまう。実際の閉じる操作
+      // （Escape / 背景クリック / 閉じるボタン）は必ず close() を通るので、
+      // フォーカスの復帰はそちらで担保されている。
+    };
   }, []);
 
   const requestClose = useCallback(() => {
@@ -245,7 +274,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
   }, [zoomAt]);
 
   // ---- ドラッグ移動（setPointerCapture でステージ外へ出ても追従させる） -------
-  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     const stage = stageRef.current;
     if (!stage || !base) return;
@@ -254,7 +283,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
     setDragging(true);
   }
 
-  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag || drag.id !== event.pointerId) return;
     setView((prev) => ({
@@ -264,7 +293,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
     }));
   }
 
-  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag || drag.id !== event.pointerId) return;
     dragRef.current = null;
@@ -296,21 +325,21 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
     setPeek(true);
   }
 
-  function handlePeekKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+  function handlePeekKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
     if (event.key !== " " && event.key !== "Enter") return;
     // Space の既定動作（クリック発火とページスクロール）を止めて、押している間だけの表示にする。
     event.preventDefault();
     startPeek();
   }
 
-  function handlePeekKeyUp(event: KeyboardEvent<HTMLButtonElement>) {
+  function handlePeekKeyUp(event: ReactKeyboardEvent<HTMLButtonElement>) {
     if (event.key !== " " && event.key !== "Enter") return;
     event.preventDefault();
     setPeek(false);
   }
 
   // ---- キーボード ----------------------------------------------------------
-  function handleKeyDown(event: KeyboardEvent<HTMLDialogElement>) {
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDialogElement>) {
     // Escape は <dialog> が cancel → close と処理するのでここでは拾わない。
     switch (event.key) {
       case "+":
@@ -365,10 +394,6 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
       aria-labelledby={titleId}
       onClose={onClose}
       onKeyDown={handleKeyDown}
-      onClick={(event) => {
-        // ::backdrop へのクリックは <dialog> 自身が target になる。中身は別要素なので誤爆しない。
-        if (event.target === dialogRef.current) requestClose();
-      }}
     >
       <div className="viewer-body">
         <header className="viewer-head">
