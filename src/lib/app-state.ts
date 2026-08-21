@@ -140,6 +140,20 @@ export type State = {
   sourceFolderUnavailable: boolean;
   /** POST /api/source-folder の実行中。 */
   sourceFolderBusy: boolean;
+  /**
+   * 現像対象フォルダの世代。フォルダを切り替えるたびに 1 進む。
+   *
+   * 現像・合成は非同期で数十秒かかる。その最中にフォルダを切り替えると、`develop/ok` /
+   * `merge/ok` が届いたときサーバはもう別のフォルダを向いているのに、**前のフォルダの
+   * RAW から作った結果**が新しいフォルダの state へ書き込まれてしまう。capture_id は
+   * カメラの連番でしかなくフォルダをまたいで衝突しうるため、書き込み先まで一致して
+   * しまい、UI 上は正常な現像結果に見える（別の写真が出る、とは気づけない）。
+   *
+   * UI ロック（Sidebar の sourceFolderLocked）だけでは「切替とほぼ同時にレスポンスが
+   * 返る」窓が残るので、リクエスト発行時の世代を結果のアクションに載せ、reducer 側で
+   * 現在の世代と違うものを捨てる。
+   */
+  sourceFolderGeneration: number;
   selectedGroupId: number | null;
   /** グループごとの表示カーソル。未設定なら recommended_capture_id を見ている。 */
   viewing: Record<number, ViewingItem>;
@@ -191,6 +205,7 @@ export const initialState: State = {
   sourceFolder: null,
   sourceFolderUnavailable: false,
   sourceFolderBusy: false,
+  sourceFolderGeneration: 0,
   selectedGroupId: null,
   viewing: {},
   accepted: [],
@@ -247,12 +262,15 @@ export type Action =
   | { type: "adjust/change"; key: keyof Adjustments; value: Adjustments[keyof Adjustments] }
   | { type: "adjust/reset" }
   | { type: "develop/start"; mode: DevelopMode; captureId: CaptureId }
-  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult }
+  /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
+  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number }
+  /** 失敗には generation を持たせない（後述: 通知だけは必ず出す）。 */
   | { type: "develop/fail"; message: string }
   | { type: "merge/toggleFrame"; groupId: number; captureId: CaptureId }
   | { type: "merge/resetFrames"; groupId: number }
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
-  | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult }
+  /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
+  | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult; generation: number }
   | { type: "merge/fail"; message: string }
   | { type: "export/batchName"; value: string }
   | { type: "export/start" }
@@ -437,12 +455,20 @@ export function reducer(state: State, action: Action): State {
       // 新しいフォルダでは別の写真か、存在しない）。選択・現像結果・書き出し選択を
       // まとめて捨て、エンジン接続情報と選択中プリセットだけを引き継ぐ。
       // 解析のやり直しは呼び出し側が beginAnalyze(true) で行う。
+      //
+      // initialState を土台にするので developMode / mergeMode / developingCapture /
+      // mergingGroupId も null に戻る（＝実行中表示は残らない）。飛んでいる fetch 自体は
+      // 止められないため、遅れて届く結果は sourceFolderGeneration で捨てる。
       return {
         ...initialState,
         health: state.health,
         engineStatus: state.engineStatus,
         presetName: state.presetName,
         sourceFolder: action.info,
+        // **initialState の 0 に戻さない**。ここで進めた値が「今のフォルダ」の目印であり、
+        // 飛んでいる現像・合成のリクエストが持つ古い世代と必ず違う値になる必要がある。
+        // スプレッドより後に置くこと（前に置くと 0 に上書きされ、ガードが無言で死ぬ）。
+        sourceFolderGeneration: state.sourceFolderGeneration + 1,
         notice: action.message,
         noticeTone: action.tone ?? "info",
       };
@@ -559,6 +585,13 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "develop/ok": {
+      // フォルダが切り替わったあとに届いた、**前のフォルダの RAW から作られた結果**。
+      // capture_id はカメラの連番なので新しいフォルダの写真と衝突しうる（同じIDの別写真が
+      // 存在する）。書き込むと「現像したら別の写真が出る」になり、しかもファイル名も
+      // capture_id も整合するので気づけない。結果は捨て、state を一切触らない。
+      // 通知も出さない: フォルダ切替のトーストが出た直後に前のフォルダの完了トーストを
+      // 重ねると、新しいフォルダで何かが起きたように読めるため。
+      if (action.generation !== state.sourceFolderGeneration) return state;
       const { capture_id: captureId } = action.result;
       const elapsed = action.result.cached ? "保存済み結果" : `${action.result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
@@ -619,6 +652,10 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "merge/ok": {
+      // develop/ok と同じ理由で、フォルダ切替後に届いた古いフォルダの合成結果は捨てる。
+      // 合成は groupId をキーに書き込むため、こちらは「新しいフォルダの解析で同じIDに
+      // なったグループ」に前のフォルダの合成が入る、という形で化ける。
+      if (action.generation !== state.sourceFolderGeneration) return state;
       const { result } = action;
       const elapsed = result.cached ? "保存済み結果" : `${result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";

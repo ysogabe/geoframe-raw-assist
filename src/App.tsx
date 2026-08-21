@@ -383,6 +383,11 @@ export default function Home() {
       return;
     }
 
+    // 現在のフォルダの世代を **await の前に** 控える。await を跨ぐと state は古い
+    // クロージャのままなので dispatch 時点で読み直しても意味がなく、そもそも「この
+    // リクエストを出したときのフォルダ」を記録するのが目的。
+    const generation = state.sourceFolderGeneration;
+
     dispatch({ type: "develop/start", mode, captureId });
     try {
       const result = await developRaw(captureId, preset.name, {
@@ -390,7 +395,7 @@ export default function Home() {
         preview: mode === "preview",
         maxEdge: mode === "preview" ? undefined : 6000,
       });
-      dispatch({ type: "develop/ok", mode, result });
+      dispatch({ type: "develop/ok", mode, result, generation });
       window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
     } catch (error) {
       dispatch({ type: "develop/fail", message: messageOf(error, "RAW現像に失敗しました") });
@@ -420,6 +425,9 @@ export default function Home() {
       return;
     }
 
+    // runDevelop と同じ。await の前に「今のフォルダ」を控えておく。
+    const generation = state.sourceFolderGeneration;
+
     dispatch({ type: "merge/start", mode, groupId: group.id });
     try {
       const result = await mergeBracket(frames, preset.name, {
@@ -427,7 +435,7 @@ export default function Home() {
         preview: mode === "preview",
         maxEdge: mode === "preview" ? undefined : 6000,
       });
-      dispatch({ type: "merge/ok", mode, groupId: group.id, result });
+      dispatch({ type: "merge/ok", mode, groupId: group.id, result, generation });
       window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
     } catch (error) {
       dispatch({
@@ -511,7 +519,13 @@ export default function Home() {
         sourceFolder={state.sourceFolder}
         sourceFolderUnavailable={state.sourceFolderUnavailable}
         sourceFolderBusy={state.sourceFolderBusy}
-        sourceFolderLocked={state.analysisState === "running"}
+        // 解析中だけでなく、現像・合成が走っている間もフォルダ切替を止める。切り替えると
+        // 飛んでいるリクエストの結果が前のフォルダのものになり、capture_id の衝突で
+        // 新しいフォルダの写真に化ける（runMerge の多重起動ガードと同じ考え方）。
+        // なお取りこぼしの窓は残るため、reducer 側の sourceFolderGeneration が最終防衛線。
+        sourceFolderLocked={
+          state.analysisState === "running" || Boolean(state.developMode) || Boolean(state.mergeMode)
+        }
         onApplySourceFolder={(path) => void applySourceFolder(path)}
         onSourceFolderError={(message) => dispatch({ type: "source/failed", message })}
       />
