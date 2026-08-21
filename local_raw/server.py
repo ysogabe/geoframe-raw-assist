@@ -144,8 +144,13 @@ class RawAssistHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._host_allowed():
             return
-        origin = self.headers.get("Origin")
-        if origin and origin not in ALLOWED_ORIGINS:
+        # Origin は**必須**にする。`origin and ...` のように「無ければ素通し」にすると、
+        # 同一マシン上の任意のプロセスが `curl`（既定で Origin を送らない）で
+        # `POST /api/source-folder` を叩いて現像元フォルダを差し替えられる。
+        # 画面からの操作は Tauri が `tauri://localhost`、ブラウザ開発モードが
+        # `http://localhost:1420` を必ず送るので、必須化しても正規の経路は落ちない
+        # （`do_OPTIONS` は元から必須で、こちらを揃えた形）。
+        if self.headers.get("Origin") not in ALLOWED_ORIGINS:
             self._json(HTTPStatus.FORBIDDEN, {"error": "この画面からの操作は許可されていません。"})
             return
         parsed = urlparse(self.path)

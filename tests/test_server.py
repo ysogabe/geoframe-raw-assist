@@ -179,6 +179,54 @@ class MergedPreviewRouteTests(ServerTestCase):
         )
 
 
+class PostOriginTests(unittest.TestCase):
+    """`do_POST` は Origin ヘッダを**必須**にすること。
+
+    「Origin があれば照合、無ければ素通し」だと、同一マシン上の任意のプロセスが
+    `curl`（既定で Origin を送らない）で `POST /api/source-folder` を叩いて現像元
+    フォルダを差し替えられる。ソケットは開かず、`do_POST` を素の関数として
+    スタブに束ねて分岐だけを見る（`StubRequest._serve_from_root` と同じ流儀）。
+    """
+
+    class PostRequest(StubRequest):
+        do_POST = RawAssistHandler.do_POST
+
+        def __init__(self, headers: dict, path: str = "/api/source-folder"):
+            super().__init__()
+            self.headers = headers
+            self.path = path
+
+        def _host_allowed(self) -> bool:
+            return True
+
+    def post(self, headers: dict):
+        """ルート表はスタブに差し替え、ハンドラまで届いたかを記録する。"""
+        request = self.PostRequest(headers)
+        called: list[str] = []
+        routes = {"/api/source-folder": lambda req, parsed: called.append(parsed.path)}
+        with mock.patch.object(server_module, "POST_ROUTES", routes):
+            request.do_POST()
+        return request, called
+
+    def test_post_without_an_origin_header_is_rejected(self):
+        request, called = self.post({})
+        self.assertEqual(request.status, 403)
+        self.assertEqual(called, [], "403 のときはハンドラまで届かないこと")
+
+    def test_post_with_a_foreign_origin_is_rejected(self):
+        request, called = self.post({"Origin": "https://evil.example"})
+        self.assertEqual(request.status, 403)
+        self.assertEqual(called, [])
+
+    def test_post_from_the_app_and_the_dev_server_still_passes(self):
+        """パッケージ版（`tauri://localhost`）とブラウザ開発モードは通ること。"""
+        for origin in ("tauri://localhost", "http://localhost:1420"):
+            with self.subTest(origin=origin):
+                request, called = self.post({"Origin": origin})
+                self.assertIsNone(request.status)
+                self.assertEqual(called, ["/api/source-folder"])
+
+
 class StaticRootConsistencyTests(unittest.TestCase):
     """同じディレクトリを複数モジュールで別々に導出しているため、実体の一致を固定する。
 

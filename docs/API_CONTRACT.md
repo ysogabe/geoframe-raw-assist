@@ -248,10 +248,13 @@ MergedResult = {
 
 `params_hash` = `sha1(canonical JSON of { **ソート済み capture_ids**, 解決後 adjustments,
 preset名, max_edge, preview, lensfun 適用可否, 位置合わせの版,
-rawpy/Pillow/OpenCV/bracket バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
+rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
 
 - `capture_ids` と現像元フォルダのパスを**必ず含める**。`capture_id` はカメラの連番なので、
   含めないと別フォルダの同じIDに対して**他人の写真の合成結果が `cached: true` で返る**。
+- **`ENGINE_VERSION` も含める**（2026-08-21 追補）。合成はレンズ補正・トーン処理・JPEG保存を
+  §2 の現像パイプラインと共有しているので、そちらの出力が変わる修正で `ENGINE_VERSION` を
+  上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
 - ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
 ### `POST /api/export`
@@ -278,6 +281,21 @@ ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
 400** とする（`"プレビュー品質の合成は書き出せません。本合成をやり直してください。"`）。
 「ファイルが単に無い」は `skipped[]`、「入力の取り違え・検証違反」は 400 という
 既存の切り分けに従う（`variant` の取り違えを 400 にしているのと同じ扱い）。
+
+この二段目の防御は `variant:"developed"` にも同じく効く（2026-08-21 追補）。現像レシピにも
+`output.preview` が書かれるので（§2 / `engine.develop_raw`）、プレビュー現像が
+`outputs/developed/` に紛れ込んだ場合に無警告でマスターとして書き出されないようにする。
+文言は合成側と共用（`camera_jpg` はレシピを持たないので対象外）。
+
+**成果物の出所を検証する**（2026-08-21 追補）。`outputs/developed/` と `outputs/merged/` は
+現像元フォルダに依らない固定ディレクトリなので、フォルダ A で作った成果物は B へ
+切り替えた後もそこに残っている。`capture_id` はカメラの連番でカードをまたぐと衝突するため、
+取り込むレシピJSONに記録された出所（現像 `source.path` / 合成 `source.root`）が
+**現在の現像元フォルダと一致しない場合は `skipped[]`** に積む（実体は A なのに manifest の
+`exif` / `group` だけ B、という自己矛盾を防ぐ。解析キャッシュ側は署名照合で同じ取り違えを
+防いでいる）。理由の文言は「成果物が見つからない」と同じにする。レシピに出所が
+**記録されていない**場合（`camera_jpg`・`source` を持たない古い形式）は判定材料が無いので
+従来どおり書き出す。
 
 ### `POST /api/import-to-photos`
 

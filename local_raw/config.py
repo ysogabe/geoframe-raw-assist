@@ -192,9 +192,24 @@ def source_root() -> Path:
     if isinstance(stored, str) and stored:
         candidate = Path(stored)
         if candidate.is_absolute():
-            info = _stat_or_none(candidate)
-            if info is not None and stat_module.S_ISDIR(info.st_mode):
+            # `_stat_or_none()` は `PermissionError` も `OSError` として None に畳むので、
+            # ここでは使わずに直接 `os.stat` を呼ぶ。畳んでしまうと「読めないだけ」の
+            # フォルダが既定へ落ち、上の約束（フォールバックしない）が実装と食い違う。
+            try:
+                info = os.stat(candidate)
+            except PermissionError:
+                # 存在はするが読めない（TCC 拒否・権限なし）。既定へ逃がすと UI が
+                # 「許可すれば直る」ことを案内できなくなるので、そのまま返す。
+                # 読み取り不可を検出できるのは `source_folder_info()` の `readable`
+                # （= `_probe_readable()`）だけ。`scan_pairs()` は `Path.glob` が
+                # `PermissionError` を握り潰すので「0組」としか言えない。
                 return candidate.resolve()
+            except (OSError, ValueError):
+                # 存在しない・パスとして不正 → 既定へフォールバックする。
+                pass
+            else:
+                if stat_module.S_ISDIR(info.st_mode):
+                    return candidate.resolve()
     return DEFAULT_SOURCE_ROOT.resolve()
 
 
