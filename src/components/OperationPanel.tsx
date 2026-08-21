@@ -136,7 +136,30 @@ export function OperationPanel({
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
   const developResult = fullResult ?? previewResult;
-  const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
+  /**
+   * 本合成の結果が **今選んでいるフレーム構成** のものか。
+   *
+   * 本合成を無条件に優先すると、フレームを選び直してプレビュー合成をやり直しても
+   * 画面が一切変わらない（数十秒待った操作が無反応に見える）。構成が変わっていたら
+   * 新しい意図を反映しているプレビューの方を見せる。
+   *
+   * 比較は **集合として** 行う。mergeFrames は group.capture_ids の並び（撮影時刻順、
+   * 同時刻は撮影IDで解決）だが、サーバは capture_ids を辞書順に正規化して返す
+   * （bracket.py の _validate_capture_ids、params_hash を安定させるため）。通常は
+   * 一致するが、ファイル番号のロールオーバー（DSC09999 → DSC00001）などで食い違う。
+   * 位置で比べると、同じ構成なのに「変わった」と誤判定してプレビューへ落ちてしまう。
+   */
+  const mergeFullMatchesSelection =
+    mergeFullResult !== undefined &&
+    mergeFrames.length === mergeFullResult.capture_ids.length &&
+    mergeFrames.every((id) => mergeFullResult.capture_ids.includes(id));
+  // 構成が変わっていてもプレビューがまだ無いなら、何も出さないより古い本合成を出す
+  // （フレームを選び直しただけで、まだ何も合成していない状態）。
+  const mergedResult = isBracket
+    ? mergeFullMatchesSelection
+      ? mergeFullResult
+      : (mergePreviewResult ?? mergeFullResult)
+    : undefined;
   // 現像と合成の両方があるときだけ切替タブを出す。片方しか無いときは自動でそちらを見せる。
   const canToggleComparison = Boolean(developResult && mergedResult);
   // 合成タイルに出す枚数。まだ合成していなければ「これから合成する枚数」を出す。
@@ -228,8 +251,11 @@ export function OperationPanel({
                   disabled={!mergedResult}
                   onClick={onViewMerged}
                 >
-                  {mergeFullResult ? (
-                    <img src={mergeFullResult.output_url} alt="ブラケット合成の結果" decoding="async" />
+                  {/* タイルの絵は「今どれを見ているか」の側なので mergedResult に従う
+                      （本合成が今の選択と食い違っていればプレビューが入る）。採用できるかは
+                      別の役割なので、下の採用ボタンは mergeFullResult で判定したままにする。 */}
+                  {mergedResult ? (
+                    <img src={mergedResult.output_url} alt="ブラケット合成の結果" decoding="async" />
                   ) : (
                     <span className="shot-well">
                       <b aria-hidden="true">▤</b>
