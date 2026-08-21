@@ -612,6 +612,8 @@ class MergedRecipeTests(BracketTestCase):
         engine = recipe["engine"]
         self.assertEqual(engine["bracket_version"], bracket_module.BRACKET_VERSION)
         self.assertEqual(engine["align_version"], bracket_module.ALIGN_VERSION)
+        # `params_hash` に入る版はレシピにも残す（成果物だけで作った版を追えるように）。
+        self.assertEqual(engine["engine_version"], bracket_module.ENGINE_VERSION)
         for key in ("rawpy_version", "pillow_version", "opencv_version"):
             self.assertTrue(engine[key])
 

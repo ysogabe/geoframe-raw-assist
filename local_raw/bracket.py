@@ -614,6 +614,10 @@ def merge_bracket(
             "name": "OpenCV MergeMertens",
             "bracket_version": BRACKET_VERSION,
             "align_version": ALIGN_VERSION,
+            # `params_hash` に入れている版はすべてここにも残す（成果物だけを見て
+            # 「どの版が作ったか」を answered にするためのブロック）。合成はレンズ補正・
+            # トーン処理・JPEG保存を現像側と共有しているので `engine_version` も要る。
+            "engine_version": ENGINE_VERSION,
             "rawpy_version": rawpy.__version__,
             "pillow_version": Image.__version__,
             "opencv_version": cv2.__version__,
