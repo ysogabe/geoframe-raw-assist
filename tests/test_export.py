@@ -380,6 +380,125 @@ class StaleAnalysisAfterFolderSwitchTests(ExportTestCase):
         self.assertEqual(item["group"]["id"], 41)
 
 
+class ArtefactProvenanceTests(ExportTestCase):
+    """現像済み/合成済みJPEGが**現在のフォルダで作られたもの**であること。
+
+    `StaleAnalysisAfterFolderSwitchTests` は `variant: "camera_jpg"`（＝解析キャッシュの
+    取り違え）を見る。こちらは成果物そのものの出所を見る:
+    `outputs/developed/` と `outputs/merged/` はフォルダに依らない固定ディレクトリなので、
+    A で作った成果物は B へ切り替えた後もそこに残っている。`capture_id` はカメラの連番で
+    カードをまたぐと衝突するため、出所を見ないと **実体は A・EXIF と group は B** という
+    自己矛盾した manifest が書き出される。出所はレシピJSONに記録されている
+    （現像 `source.path` / 合成 `source.root`）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 同じ capture_id を持つ別カード B へ切り替える（A の成果物はそのまま残る）。
+        card_b = tempfile.TemporaryDirectory()
+        self.addCleanup(card_b.cleanup)
+        self.card_b = Path(card_b.name).resolve() / "DCIM" / "101MSDCF"
+        self.card_b.mkdir(parents=True, exist_ok=True)
+        (self.card_b / f"{CAPTURE}.JPG").write_bytes(b"card-b-camera-jpeg")
+        (self.card_b / f"{CAPTURE}.ARW").write_bytes(b"card-b-raw")
+        self.patch_source_root(self.card_b)
+
+    def write_developed(self, filename, source):
+        """`outputs/developed/` に現像JPEGとレシピを置く（`source` はレシピの `source` の値）。"""
+        (self.output_root / filename).write_bytes(b"developed-jpeg-bytes")
+        (self.output_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps({"recipe_version": 2, "capture_id": CAPTURE, "source": source}),
+            encoding="utf-8",
+        )
+
+    def write_merged(self, filename, source):
+        (self.merged_root / filename).write_bytes(b"merged-jpeg-bytes")
+        (self.merged_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps(
+                {"recipe_version": 1, "kind": "exposure_fusion", "source": source}
+            ),
+            encoding="utf-8",
+        )
+
+    def export_developed(self, filename):
+        return export_batch(
+            "trip09",
+            [{"capture_id": CAPTURE, "variant": "developed", "developed_filename": filename}],
+        )
+
+    def export_merged(self, filename):
+        return export_batch(
+            "trip09", [{"capture_id": CAPTURE, "variant": "merged", "merged_filename": filename}]
+        )
+
+    def assert_not_exported(self, result, filename):
+        self.assertEqual(result["files"], [])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["skipped"][0]["capture_id"], CAPTURE)
+        self.assertFalse((self.export_root / "trip09" / filename).exists())
+        self.assertEqual(self.read_manifest(result)["items"], [])
+
+    def test_developed_from_the_previous_folder_is_not_exported(self):
+        """A の ARW から作った現像JPEG（レシピは A を指す）は B では書き出さない。"""
+        filename = f"{CAPTURE}-nightscape-1111111111.jpg"
+        # `_relative_path()` はプロジェクト内なら相対パスを書くので、その形で再現する。
+        self.write_developed(filename, {"path": f"sample/100MSDCF/{CAPTURE}.ARW"})
+        self.assert_not_exported(self.export_developed(filename), filename)
+
+    def test_developed_from_the_current_folder_is_exported(self):
+        """B の ARW から作った現像JPEG（レシピは B を指す）は従来どおり書き出す。"""
+        filename = f"{CAPTURE}-nightscape-2222222222.jpg"
+        # プロジェクト外フォルダなので `_relative_path()` は絶対パスのまま書く。
+        self.write_developed(filename, {"path": str(self.card_b / f"{CAPTURE}.ARW")})
+        result = self.export_developed(filename)
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip09/{filename}"])
+
+    def test_merged_from_the_previous_folder_is_not_exported(self):
+        """合成レシピの出所は `source.root`（フォルダ）。A のものは B では書き出さない。"""
+        filename = f"{CAPTURE}-merged5-neutral_recovery-3333333333.jpg"
+        self.write_merged(filename, {"root": "sample/100MSDCF"})
+        self.assert_not_exported(self.export_merged(filename), filename)
+
+    def test_merged_from_the_current_folder_is_exported(self):
+        filename = f"{CAPTURE}-merged5-neutral_recovery-4444444444.jpg"
+        self.write_merged(filename, {"root": str(self.card_b)})
+        result = self.export_merged(filename)
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip09/{filename}"])
+
+    def test_the_rest_of_the_batch_still_goes_through(self):
+        """出所違いは 400 ではなく `skipped[]`。同じバッチの他の写真は書き出される。"""
+        filename = f"{CAPTURE}-nightscape-5555555555.jpg"
+        self.write_developed(filename, {"path": f"sample/100MSDCF/{CAPTURE}.ARW"})
+        result = export_batch(
+            "trip09",
+            [
+                {"capture_id": CAPTURE, "variant": "developed", "developed_filename": filename},
+                {"capture_id": CAPTURE, "variant": "camera_jpg"},
+            ],
+        )
+        self.assertEqual(result["files"], [f"outputs/export/trip09/{CAPTURE}.JPG"])
+        self.assertEqual(len(result["skipped"]), 1)
+
+    def test_a_recipe_without_a_source_is_still_exported(self):
+        """出所が**記録されていない**レシピは従来どおり通す（意図した挙動）。
+
+        「一致した」ではなく「判定材料が無い」ので、ここで弾くと `source` を持たない
+        古い形式のレシピが付いた成果物を一律で書き出せなくなる。現行の `engine` /
+        `bracket` が書くレシピには必ず出所が入るので、報告された取り違えは
+        この緩和を通り抜けない。
+        """
+        filename = f"{CAPTURE}-nightscape-6666666666.jpg"
+        (self.output_root / filename).write_bytes(b"developed-jpeg-bytes")
+        (self.output_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps({"recipe_version": 2, "capture_id": CAPTURE}), encoding="utf-8"
+        )
+        result = self.export_developed(filename)
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip09/{filename}"])
+
+
 class BatchNameTests(ExportTestCase):
     def test_normalizes_disallowed_characters(self):
         self.assertEqual(normalize_batch_name("2025-06 旅行 08"), "2025-06____08")

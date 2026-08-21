@@ -535,6 +535,18 @@ class OutputRootTests(BracketTestCase):
         self.assertTrue(_recipe_is_preview(preview_recipe))
         self.assertFalse(_recipe_is_preview(full_recipe))
 
+    def test_export_recognises_the_source_folder_in_the_real_recipe(self):
+        """`export._recipe_source_root()` が**実際に書かれるレシピの形**を見ていること。
+
+        合成の出所は `source.root`（現像 `source.path` とキーもパスの種類も違う）。
+        ここが食い違うと、書き出し側は「出所が記録されていない」と判断して
+        フォルダ違いの合成JPEGを素通しする（防御が黙って死ぬ）。
+        """
+        from local_raw.export import _recipe_source_root
+
+        recipe = self.read_recipe(merge_bracket(CAPTURES[:2], DEFAULT_PRESET))
+        self.assertEqual(_recipe_source_root(recipe, "merged"), self.source_root)
+
 
 class DecodeErrorMessageTests(unittest.TestCase):
     """エラー本文に内部の絶対パスを載せないこと（契約 §0）。

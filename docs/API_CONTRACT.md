@@ -287,6 +287,16 @@ ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
 `outputs/developed/` に紛れ込んだ場合に無警告でマスターとして書き出されないようにする。
 文言は合成側と共用（`camera_jpg` はレシピを持たないので対象外）。
 
+**成果物の出所を検証する**（2026-08-21 追補）。`outputs/developed/` と `outputs/merged/` は
+現像元フォルダに依らない固定ディレクトリなので、フォルダ A で作った成果物は B へ
+切り替えた後もそこに残っている。`capture_id` はカメラの連番でカードをまたぐと衝突するため、
+取り込むレシピJSONに記録された出所（現像 `source.path` / 合成 `source.root`）が
+**現在の現像元フォルダと一致しない場合は `skipped[]`** に積む（実体は A なのに manifest の
+`exif` / `group` だけ B、という自己矛盾を防ぐ。解析キャッシュ側は署名照合で同じ取り違えを
+防いでいる）。理由の文言は「成果物が見つからない」と同じにする。レシピに出所が
+**記録されていない**場合（`camera_jpg`・`source` を持たない古い形式）は判定材料が無いので
+従来どおり書き出す。
+
 ### `POST /api/import-to-photos`
 
 ```
