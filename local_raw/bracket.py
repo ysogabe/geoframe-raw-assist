@@ -529,13 +529,34 @@ def merge_bracket(
     started_at = time.monotonic()
 
     # --- 1. デコード（露出差を保つ） / 2. レンズ補正（リサイズ前） ---
+    #
+    # レンズ補正は「**全フレームに掛ける**」か「**1枚も掛けない**」かの二択にする。
+    # 歪曲補正は放射状のワープなので、補正済みと未補正が混ざると位置合わせ
+    # （`AlignMTB` は平行移動しか吸収できない）では取り除けないゴーストが周辺部に残る。
+    # `lens_applicable` は「全フレームで解決できたか」の集約フラグで、`params_hash` にも
+    # 入っている。適用判定にも同じ値を使うことで、キャッシュキーと実際の処理が
+    # 食い違わないようにする（フレーム自身の `lens_resolution` で個別に判断すると、
+    # ペアJPGが欠けている等で一部フレームだけ解決に失敗したときに割れる）。
+    lens_inconsistent = not lens_applicable and any(
+        resolution.applicable for resolution in lens_resolutions
+    )
     frames: list[np.ndarray] = []
     frame_records: list[dict[str, Any]] = []
     for capture_id, source_path, lens_resolution in zip(
         normalized_ids, source_paths, lens_resolutions
     ):
         rgb = _decode_frame(source_path, resolved, preview)
-        rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
+        if lens_applicable:
+            rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
+        else:
+            # ピクセルには触らず、`apply_lens_correction` が不適用時に返すのと**同じ形**の
+            # dict を同じ生成元（`LensResolution.unapplied()`）から作る。
+            # 解決できたフレームまで巻き添えで無補正にする場合は、理由を
+            # `_summarize_lens_corrections` と同じ語彙に揃える（畳んだ結果が
+            # これまでどおり `inconsistent_across_frames` になるようにするため）。
+            lens_correction = lens_resolution.unapplied(
+                "inconsistent_across_frames" if lens_inconsistent else None
+            )
         frames.append(np.ascontiguousarray(rgb))
         frame_records.append(
             {

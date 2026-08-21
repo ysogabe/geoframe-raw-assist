@@ -18,6 +18,7 @@ from local_raw import bracket as bracket_module
 from local_raw import config as config_module
 from local_raw import engine
 from local_raw.bracket import MAX_FRAMES, MIN_FRAMES, _merge_frames, _merge_params_hash, merge_bracket
+from local_raw.lens import LensResolution
 from local_raw.presets import DEFAULT_PRESET, RawDevelopmentError, resolve_adjustments
 
 #: 合成対象の実在ブラケット（ユーザーの実データと同じ並び）。テストでは中身を使わない。
@@ -615,6 +616,11 @@ class MergedRecipeTests(BracketTestCase):
 
         歪曲補正は放射状のワープなので、補正済みと未補正が混ざると位置合わせでは
         取り除けないゴーストになる。
+
+        解決段（`probe_lens`）で割れるケースは全フレーム無補正に統一されるように
+        なったので、ここで見るのは**実行時**に割れる残りの経路（全フレーム解決済みだが
+        `apply_lens_correction` が一部フレームで失敗する）。そのため `probe_lens` を
+        全フレーム適用可能に差し替えてから `apply_lens_correction` を揺らす。
         """
         results = iter(
             [
@@ -627,7 +633,9 @@ class MergedRecipeTests(BracketTestCase):
             _, correction = next(results)
             return rgb, correction
 
-        with mock.patch.object(bracket_module, "apply_lens_correction", side_effect=flaky):
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=LensResolution(applicable=True)
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=flaky):
             result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
 
         self.assertEqual(
@@ -636,6 +644,60 @@ class MergedRecipeTests(BracketTestCase):
         recipe = self.read_recipe(result)
         self.assertTrue(recipe["frames"][0]["lens_correction"]["applied"])
         self.assertFalse(recipe["frames"][1]["lens_correction"]["applied"])
+
+    def test_a_partially_resolvable_bracket_gets_no_lens_correction_at_all(self):
+        """1枚でもレンズを解決できなければ、**どのフレームにも**補正を掛けないこと。
+
+        ペアJPGが欠けていて EXIF が取れない等で一部フレームだけ解決に失敗すると、
+        フレームごとの `lens_resolution` で判断する実装では「一部だけ補正済み」の
+        フレーム群を合成してしまう。歪曲補正は放射状のワープなので、位置合わせ
+        （平行移動のみ）ではこの差を吸収できず周辺部にゴーストが残る。
+        `lens_applicable`（＝ `params_hash` にも入っている集約フラグ）で
+        全フレームの適用可否を揃えること。
+        """
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
+
+        resolutions = [
+            LensResolution(applicable=True, lens_model="10-18mm F2.8 DC DN | Contemporary 023"),
+            LensResolution(applicable=False, reason="lens_not_in_db"),
+        ]
+        with mock.patch.object(
+            bracket_module, "probe_lens", side_effect=resolutions
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "1枚でも解決できないなら1枚も補正しないこと")
+        self.assertFalse(result["lens_correction"]["applied"])
+        # 畳んだ結果はこれまでどおり `inconsistent_across_frames`。解決できたレンズ名は
+        # 記録として残る（`LensResolution.unapplied()` が付ける）。
+        self.assertEqual(result["lens_correction"]["reason"], "inconsistent_across_frames")
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"], "inconsistent_across_frames"
+                )
+
+    def test_a_fully_resolvable_bracket_still_gets_lens_correction(self):
+        """全フレーム解決できるときは従来どおり全フレームに補正が掛かること。"""
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=LensResolution(applicable=True)
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(len(applied_to), 2, "全フレームに補正が掛かること")
+        self.assertTrue(result["lens_correction"]["applied"])
 
 
 class AlignmentTests(BracketTestCase):
