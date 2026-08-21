@@ -57,6 +57,7 @@ from PIL import Image
 from . import config
 from .engine import (
     DEFAULT_MAX_EDGE,
+    ENGINE_VERSION,
     JPEG_QUALITY,
     MAX_MAX_EDGE,
     MIN_MAX_EDGE,
@@ -373,6 +374,11 @@ def _merge_params_hash(
 
     `align` は「位置合わせを試みたか」＝ `ALIGN_VERSION` だけを含め、成否の結果は
     含めない（結果は合成を回すまで判らず、ファイル名の決定に間に合わないため）。
+
+    `engine`（= `ENGINE_VERSION`）も含める。合成はレンズ補正・トーン処理・JPEG保存を
+    `engine` / `lens` と**共有**しているので、そちら側の出力が変わる修正で
+    `ENGINE_VERSION` を上げたとき、合成側のキャッシュだけが無効化されずに古い結果を
+    返し続ける（実例: ENGINE_VERSION 3 のビネット補正修正）。
     """
     payload = {
         "capture_ids": list(capture_ids),
@@ -385,6 +391,7 @@ def _merge_params_hash(
         "source_root": str(source_root),
         "versions": {
             "bracket": BRACKET_VERSION,
+            "engine": ENGINE_VERSION,
             "rawpy": rawpy.__version__,
             "pillow": Image.__version__,
             "opencv": cv2.__version__ if cv2 is not None else None,

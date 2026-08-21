@@ -248,10 +248,13 @@ MergedResult = {
 
 `params_hash` = `sha1(canonical JSON of { **ソート済み capture_ids**, 解決後 adjustments,
 preset名, max_edge, preview, lensfun 適用可否, 位置合わせの版,
-rawpy/Pillow/OpenCV/bracket バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
+rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
 
 - `capture_ids` と現像元フォルダのパスを**必ず含める**。`capture_id` はカメラの連番なので、
   含めないと別フォルダの同じIDに対して**他人の写真の合成結果が `cached: true` で返る**。
+- **`ENGINE_VERSION` も含める**（2026-08-21 追補）。合成はレンズ補正・トーン処理・JPEG保存を
+  §2 の現像パイプラインと共有しているので、そちらの出力が変わる修正で `ENGINE_VERSION` を
+  上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
 - ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
 ### `POST /api/export`

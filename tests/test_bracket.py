@@ -376,6 +376,19 @@ class MergeParamsHashTests(unittest.TestCase):
         self.assertNotEqual(baseline, self._hash(preview=True))
         self.assertNotEqual(baseline, self._hash(lens_applicable=False))
 
+    def test_changes_with_the_engine_version(self):
+        """`ENGINE_VERSION` を上げたら合成キャッシュも無効になること。
+
+        合成はレンズ補正・トーン処理・JPEG保存を `engine` / `lens` と共有しているので、
+        そちらの出力が変わる修正（実例: ENGINE_VERSION 3 のビネット補正）でここが
+        動かないと、**合成側だけ古い結果を返し続ける**。
+        `_merge_params_hash` は `from .engine import ENGINE_VERSION` で束ねた
+        `bracket` 側の名前を読むので、差し替えるのも `bracket_module` の方。
+        """
+        baseline = self._hash()
+        with mock.patch.object(bracket_module, "ENGINE_VERSION", 999):
+            self.assertNotEqual(baseline, self._hash())
+
     def test_changes_when_any_single_adjustment_changes(self):
         baseline = self._hash()
         adjustments = resolve_adjustments(DEFAULT_PRESET, {"contrast": 1.31})
