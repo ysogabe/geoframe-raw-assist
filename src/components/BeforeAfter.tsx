@@ -1,12 +1,36 @@
 import type { RefObject } from "react";
-import { ADJUSTMENT_LABELS, formatAdjustmentValue, lensFlagLabels, lensReasonLabel } from "../lib/format";
+import {
+  ADJUSTMENT_LABELS,
+  formatAdjustmentValue,
+  isMergedResult,
+  lensFlagLabels,
+  lensReasonLabel,
+} from "../lib/format";
 import { sourceJpgUrl } from "../lib/raw-api";
-import type { Adjustments, CaptureId, DevelopedResult } from "../lib/types";
+import type { Adjustments, CaptureId, DevelopedResult, MergedResult } from "../lib/types";
+
+/**
+ * 比較エリアのタブ。表示状態そのものは State の `viewing` が持っており、
+ * ここはその写像を受け取るだけの見た目用の型（state の形は知らない）。
+ */
+export type ComparisonTab = "develop" | "merged";
 
 type BeforeAfterProps = {
   captureId: CaptureId;
-  result: DevelopedResult | undefined;
+  /** 単写の現像結果、またはブラケット合成の結果。 */
+  result: DevelopedResult | MergedResult | undefined;
   comparisonRef: RefObject<HTMLDivElement | null>;
+  /**
+   * 現像結果と合成結果の両方があるときだけ渡す表示切替。
+   * 片方しか無いときは省略し、押しても何も変わらないタブを出さない。
+   */
+  view?: ComparisonTab;
+  onChangeView?: (view: ComparisonTab) => void;
+  /**
+   * 現像後を原寸ビューアで開く。押されたことを伝えるだけにして、どの 2 面を渡すかは
+   * OperationPanel が決める（この画面が state の形を知らずに済む）。
+   */
+  onOpenFullSize: () => void;
 };
 
 const RECIPE_KEYS: (keyof Adjustments)[] = [
@@ -21,18 +45,57 @@ const RECIPE_KEYS: (keyof Adjustments)[] = [
   "noise_reduction",
 ];
 
-export function BeforeAfter({ captureId, result, comparisonRef }: BeforeAfterProps) {
+export function BeforeAfter({
+  captureId,
+  result,
+  comparisonRef,
+  view,
+  onChangeView,
+  onOpenFullSize,
+}: BeforeAfterProps) {
   if (!result) return null;
 
   const lens = result.lens_correction;
   const flags = lensFlagLabels(lens.flags);
+  const merged = isMergedResult(result) ? result : null;
+  // 合成結果は 1 枚の capture_id を持たない。現像前として並べるのは選択中のカット。
+  // ここは `merged` ではなくガードで書く（変数経由だと result の型が絞られない）。
+  const beforeCaptureId = isMergedResult(result) ? captureId : result.capture_id;
+  const canToggle = Boolean(view && onChangeView);
 
   return (
     <div ref={comparisonRef} className="developed-comparison operation-comparison">
+      {canToggle && (
+        <div className="comparison-switch" role="tablist" aria-label="表示する結果">
+          <button
+            role="tab"
+            aria-selected={view === "develop"}
+            className={view === "develop" ? "active" : ""}
+            onClick={() => onChangeView?.("develop")}
+          >
+            単写の現像
+          </button>
+          <button
+            role="tab"
+            aria-selected={view === "merged"}
+            className={view === "merged" ? "active" : ""}
+            onClick={() => onChangeView?.("merged")}
+          >
+            ブラケット合成
+          </button>
+        </div>
+      )}
+
       <div className="developed-head">
         <div>
           <span className="comparison-check">✓</span>
-          <strong>現像前後を比較</strong>
+          <strong>{merged ? "合成前後を比較" : "現像前後を比較"}</strong>
+          {merged && <span className="merged-tag">合成 {merged.frames}枚</span>}
+          {merged && (
+            <span className={`merged-tag${merged.aligned ? " ok" : ""}`}>
+              {merged.aligned ? "位置合わせ済み" : "位置合わせなし"}
+            </span>
+          )}
           {result.preview && <span className="preview-tag">プレビュー品質</span>}
         </div>
         <span>{result.preset_label}</span>
@@ -41,18 +104,27 @@ export function BeforeAfter({ captureId, result, comparisonRef }: BeforeAfterPro
       <div className="before-after-grid">
         <figure>
           <div className="comparison-image">
-            <img src={sourceJpgUrl(result.capture_id)} alt={`${captureId} 現像前のJPG`} decoding="async" />
+            <img src={sourceJpgUrl(beforeCaptureId)} alt={`${beforeCaptureId} 現像前のJPG`} decoding="async" />
           </div>
-          <figcaption><strong>現像前</strong><span>カメラ内 JPG</span></figcaption>
+          <figcaption><strong>現像前</strong><span>カメラ内 JPG（{beforeCaptureId}）</span></figcaption>
         </figure>
         <figure>
-          <a className="comparison-image" href={result.output_url} target="_blank" rel="noreferrer">
-            <img src={result.output_url} alt={`${captureId} RAW現像後`} decoding="async" />
-            <span className="developed-label">原寸で見る ↗</span>
-          </a>
-          <figcaption><strong>現像後</strong><span>ARW / {result.preset_label}</span></figcaption>
+          <button type="button" className="comparison-image" onClick={onOpenFullSize}>
+            <img
+              src={result.output_url}
+              alt={merged ? `${merged.frames}枚のブラケット合成後` : `${captureId} RAW現像後`}
+              decoding="async"
+            />
+            <span className="developed-label">原寸で見る</span>
+          </button>
+          <figcaption>
+            <strong>{merged ? "合成後" : "現像後"}</strong>
+            <span>{merged ? `ARW ${merged.frames}枚を合成 / ${result.preset_label}` : `ARW / ${result.preset_label}`}</span>
+          </figcaption>
         </figure>
       </div>
+
+      {merged && <p className="merged-frames">使用フレーム: {merged.capture_ids.join(" / ")}</p>}
 
       <div className="recipe-badges">
         <span className={`recipe-badge ${lens.applied ? "ok" : ""}`}>

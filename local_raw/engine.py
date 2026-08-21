@@ -14,8 +14,8 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ import numpy as np
 import rawpy
 from PIL import Image, ImageEnhance
 
+from . import config
 from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
 from .lens import apply_lens_correction, probe_lens
 from .presets import (
@@ -35,14 +36,20 @@ from .presets import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"
+# 現像元フォルダはユーザーが切り替えられるため定数にしない（契約 §9）。
+# 参照は `config.source_root()` で**呼び出し時に**解決する。
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "developed"
 PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 
 #: レシピ形式 / 現像パイプラインの版。params_hash に含めるので、
 #: ここを上げると既存キャッシュは自動的に無効になる。
-ENGINE_VERSION = 2
+#:
+#: ENGINE_VERSION 3: レンズ補正のビネット処理を修正したので出力が変わる
+#: （lensfunpy の pixel_format を実バッファの dtype に合わせた。local_raw/lens.py 参照）。
+#: 修正前は補正が効くレンズで画像左端およそ25%が白飛びの帯になっており、その壊れた
+#: JPEG がキャッシュに残っている。版を上げて既存の現像キャッシュを無効化する。
+ENGINE_VERSION = 3
 RECIPE_VERSION = 2
 
 DEFAULT_MAX_EDGE = 6000
@@ -75,7 +82,6 @@ __all__ = [
     "PREVIEW_ROOT",
     "PRESETS",
     "PROJECT_ROOT",
-    "SOURCE_ROOT",
     "RawDevelopmentError",
     "develop_raw",
     "preset_infos",
@@ -90,6 +96,19 @@ def _validate_capture_id(capture_id: str) -> str:
     return normalized
 
 
+def _relative_path(path: Path) -> str:
+    """プロジェクト相対の文字列パス。相対化できない場合は絶対パスのまま返す。
+
+    現像元フォルダはユーザーが任意の場所（`~/Pictures`・外部ボリューム等）を選べるので、
+    `relative_to()` を素で使うと `ValueError` → HTTP 400 になり、プロジェクト外フォルダの
+    現像が全滅する。`export._relative_path()` と同じ流儀。
+    """
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -99,21 +118,38 @@ def _sha256(path: Path) -> str:
 
 
 def _temp_path(path: Path, extension: str) -> Path:
-    """`path` と同じ場所に、プロセス/スレッドで一意な一時ファイルパスを作る。
+    """`path` と同じ場所に、呼び出しごとに一意な一時ファイルパスを作る。
 
     同一 params_hash の同時リクエスト（ThreadingHTTPServer への二重クリック等）でも
-    `pid-tid` を挟むことで一時ファイル名が衝突しないようにする。`os.replace` によるアトミック
-    置換自体は変わらず、衝突が起きるのは書き込み中の一時ファイル名だけだったのを塞ぐ。
+    `pid` と `uuid4()` の組み合わせで一時ファイル名が衝突しないようにする。CPython は
+    短命スレッドの終了後に `threading.get_ident()` の値を再利用し得るため、これだけに
+    依存した命名は同時実行環境で衝突の余地がある。呼び出しごとに新しい UUID を振るので
+    別スレッドから同時に呼ばれても、同一スレッド内で連続して呼ばれても全て別のパスになる。
+    `os.replace` によるアトミック置換自体は変わらず、衝突が起きるのは書き込み中の一時
+    ファイル名だけだったのを塞ぐ。元の stem と一時ファイル用拡張子は名前に残す
+    （デバッグ時に何の一時ファイルか判別できるようにするため）。
     """
-    return path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.{extension}")
+    return path.with_suffix(f".{os.getpid()}-{uuid.uuid4().hex}.{extension}")
 
 
 def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
+    """`recipe` を JSON として `recipe_path` にアトミック保存する。
+
+    一時ファイルは成功・失敗いずれの経路でも残さない（`os.replace` 成功後は一時ファイルが
+    存在しないため、`unlink(missing_ok=True)` は安全）。`_save_developed_jpeg` と同じ流儀。
+
+    `_temp_path` が `threading.get_ident()` から `uuid4()` に変わったことで、名前が二度と
+    衝突しなくなった代わりに、**失敗して残った一時ファイルが後続の書き込みで上書きされる
+    こともなくなった**。掃除しないと `outputs/` に永久に溜まる。
+    """
     temporary_path = _temp_path(recipe_path, "tmp.json")
-    temporary_path.write_text(
-        json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary_path, recipe_path)
+    try:
+        temporary_path.write_text(
+            json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary_path, recipe_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _params_hash(
@@ -122,11 +158,17 @@ def _params_hash(
     max_edge: int,
     preview: bool,
     lens_applied: bool,
+    source_root: str,
 ) -> str:
     """キャッシュキー（契約 §1）。
 
     出力に影響する全要素の canonical JSON から sha1 先頭10文字を取る純粋関数。
     数値は `resolve_adjustments` が float に正規化済みなので int/float 差では揺れない。
+
+    `source_root`（**解決済み**の現像元フォルダの絶対パス文字列）を含めるのは、
+    `capture_id` がカメラの連番でカードをまたぐと衝突するため。これが無いと、
+    別フォルダの同名 ID を同じプリセットで現像したときに
+    **他人の写真の現像結果が `cached: true` で返る**。
     """
     payload = {
         "adjustments": adjustments,
@@ -134,6 +176,7 @@ def _params_hash(
         "max_edge": int(max_edge),
         "preview": bool(preview),
         "lens_applied": bool(lens_applied),
+        "source_root": str(source_root),
         "versions": {
             "engine": ENGINE_VERSION,
             "rawpy": rawpy.__version__,
@@ -348,11 +391,14 @@ def develop_raw(
     resolved = resolve_adjustments(preset_name, adjustments)
     preset_label = PRESETS[preset_name]["label"]
 
-    source_path = (SOURCE_ROOT / f"{capture_id}.ARW").resolve()
-    if source_path.parent != SOURCE_ROOT.resolve() or not source_path.is_file():
+    # 現像元フォルダは1リクエストにつき1回だけ解決し、パス組み立て・トラバーサル検査・
+    # params_hash の全てで同じ値を使う（途中で切り替わってもリクエスト内では一貫させる）。
+    source_root = config.source_root().resolve()
+    source_path = (source_root / f"{capture_id}.ARW").resolve()
+    if source_path.parent != source_root or not source_path.is_file():
         raise RawDevelopmentError(f"ARWが見つかりません: {capture_id}.ARW")
 
-    source_jpg = SOURCE_ROOT / f"{capture_id}.JPG"
+    source_jpg = source_root / f"{capture_id}.JPG"
     capture_exif = read_capture_exif(source_jpg) if source_jpg.is_file() else {}
 
     # レンズ解決は RAW デコード（10〜20秒）の前に済ませる。
@@ -360,7 +406,12 @@ def develop_raw(
     lens_resolution = probe_lens(capture_exif)
 
     params_hash = _params_hash(
-        resolved, preset_name, effective_max_edge, preview, lens_resolution.applicable
+        resolved,
+        preset_name,
+        effective_max_edge,
+        preview,
+        lens_resolution.applicable,
+        str(source_root),
     )
 
     destination_root = PREVIEW_ROOT if preview else OUTPUT_ROOT
@@ -429,7 +480,7 @@ def develop_raw(
         "exif_inherited": exif_inherited,
         "makernote": "dropped",
         "source": {
-            "path": str(source_path.relative_to(PROJECT_ROOT)),
+            "path": _relative_path(source_path),
             "sha256": _sha256(source_path),
             "size_bytes": source_path.stat().st_size,
         },
@@ -440,7 +491,7 @@ def develop_raw(
             "pillow_version": Image.__version__,
         },
         "output": {
-            "path": str(output_path.relative_to(PROJECT_ROOT)),
+            "path": _relative_path(output_path),
             "width": image.width,
             "height": image.height,
             "format": "JPEG",

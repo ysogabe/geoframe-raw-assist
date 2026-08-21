@@ -16,6 +16,7 @@ from local_raw.engine import (
     _params_hash,
     _resolve_save_kwargs,
     _save_developed_jpeg,
+    _save_recipe,
     _shadow_lift_table,
     _temp_path,
     develop_raw,
@@ -24,6 +25,7 @@ from local_raw.presets import (
     ADJUSTMENT_KEYS,
     ADJUSTMENT_RANGES,
     DEFAULT_PRESET,
+    NOISE_REDUCTION_CHOICES,
     PRESETS,
     preset_infos,
     resolve_adjustments,
@@ -47,8 +49,19 @@ class RawEngineValidationTests(unittest.TestCase):
 
 
 class PresetDefinitionTests(unittest.TestCase):
-    def test_has_nine_presets(self):
-        self.assertEqual(len(PRESETS), 9)
+    def test_has_eleven_presets(self):
+        self.assertEqual(len(PRESETS), 11)
+
+    def test_contains_rescue_presets(self):
+        """暗部・逆光の救済プリセット（契約 §5）。UI は PRESETS の順序で並ぶ。"""
+        for name in ("highlight_rescue", "shadow_rescue", "backlit_rescue"):
+            with self.subTest(preset=name):
+                self.assertIn(name, PRESETS)
+        order = list(PRESETS)
+        self.assertEqual(
+            order[order.index("highlight_rescue") : order.index("highlight_rescue") + 3],
+            ["highlight_rescue", "shadow_rescue", "backlit_rescue"],
+        )
 
     def test_default_preset_exists(self):
         self.assertIn(DEFAULT_PRESET, PRESETS)
@@ -68,9 +81,16 @@ class PresetDefinitionTests(unittest.TestCase):
                     self.assertGreaterEqual(preset["adjustments"][key], minimum)
                     self.assertLessEqual(preset["adjustments"][key], maximum)
 
+    def test_preset_noise_reduction_is_a_valid_choice(self):
+        for name, preset in PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertIn(
+                    preset["adjustments"]["noise_reduction"], NOISE_REDUCTION_CHOICES
+                )
+
     def test_preset_infos_matches_contract_shape(self):
         infos = preset_infos()
-        self.assertEqual(len(infos), 9)
+        self.assertEqual(len(infos), len(PRESETS))
         for info in infos:
             self.assertEqual(set(info), {"name", "label", "description", "adjustments"})
             self.assertEqual(set(info["adjustments"]), set(ADJUSTMENT_KEYS))
@@ -157,6 +177,7 @@ class ParamsHashTests(unittest.TestCase):
             "max_edge": 6000,
             "preview": False,
             "lens_applied": True,
+            "source_root": "/Volumes/CARD-A/DCIM/100MSDCF",
         }
         base.update(kwargs)
         return _params_hash(**base)
@@ -185,6 +206,23 @@ class ParamsHashTests(unittest.TestCase):
         self.assertNotEqual(baseline, self._hash(max_edge=3000))
         self.assertNotEqual(baseline, self._hash(preview=True))
         self.assertNotEqual(baseline, self._hash(lens_applied=False))
+
+    def test_changes_with_source_root(self):
+        """同じ capture_id・同じプリセットでも、フォルダが違えばキャッシュキーは別。
+
+        capture_id はカメラの連番なのでカードをまたぐと衝突する。ここが同一だと
+        別フォルダの写真に対して他人の現像結果が cached:true で返る。
+        """
+        baseline = self._hash()
+        self.assertNotEqual(baseline, self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"))
+        # 末尾スラッシュのような表記揺れも別キーになる（解決済みパスを渡す前提）。
+        self.assertNotEqual(baseline, self._hash(source_root="/Volumes/CARD-A/DCIM/100MSDCF/"))
+
+    def test_is_stable_for_the_same_source_root(self):
+        self.assertEqual(
+            self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"),
+            self._hash(source_root="/Volumes/CARD-B/DCIM/100MSDCF"),
+        )
 
     def test_int_and_float_adjustments_hash_identically(self):
         # resolve_adjustments が float 正規化するので 0 と 0.0 は同じキーになる
@@ -222,11 +260,11 @@ class ShadowLiftTableTests(unittest.TestCase):
 class TempPathTests(unittest.TestCase):
     """修正1: 同一 params_hash の同時リクエストで一時ファイル名が衝突しない。"""
 
-    def test_encodes_pid_and_current_thread_ident(self):
+    def test_encodes_pid_and_a_per_call_unique_component(self):
         result = _temp_path(Path("/outputs/DSC00001-neutral_recovery-abc123.jpg"), "tmp.jpg")
-        self.assertEqual(
+        self.assertRegex(
             result.name,
-            f"DSC00001-neutral_recovery-abc123.{os.getpid()}-{threading.get_ident()}.tmp.jpg",
+            rf"^DSC00001-neutral_recovery-abc123\.{os.getpid()}-[0-9a-f]{{32}}\.tmp\.jpg$",
         )
 
     def test_differs_across_concurrent_threads(self):
@@ -248,10 +286,13 @@ class TempPathTests(unittest.TestCase):
         self.assertEqual(len(results), 4)
         self.assertEqual(len(set(results)), 4, "同時に呼ばれた別スレッドの一時パスは全て別々であるべき")
 
-    def test_repeated_call_on_same_thread_is_stable(self):
-        # 同一スレッド内の呼び出しは同じ pid-tid になる(衝突対策はスレッド単位で十分)。
+    def test_repeated_call_on_same_thread_returns_distinct_paths(self):
+        # 呼び出しごとに UUID を振るので、同一スレッド内で連続して呼んでも別のパスになる。
+        # （旧実装は同一スレッドで同じパスを返しており、それはスレッドID再利用で衝突し得る
+        #   依存だった。呼び出し元はどちらも「一時パスへ書いて os.replace する」の1回完結なので、
+        #   同一スレッド内の安定性に依存したロジックは無い。）
         path = Path("/outputs/DSC00001-neutral_recovery-abc123.jpg")
-        self.assertEqual(_temp_path(path, "tmp.jpg"), _temp_path(path, "tmp.jpg"))
+        self.assertNotEqual(_temp_path(path, "tmp.jpg"), _temp_path(path, "tmp.jpg"))
 
 
 class SaveDevelopedJpegTests(unittest.TestCase):
@@ -362,6 +403,36 @@ class SaveDevelopedJpegTests(unittest.TestCase):
                 f"破損した可能性のあるピクセル値: {pixel}",
             )
             self.assertEqual(list(Path(directory).glob("*tmp.jpg")), [])
+
+
+class SaveRecipeTests(unittest.TestCase):
+    """修正4: _save_recipe も兄弟の _save_developed_jpeg と同じく一時ファイルを残さない。"""
+
+    RECIPE = {"capture_id": "DSC00001", "preset": "neutral_recovery", "adjustments": {}}
+
+    def test_saves_and_leaves_no_tmp_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recipe_path = Path(directory) / "DSC00001-neutral_recovery-abc123.json"
+            _save_recipe(recipe_path, self.RECIPE)
+            self.assertTrue(recipe_path.is_file())
+            self.assertEqual(list(Path(directory).glob("*tmp.json")), [])
+
+    def test_cleans_tmp_when_replace_fails(self):
+        """一時ファイルが**既に書けている**状態で落とすのが要点。
+
+        write_text を失敗させると一時ファイルがそもそも作られず、掃除の有無に関わらず
+        テストが通ってしまう（修正前のコードでも緑になる）。os.replace を失敗させれば
+        一時ファイルが実在する状態で例外が飛ぶので、finally の掃除だけを見られる。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            recipe_path = Path(directory) / "DSC00001-neutral_recovery-abc123.json"
+            with mock.patch.object(engine.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    _save_recipe(recipe_path, self.RECIPE)
+            self.assertFalse(recipe_path.exists(), "置換に失敗したのだから本ファイルは出来ない")
+            self.assertEqual(
+                list(Path(directory).glob("*tmp.json")), [], "例外経路でも一時ファイルが残らない"
+            )
 
 
 class ResolveSaveKwargsTests(unittest.TestCase):

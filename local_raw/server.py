@@ -11,7 +11,7 @@ from urllib.parse import ParseResult, quote, unquote, urlparse
 
 import rawpy
 
-from . import analysis
+from . import analysis, config
 
 
 HOST = "127.0.0.1"
@@ -34,9 +34,14 @@ SERVABLE_SUFFIXES = {".jpg", ".webp"}
 # development stack. Modules owned by Wave 1-A (engine / presets / lens) are
 # imported inside the handlers that need them.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"
+# 現像元フォルダはユーザーが `POST /api/source-folder` で切り替えられるため定数にしない。
+# 参照は `config.source_root()` で**リクエスト処理時に**解決する。
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "developed"
 PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"
+MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"
+# プレビュー合成は本合成と別ディレクトリ（契約 §4）。分けないと `POST /api/export` の
+# `variant: "merged"` にプレビュー解像度の合成を書き出せてしまう（`bracket.py` の定数参照）。
+MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"
 THUMBS_ROOT = analysis.THUMBS_ROOT
 
 
@@ -139,8 +144,13 @@ class RawAssistHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._host_allowed():
             return
-        origin = self.headers.get("Origin")
-        if origin and origin not in ALLOWED_ORIGINS:
+        # Origin は**必須**にする。`origin and ...` のように「無ければ素通し」にすると、
+        # 同一マシン上の任意のプロセスが `curl`（既定で Origin を送らない）で
+        # `POST /api/source-folder` を叩いて現像元フォルダを差し替えられる。
+        # 画面からの操作は Tauri が `tauri://localhost`、ブラウザ開発モードが
+        # `http://localhost:1420` を必ず送るので、必須化しても正規の経路は落ちない
+        # （`do_OPTIONS` は元から必須で、こちらを揃えた形）。
+        if self.headers.get("Origin") not in ALLOWED_ORIGINS:
             self._json(HTTPStatus.FORBIDDEN, {"error": "この画面からの操作は許可されていません。"})
             return
         parsed = urlparse(self.path)
@@ -211,6 +221,16 @@ def handle_preview(req: RawAssistHandler, parsed: ParseResult) -> None:
     req._serve_from_root(PREVIEW_ROOT, "/preview/", parsed, "プレビュー画像が見つかりません。")
 
 
+def handle_merged(req: RawAssistHandler, parsed: ParseResult) -> None:
+    req._serve_from_root(MERGED_ROOT, "/merged/", parsed, "合成画像が見つかりません。")
+
+
+def handle_merged_preview(req: RawAssistHandler, parsed: ParseResult) -> None:
+    req._serve_from_root(
+        MERGED_PREVIEW_ROOT, "/merged-preview/", parsed, "合成プレビューが見つかりません。"
+    )
+
+
 def handle_thumbs(req: RawAssistHandler, parsed: ParseResult) -> None:
     req._serve_from_root(THUMBS_ROOT, "/thumbs/", parsed, "サムネイルが見つかりません。")
 
@@ -221,11 +241,42 @@ def handle_source_jpg(req: RawAssistHandler, parsed: ParseResult) -> None:
     if not filename.startswith("DSC") or not filename.endswith(".JPG") or len(filename) != 12 or not filename[3:8].isdecimal():
         req._json(HTTPStatus.BAD_REQUEST, {"error": "無効なJPGファイル名です。"})
         return
-    requested_path = (SOURCE_ROOT / filename).resolve()
-    if requested_path.parent != SOURCE_ROOT.resolve() or not requested_path.is_file():
+    source_root = config.source_root().resolve()
+    requested_path = (source_root / filename).resolve()
+    if requested_path.parent != source_root or not requested_path.is_file():
         req._json(HTTPStatus.NOT_FOUND, {"error": "元JPGが見つかりません。"})
         return
     req._serve_file(requested_path)
+
+
+def handle_source_folder(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`GET /api/source-folder` → `SourceFolderInfo`（契約 §1）。"""
+    try:
+        req._json(HTTPStatus.OK, config.source_folder_info())
+    except Exception as error:
+        _fail(req, "現像元フォルダの情報を取得できません。", error)
+
+
+def handle_set_source_folder(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`POST /api/source-folder` → `SourceFolderInfo`（保存できたときのみ 200）。
+
+    検証・保存の判断は全て `config` 側にあり、ここは例外を HTTP に写すだけに保つ
+    （HTTP レイヤはユニットテストで直接叩けないため、分岐を持たせない）。
+    """
+    try:
+        payload = _request_payload(req)
+        root = config.set_source_root(
+            payload.get("path"), analysis_running=analysis.is_analysis_running()
+        )
+        req._json(HTTPStatus.OK, config.source_folder_info(root))
+    except config.SourceFolderError as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error), "reason": error.reason})
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as error:
+        # ボディそのものが読めない場合（§0 の 64KiB 超過・不正 JSON 等）。
+        # 契約どおり reason 付きの形を崩さないよう invalid に寄せる。
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error), "reason": "invalid"})
+    except Exception as error:
+        _fail(req, "現像元フォルダを設定できません。", error)
 
 
 def handle_raw_develop(req: RawAssistHandler, parsed: ParseResult) -> None:
@@ -270,6 +321,57 @@ def handle_raw_develop(req: RawAssistHandler, parsed: ParseResult) -> None:
         _fail(req, "現像処理に失敗しました。", error)
 
 
+def handle_merge_bracket(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`POST /api/merge-bracket` → `MergedResult`（契約 §1）。
+
+    `handle_raw_develop` と同じ流儀でハンドラは薄く保つ（判断は `bracket.py` 側）。
+    import を呼び出し時にするのも同じ理由で、編集途中の合成モジュールがサーバの起動を
+    止めないようにするため。`RawDevelopmentError` もここで解決し、400 マッピングが
+    常に実際に投げられるクラスを見るようにする。
+    """
+    try:
+        from .bracket import merge_bracket
+        from .engine import RawDevelopmentError
+    except Exception as error:
+        _fail(req, "合成エンジンを読み込めません。", error)
+        return
+
+    try:
+        payload = _request_payload(req)
+        adjustments = payload.get("adjustments")
+        if adjustments is not None and not isinstance(adjustments, dict):
+            raise ValueError("adjustments はオブジェクトで指定してください。")
+        preview = bool(payload.get("preview", False))
+        result = merge_bracket(
+            payload.get("capture_ids"),
+            str(payload.get("preset", "neutral_recovery")),
+            adjustments=adjustments,
+            preview=preview,
+            force=bool(payload.get("force", False)),
+            max_edge=int(payload.get("max_edge", 6000)),
+        )
+        # プレビュー合成と本合成は別ディレクトリなので、URL のルートも `preview` で切り替える
+        # （`handle_raw_develop` の `/preview/` と `/outputs/` の切り替えと同じ形）。
+        route = "/merged-preview/" if result.get("preview", preview) else "/merged/"
+        root = MERGED_PREVIEW_ROOT if result.get("preview", preview) else MERGED_ROOT
+        output_path = root / result["filename"]
+        cache_buster = f"?v={output_path.stat().st_mtime_ns}" if output_path.is_file() else ""
+        result["output_url"] = (
+            f"http://{HOST}:{PORT}{route}{quote(result['filename'])}{cache_buster}"
+        )
+        req._json(HTTPStatus.OK, result)
+    except (
+        RawDevelopmentError,
+        ValueError,
+        TypeError,
+        OverflowError,  # max_edge: 1e999 → int() が OverflowError
+        json.JSONDecodeError,
+    ) as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+    except Exception as error:
+        _fail(req, "合成処理に失敗しました。", error)
+
+
 def handle_export(req: RawAssistHandler, parsed: ParseResult) -> None:
     try:
         from .export import export_batch
@@ -307,18 +409,23 @@ def handle_import_to_photos(req: RawAssistHandler, parsed: ParseResult) -> None:
 GET_EXACT: dict[str, Handler] = {
     "/api/health": handle_health,
     "/api/analysis": handle_analysis,
+    "/api/source-folder": handle_source_folder,
 }
 
 # Order matters: matched top-to-bottom, mirroring the original if-chain.
 GET_PREFIX: list[tuple[str, Handler]] = [
     ("/outputs/", handle_outputs),
     ("/preview/", handle_preview),
+    ("/merged-preview/", handle_merged_preview),
+    ("/merged/", handle_merged),
     ("/thumbs/", handle_thumbs),
     ("/source-jpg/", handle_source_jpg),
 ]
 
 POST_ROUTES: dict[str, Handler] = {
     "/api/raw-develop": handle_raw_develop,
+    "/api/merge-bracket": handle_merge_bracket,
+    "/api/source-folder": handle_set_source_folder,
     "/api/analyze": handle_analyze,
     "/api/export": handle_export,
     "/api/import-to-photos": handle_import_to_photos,
@@ -326,7 +433,14 @@ POST_ROUTES: dict[str, Handler] = {
 
 
 def main() -> None:
-    for directory in (OUTPUT_ROOT, PREVIEW_ROOT, THUMBS_ROOT, analysis.ANALYSIS_ROOT):
+    for directory in (
+        OUTPUT_ROOT,
+        PREVIEW_ROOT,
+        MERGED_ROOT,
+        MERGED_PREVIEW_ROOT,
+        THUMBS_ROOT,
+        analysis.ANALYSIS_ROOT,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((HOST, PORT), RawAssistHandler)
     print(f"RAW engine ready: http://{HOST}:{PORT} (rawpy {rawpy.__version__})", flush=True)

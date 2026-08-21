@@ -194,6 +194,16 @@ def probe_lens(exif_summary: dict[str, Any]) -> LensResolution:
         return resolution
 
 
+def _all_finite(array: np.ndarray) -> bool:
+    """配列に NaN / inf が含まれないか。
+
+    `np.isfinite(array).all()` と等価だが、全画素ぶんの bool 配列を作らない
+    （6000x4000x3 で 70MB 超になる）。np.min/np.max は NaN を伝播するので、
+    NaN なら min が NaN に、±inf なら min/max が inf になり、いずれも弾ける。
+    """
+    return bool(np.isfinite(array.min()) and np.isfinite(array.max()))
+
+
 def apply_lens_correction(
     rgb: np.ndarray,
     resolution: LensResolution,
@@ -208,28 +218,50 @@ def apply_lens_correction(
 
     try:
         height, width = rgb.shape[0], rgb.shape[1]
-        modifier = lensfunpy.Modifier(
-            resolution.lens, resolution.camera.crop_factor, width, height
-        )
-        modifier.initialize(
-            resolution.focal_length,
-            resolution.aperture,
-            FOCUS_DISTANCE_METERS,
-            flags=lensfunpy.ModifyFlags.VIGNETTING | lensfunpy.ModifyFlags.DISTORTION,
-        )
-
         applied_flags: list[str] = []
         source_dtype = rgb.dtype
         maximum = float(np.iinfo(source_dtype).max) if np.issubdtype(source_dtype, np.integer) else 1.0
 
-        # --- ビネット補正（float32 0..1 で in-place） ---
+        # ビネット補正は float32 0..1 のバッファ上で in-place に行う。
+        # このバッファは initialize() より **先に** 作る（pixel_format をここから導くため）。
         working = np.ascontiguousarray(rgb.astype(np.float32) / maximum)
+
+        modifier = lensfunpy.Modifier(
+            resolution.lens, resolution.camera.crop_factor, width, height
+        )
+        # pixel_format は apply_color_modification に渡すバッファの dtype と必ず一致させる。
+        # 既定値は np.uint8 で、float32 のバッファを渡すと lensfun がそれを uint8 の
+        # バイト列として走査し、補正が各行の左1/4だけに桁外れのゲインとして乗る
+        # （実測: 最大 3.4e38・負値・NaN、gain>2 の画素がちょうど 24.5%）。
+        # source_dtype ではなく working から導くこと。両者は別物（uint8/uint16 対 float32）で、
+        # source_dtype を渡すと同じ種類の食い違いが再発する。
+        modifier.initialize(
+            resolution.focal_length,
+            resolution.aperture,
+            FOCUS_DISTANCE_METERS,
+            pixel_format=working.dtype.type,
+            flags=lensfunpy.ModifyFlags.VIGNETTING | lensfunpy.ModifyFlags.DISTORTION,
+        )
+
+        # --- ビネット補正（float32 0..1 で in-place） ---
         if modifier.apply_color_modification(working):
-            # ビネット補正は多項式による除算なので容易に範囲外へ発散する
-            # （実測で 5.7e12 まで到達）。クリップは必須。
-            np.clip(working, 0.0, 1.0, out=working)
-            corrected = (working * maximum).astype(source_dtype)
-            applied_flags.append("vignetting")
+            if _all_finite(working):
+                # 正しい pixel_format でのゲインは中心 1.00 →四隅 2.1〜2.4 に収まり、
+                # 発散しない（実測: ILCE-6400 + Sigma 30mm f/1.4 で最大 2.09、
+                # 同 + Sony E 55-210mm @55mm で最大 2.35）。それでも周辺のもともと
+                # 明るい画素は 1.0 を超える（0.9 × 2.09 = 1.88）ので、クリップは
+                # 「発散対策」ではなく **ハイライトの飽和処理** として残す。
+                np.clip(working, 0.0, 1.0, out=working)
+                corrected = (working * maximum).astype(source_dtype)
+                applied_flags.append("vignetting")
+            else:
+                # 安全網: np.clip は NaN を素通しする（np.clip(nan, 0, 1) は nan）ため、
+                # クリップでは壊れた出力を止められない。非有限値が出たらビネット補正の
+                # 結果ごと捨て、元の配列で続行する（"vignetting" も積まない）。
+                LOGGER.warning(
+                    "ビネット補正が非有限値を生成したため破棄します: %s", resolution.lens_name
+                )
+                corrected = rgb
         else:
             corrected = rgb
 

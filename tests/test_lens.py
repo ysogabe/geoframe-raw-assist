@@ -1,5 +1,6 @@
 """レンズ補正の解決とフォールバックの検証。"""
 
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,7 +18,36 @@ SONY_EXIF = {
     "f_number": 3.5,
 }
 
+#: ビネット補正が効く、lensfun 同梱DBに実在するレンズ（追加DBが無くても解決する）。
+BUNDLED_VIGNETTING_EXIF = {
+    "make": "SONY",
+    "model": "ILCE-6400",
+    "lens_model": "E 55-210mm F4.5-6.3 OSS",
+    "focal_length": 55.0,
+    "f_number": 4.5,
+}
+
+#: 実効ゲインの上限。これを超えたら「補正」ではなく破綻とみなす。
+#:
+#: 正しい pixel_format での実測最大ゲインは ILCE-6400 で
+#:   Sigma 30mm f/1.4 @f/1.4        → 2.09（四隅）
+#:   Sony E 55-210mm @55mm f/4.5    → 2.35（四隅）
+#: 歪曲補正の Lanczos 再標本化が画像外の黒を巻き込む縁でリンギングが乗るため、
+#: apply_lens_correction 通過後の全画素最大は 2.75 まで上がる。他レンズの余地を
+#: 見て 4.0 を上限とした。pixel_format 取り違え時は 1e24 オーダーまで飛ぶので、
+#: この閾値なら正常値は通し異常値は必ず落ちる。
+MAX_PLAUSIBLE_VIGNETTING_GAIN = 4.0
+
+#: 補正が実際に効いていることの下限。ゲインが恒等（全画素 1.0）だと有限・有界・
+#: 左右対称のいずれも自明に成立してしまい、テストが空振りする。
+MIN_NONTRIVIAL_VIGNETTING_GAIN = 1.05
+
+#: ゲイン測定用の塗りつぶし値（uint16）。65535 の 1/8 なので、最大ゲインが
+#: かかっても 1.0 に飽和せず、クリップではなくゲインそのものを測れる。
+GAIN_PROBE_FILL = 8192
+
 lensfunpy_available = lens.lensfunpy is not None
+cv2_available = lens.cv2 is not None
 
 
 class LensfunInfoTests(unittest.TestCase):
@@ -172,6 +202,146 @@ class DatabaseRobustnessTests(unittest.TestCase):
 
         self.assertIsNotNone(database)
         self.assertTrue(database.find_cameras("Sony", "ILCE-6400"))
+
+
+class _FakeModifyFlags:
+    VIGNETTING = 1
+    DISTORTION = 2
+
+
+class _NonFiniteModifier:
+    """ビネット補正の結果に NaN を書き込む偽 Modifier。
+
+    `apply_color_modification` が非有限値を返した場合の防御を、DB のデータに
+    依存せず直接検証するために使う。
+    """
+
+    #: apply_geometry_distortion の戻り値（None なら歪曲補正なし）
+    distortion_map: np.ndarray | None = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def initialize(self, *args, **kwargs):
+        pass
+
+    def apply_color_modification(self, working):
+        working[:] = np.nan
+        return True
+
+    def apply_geometry_distortion(self):
+        return self.distortion_map
+
+
+def _fake_lensfunpy(modifier_cls):
+    return types.SimpleNamespace(Modifier=modifier_cls, ModifyFlags=_FakeModifyFlags)
+
+
+def _applicable_stub_resolution():
+    """Modifier を差し替える前提の、最低限埋めた LensResolution。"""
+    return LensResolution(
+        applicable=True,
+        lens_model="Fake Lens",
+        lens_name="Fake / Lens",
+        focal_length=55.0,
+        aperture=4.5,
+        camera=types.SimpleNamespace(crop_factor=1.5),
+        lens=object(),
+    )
+
+
+@unittest.skipUnless(lensfunpy_available, "lensfunpy 未導入")
+class VignettingGainTests(unittest.TestCase):
+    """ビネット補正の実効ゲインが健全であること（回帰: pixel_format の取り違え）。
+
+    `Modifier.initialize()` の `pixel_format` 既定値は np.uint8 だが、
+    `apply_color_modification()` に渡すのは float32 のバッファなので、明示的に
+    合わせないと lensfun が float32 を uint8 として走査し、**各行の左1/4だけ**に
+    桁外れのゲイン（実測 3.4e38 / NaN / 負値）が乗る。
+    """
+
+    def _effective_gain(self, exif):
+        """一様配列に補正をかけ、(実効ゲイン配列, correction) を返す。"""
+        resolution = probe_lens(exif)
+        if not resolution.applicable:
+            self.skipTest(f"レンズ未解決のためスキップ: {resolution.reason}")
+
+        rgb = np.full((400, 600, 3), GAIN_PROBE_FILL, dtype=np.uint16)
+        corrected, correction = apply_lens_correction(rgb, resolution)
+        self.assertTrue(correction["applied"], correction)
+        self.assertIn("vignetting", correction["flags"], correction)
+        gain = corrected[:, :, 0].astype(np.float64) / GAIN_PROBE_FILL
+        return gain, correction
+
+    def test_gain_is_finite_everywhere(self):
+        gain, _ = self._effective_gain(BUNDLED_VIGNETTING_EXIF)
+        self.assertTrue(np.isfinite(gain).all(), "非有限のゲインが発生している")
+
+    def test_gain_stays_in_plausible_range(self):
+        gain, _ = self._effective_gain(BUNDLED_VIGNETTING_EXIF)
+        height, width = gain.shape
+        self.assertLess(float(gain.max()), MAX_PLAUSIBLE_VIGNETTING_GAIN)
+        self.assertGreaterEqual(float(gain.min()), 0.0)
+        # 中心は減光しないので素通し。
+        self.assertAlmostEqual(float(gain[height // 2, width // 2]), 1.0, places=2)
+        # 恒等ゲインだと他の assert が全部自明に通ってしまうので、効いていることを確かめる。
+        self.assertGreater(float(gain.max()), MIN_NONTRIVIAL_VIGNETTING_GAIN)
+
+    def test_gain_is_left_right_symmetric(self):
+        """本バグは左25%だけを壊すので、左右対称性がそのまま検出器になる。
+
+        画像の両端そのものは歪曲補正の再標本化が画像外を参照して落ち込むため、
+        1/8 だけ内側の列で比べる（壊れた帯＝左25%の内側なので診断力は落ちない）。
+        """
+        gain, _ = self._effective_gain(BUNDLED_VIGNETTING_EXIF)
+        height, width = gain.shape
+        inset = width // 8
+        left = gain[:, inset]
+        right = gain[:, width - 1 - inset]
+        np.testing.assert_allclose(left, right[::1], rtol=1e-3, atol=1e-3)
+
+        row = gain[height // 2]
+        self.assertAlmostEqual(float(row[inset]), float(row[width - 1 - inset]), places=3)
+
+
+class NonFiniteVignettingTests(unittest.TestCase):
+    """非有限値が出たらビネット補正を破棄する（安全網）。
+
+    np.clip は NaN を素通しする（np.clip(nan, 0, 1) は nan）ので、クリップだけでは
+    壊れた画像の出力を防げない。
+    """
+
+    def test_nan_result_discards_vignetting(self):
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_NonFiniteModifier)):
+            corrected, correction = apply_lens_correction(rgb, _applicable_stub_resolution())
+
+        # 歪曲補正も無いので適用フラグが空になり、無補正として返る。
+        self.assertIs(corrected, rgb)
+        self.assertFalse(correction["applied"])
+        self.assertEqual(correction["reason"], "lens_not_calibrated")
+
+    @unittest.skipUnless(cv2_available, "OpenCV 未導入")
+    def test_nan_vignetting_does_not_block_distortion(self):
+        """歪曲補正が効く場合でも、破棄されるのはビネットだけで NaN は残らない。"""
+        height, width = 32, 48
+        identity_map = np.dstack(
+            np.meshgrid(
+                np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32)
+            )
+        )
+
+        class _WithDistortion(_NonFiniteModifier):
+            distortion_map = identity_map
+
+        rgb = np.full((height, width, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_WithDistortion)):
+            corrected, correction = apply_lens_correction(rgb, _applicable_stub_resolution())
+
+        self.assertTrue(correction["applied"], correction)
+        self.assertEqual(correction["flags"], ["distortion"])
+        self.assertNotIn("vignetting", correction["flags"])
+        self.assertTrue(np.isfinite(corrected.astype(np.float64)).all())
 
 
 if __name__ == "__main__":

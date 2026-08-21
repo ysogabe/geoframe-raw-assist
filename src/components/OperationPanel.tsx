@@ -1,5 +1,5 @@
-import type { RefObject } from "react";
-import type { DevelopMode, EngineStatus } from "../lib/app-state";
+import { useRef, type RefObject } from "react";
+import type { DevelopMode, EngineStatus, ViewerSource, ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -11,20 +11,33 @@ import {
   formatScore,
   formatShutter,
   groupKindLabel,
+  isMergedResult,
   isPortrait,
   rawPillClass,
 } from "../lib/format";
 import { assetUrl, sourceJpgUrl } from "../lib/raw-api";
-import type { Adjustments, Analysis, CaptureId, DevelopedResult, GroupInfo, HealthResponse, PhotoInfo, PresetName } from "../lib/types";
+import type {
+  Adjustments,
+  Analysis,
+  CaptureId,
+  DevelopedResult,
+  GroupInfo,
+  HealthResponse,
+  MergedResult,
+  PhotoInfo,
+  PresetName,
+} from "../lib/types";
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
+import { BracketMerge } from "./BracketMerge";
 
 type OperationPanelProps = {
   analysis: Analysis;
   group: GroupInfo;
   photo: PhotoInfo | null;
+  /** 今見ている写真。合成を見ている間は合成の先頭フレーム。 */
   captureId: CaptureId;
-  onChooseCapture: (groupId: number, captureId: CaptureId) => void;
+  onViewCapture: (groupId: number, captureId: CaptureId) => void;
   engineStatus: EngineStatus;
   engineVersion: string;
   health: HealthResponse | null;
@@ -34,14 +47,41 @@ type OperationPanelProps = {
   onChangePreset: (presetName: PresetName) => void;
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
-  isAccepted: boolean;
-  onAccept: () => void;
+  /**
+   * その撮影IDを採用しているか。フィルムストリップは 1 枚ずつ採用できるので、
+   * 「表示中の 1 枚」ではなくタイルごとに引ける関数で受け取る。
+   */
+  isPhotoAccepted: (captureId: CaptureId) => boolean;
+  /** 写真の採用トグル。**引数の撮影ID**が宛先（表示カーソルではない）。 */
+  onAcceptPhoto: (captureId: CaptureId) => void;
+  mergedAccepted: boolean;
+  onAcceptMerged: () => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
   previewResult: DevelopedResult | undefined;
   fullResult: DevelopedResult | undefined;
   comparisonRef: RefObject<HTMLDivElement | null>;
+  /** 露出ブラケットのグループか。false なら合成の導線を一切出さない。 */
+  isBracket: boolean;
+  /** 以下はブラケット合成用（isBracket が false のときは使われない）。 */
+  mergeFrames: CaptureId[];
+  onToggleMergeFrame: (captureId: CaptureId) => void;
+  onResetMergeFrames: () => void;
+  onMerge: (mode: DevelopMode) => void;
+  /** このグループの合成が実行中ならそのモード。他グループの合成中は null。 */
+  mergeMode: DevelopMode | null;
+  /** どのグループであれ合成が走っているか。重い処理の同時実行を止めるのに使う。 */
+  mergeBusy: boolean;
+  mergeElapsedLabel: string;
+  mergeBlockReason: string | null;
+  mergePreviewResult: MergedResult | undefined;
+  mergeFullResult: MergedResult | undefined;
+  /** このグループで今見ている面。比較タブの選択状態はここから導く。 */
+  viewing: ViewingItem;
+  onViewMerged: () => void;
+  /** アプリ内の原寸ビューアを開く。渡す 2 面はこの画面が組み立てる。 */
+  onOpenViewer: (source: ViewerSource) => void;
 };
 
 function ScoreRow({ label, value }: { label: string; value: number }) {
@@ -59,7 +99,7 @@ export function OperationPanel({
   group,
   photo,
   captureId,
-  onChooseCapture,
+  onViewCapture,
   engineStatus,
   engineVersion,
   health,
@@ -69,16 +109,84 @@ export function OperationPanel({
   onChangePreset,
   onChangeAdjustment,
   onResetAdjustments,
-  isAccepted,
-  onAccept,
+  isPhotoAccepted,
+  onAcceptPhoto,
+  mergedAccepted,
+  onAcceptMerged,
   onDevelop,
   developMode,
   elapsedLabel,
   previewResult,
   fullResult,
   comparisonRef,
+  isBracket,
+  mergeFrames,
+  onToggleMergeFrame,
+  onResetMergeFrames,
+  onMerge,
+  mergeMode,
+  mergeBusy,
+  mergeElapsedLabel,
+  mergeBlockReason,
+  mergePreviewResult,
+  mergeFullResult,
+  viewing,
+  onViewMerged,
+  onOpenViewer,
 }: OperationPanelProps) {
-  const result = fullResult ?? previewResult;
+  const mergePanelRef = useRef<HTMLElement>(null);
+  const developResult = fullResult ?? previewResult;
+  /**
+   * 本合成の結果が **今選んでいるフレーム構成** のものか。
+   *
+   * 本合成を無条件に優先すると、フレームを選び直してプレビュー合成をやり直しても
+   * 画面が一切変わらない（数十秒待った操作が無反応に見える）。構成が変わっていたら
+   * 新しい意図を反映しているプレビューの方を見せる。
+   *
+   * 比較は **集合として** 行う。mergeFrames は group.capture_ids の並び（撮影時刻順、
+   * 同時刻は撮影IDで解決）だが、サーバは capture_ids を辞書順に正規化して返す
+   * （bracket.py の _validate_capture_ids、params_hash を安定させるため）。通常は
+   * 一致するが、ファイル番号のロールオーバー（DSC09999 → DSC00001）などで食い違う。
+   * 位置で比べると、同じ構成なのに「変わった」と誤判定してプレビューへ落ちてしまう。
+   */
+  const mergeFullMatchesSelection =
+    mergeFullResult !== undefined &&
+    mergeFrames.length === mergeFullResult.capture_ids.length &&
+    mergeFrames.every((id) => mergeFullResult.capture_ids.includes(id));
+  // 構成が変わっていてもプレビューがまだ無いなら、何も出さないより古い本合成を出す
+  // （フレームを選び直しただけで、まだ何も合成していない状態）。
+  const mergedResult = isBracket
+    ? mergeFullMatchesSelection
+      ? mergeFullResult
+      : (mergePreviewResult ?? mergeFullResult)
+    : undefined;
+  // 現像と合成の両方があるときだけ切替タブを出す。片方しか無いときは自動でそちらを見せる。
+  const canToggleComparison = Boolean(developResult && mergedResult);
+  // 合成タイルに出す枚数。まだ合成していなければ「これから合成する枚数」を出す。
+  const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
+  const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
+  const result = showMerged ? mergedResult : developResult;
+  const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
+
+  /**
+   * 原寸ビューアに渡す 2 面をここで組み立てる（起動元が 3 か所あるので 1 か所にまとめる）。
+   * 現像後の URL は `output_url` をそのまま使う。キャッシュバスター付きの完全URLなので
+   * assetUrl() を通してはならない。
+   */
+  function viewerSourceFor(initial: "before" | "after"): ViewerSource {
+    // ここは `result &&` のガードで書く（変数経由だと result の型が絞られない）。
+    const merged = result && isMergedResult(result) ? result : null;
+    return {
+      beforeUrl: sourceJpgUrl(captureId),
+      afterUrl: result?.output_url,
+      beforeLabel: "現像前",
+      afterLabel: merged ? "合成後" : "現像後",
+      // まだ現像していなければ見せられるのは現像前だけ。
+      initial: result ? initial : "before",
+      preview: Boolean(result?.preview),
+      title: merged ? `${captureId}（ブラケット合成 ${merged.frames}枚）` : captureId,
+    };
+  }
 
   return (
     <section className="operation-screen screen-enter" aria-label="写真の操作パネル">
@@ -100,30 +208,113 @@ export function OperationPanel({
             {photo ? <img src={assetUrl(photo.thumb)} alt={`選択中 ${captureId}`} decoding="async" /> : null}
             {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
             <div className="filename">{captureId}.JPG</div>
+            {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
+            <button
+              type="button"
+              className="preview-open"
+              onClick={() => onOpenViewer(viewerSourceFor("before"))}
+              aria-label={`${captureId} を原寸で表示`}
+            >
+              <span>原寸で見る</span>
+            </button>
           </div>
           <div className="media-footnote">
             {photo && <span>{formatDimensions(photo)}{isPortrait(photo.orientation) ? "・縦位置" : ""}</span>}
-            <a href={sourceJpgUrl(captureId)} target="_blank" rel="noreferrer">カメラJPGを原寸で開く ↗</a>
+            <button type="button" onClick={() => onOpenViewer(viewerSourceFor("before"))}>
+              カメラJPGを原寸で開く
+            </button>
           </div>
 
-          <div className="shot-picker operation-shot-picker" role="radiogroup" aria-label="代表写真を選択">
+          {/*
+            フィルムストリップ。以前はラジオグループとして組んでいたが、ラジオは
+            「1 つだけ選ぶ」を表すので複数採用と両立しない（そもそもラジオの中に
+            2 つ目のボタンを置くのは無効な ARIA でもある）。
+            素の <ul> に戻し、タイルごとに「表示を切り替える」ボタンと
+            「採用をトグルする」ボタンを 1 つずつ置く。状態は色ではなく
+            aria-current（表示中）と aria-pressed（採用）で読める。
+          */}
+          <ul className="shot-picker operation-shot-picker" aria-label="このグループの写真">
+            {/*
+              合成はブラケットのグループでだけ、**写真と同じ形の先頭タイル**として常に出す。
+              合成したのに採用し忘れたグループが無言で書き出しから落ちる、という欠陥が
+              「未点灯の採用チップが見えている」だけで構造的に消える。
+            */}
+            {isBracket && (
+              <li className={`shot-tile shot-merged${mergedAccepted ? " accepted" : ""}`}>
+                <button
+                  type="button"
+                  className="shot-open"
+                  aria-current={viewing.kind === "merged" ? "true" : undefined}
+                  aria-label="ブラケット合成の結果を表示する"
+                  // 合成結果が 1 つも無いと表示を切り替えても比較欄は変わらない（左ペインだけ
+                  // 動いて見える）。押せないようにしておく。
+                  disabled={!mergedResult}
+                  onClick={onViewMerged}
+                >
+                  {/* タイルの絵は「今どれを見ているか」の側なので mergedResult に従う
+                      （本合成が今の選択と食い違っていればプレビューが入る）。採用できるかは
+                      別の役割なので、下の採用ボタンは mergeFullResult で判定したままにする。 */}
+                  {mergedResult ? (
+                    <img src={mergedResult.output_url} alt="ブラケット合成の結果" decoding="async" />
+                  ) : (
+                    <span className="shot-well">
+                      <b aria-hidden="true">▤</b>
+                      <em>本合成すると採用できます</em>
+                    </span>
+                  )}
+                </button>
+                <span className="merged-tag">合成 {mergedFrameCount}枚</span>
+                <button
+                  type="button"
+                  className="shot-accept"
+                  aria-pressed={mergedAccepted}
+                  aria-label={mergedAccepted ? "合成の採用を外す" : "合成した1枚を採用する"}
+                  // 書き出しに使えるのは本合成の結果だけ。プレビューでは採用させない。
+                  disabled={!mergeFullResult}
+                  title={mergeFullResult ? undefined : "本合成すると採用できます"}
+                  onClick={onAcceptMerged}
+                >
+                  {/* 未採用に✓を出すと、グループの大半が採用済みに見えてしまう。
+                      採用済みだけ✓、未採用は中立の空丸にする。 */}
+                  <span aria-hidden="true">{mergedAccepted ? "✓" : "○"}</span>
+                </button>
+              </li>
+            )}
+
             {group.capture_ids.map((id) => {
               const candidate = analysis.photos[id];
+              // 合成を見ている間はどの写真タイルも「表示中」ではない（カーソルは 1 本）。
+              const isViewing = viewing.kind === "photo" && viewing.captureId === id;
+              const accepted = isPhotoAccepted(id);
               return (
-                <button
-                  key={id}
-                  className={captureId === id ? "active" : ""}
-                  onClick={() => onChooseCapture(group.id, id)}
-                  role="radio"
-                  aria-checked={captureId === id}
-                >
-                  {candidate ? <img src={assetUrl(candidate.thumb)} alt={id} loading="lazy" decoding="async" /> : null}
-                  {id === group.recommended_capture_id && <span>推薦</span>}
-                  <small>{id}</small>
-                </button>
+                <li key={id} className={`shot-tile${accepted ? " accepted" : ""}`}>
+                  <button
+                    type="button"
+                    className="shot-open"
+                    aria-current={isViewing ? "true" : undefined}
+                    aria-label={`${id} を表示する`}
+                    onClick={() => onViewCapture(group.id, id)}
+                  >
+                    {candidate ? <img src={assetUrl(candidate.thumb)} alt="" loading="lazy" decoding="async" /> : null}
+                  </button>
+                  {/* 推薦はアンバー。緑は「表示中」と「採用」で使い切っているため。 */}
+                  {id === group.recommended_capture_id && (
+                    <span className="shot-recommended"><i aria-hidden="true">✦</i> 推薦</span>
+                  )}
+                  <small className="shot-id">{id}</small>
+                  <button
+                    type="button"
+                    className="shot-accept"
+                    aria-pressed={accepted}
+                    aria-label={accepted ? `${id} の採用を外す` : `${id} を採用する`}
+                    onClick={() => onAcceptPhoto(id)}
+                  >
+                    <span aria-hidden="true">{accepted ? "✓" : "○"}</span>
+                  </button>
+                </li>
               );
             })}
-          </div>
+          </ul>
 
           {photo && (
             <dl className="exif-grid">
@@ -176,6 +367,25 @@ export function OperationPanel({
             </div>
           </div>
 
+          {isBracket && (
+            <div className="bracket-hint">
+              <span className="bracket-icon">▤</span>
+              <div>
+                <strong>露出ブラケットとして検出されています</strong>
+                <p>
+                  下の「ブラケット合成」でフレームを選ぶと、白飛びと黒つぶれを同時に抑えた1枚に合成できます。
+                </p>
+                <button
+                  type="button"
+                  className="bracket-jump"
+                  onClick={() => mergePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                >
+                  合成パネルへ移動 ↓
+                </button>
+              </div>
+            </div>
+          )}
+
           <DevelopControls
             engineStatus={engineStatus}
             engineVersion={engineVersion}
@@ -186,19 +396,55 @@ export function OperationPanel({
             onChangePreset={onChangePreset}
             onChangeAdjustment={onChangeAdjustment}
             onResetAdjustments={onResetAdjustments}
-            isAccepted={isAccepted}
-            onAccept={onAccept}
+            photoAccepted={isPhotoAccepted(captureId)}
+            onAcceptPhoto={() => onAcceptPhoto(captureId)}
             onDevelop={onDevelop}
             developMode={developMode}
             elapsedLabel={elapsedLabel}
             hasPreview={Boolean(previewResult)}
             hasFull={Boolean(fullResult)}
+            mergeBusy={mergeBusy}
           />
           <p className="safety-note">元のJPG / ARWは変更されません（{groupKindLabel(group.kind)}）</p>
         </aside>
       </div>
 
-      <BeforeAfter captureId={captureId} result={result} comparisonRef={comparisonRef} />
+      {isBracket && (
+        <BracketMerge
+          analysis={analysis}
+          group={group}
+          frames={mergeFrames}
+          onToggleFrame={onToggleMergeFrame}
+          onResetFrames={onResetMergeFrames}
+          onMerge={onMerge}
+          mergeMode={mergeMode}
+          elapsedLabel={mergeElapsedLabel}
+          blockReason={mergeBlockReason}
+          busy={developMode !== null || mergeBusy}
+          engineStatus={engineStatus}
+          presetLabel={presetLabel}
+          hasPreview={Boolean(mergePreviewResult)}
+          hasFull={Boolean(mergeFullResult)}
+          accepted={mergedAccepted}
+          onAcceptMerged={onAcceptMerged}
+          panelRef={mergePanelRef}
+        />
+      )}
+
+      <BeforeAfter
+        captureId={captureId}
+        result={result}
+        comparisonRef={comparisonRef}
+        view={canToggleComparison ? (showMerged ? "merged" : "develop") : undefined}
+        // タブは表示カーソル 1 本を書き換える。「単写の現像」側は今見えているカット
+        // （合成中なら合成の先頭フレーム）へ戻す。
+        onChangeView={
+          canToggleComparison
+            ? (next) => (next === "merged" ? onViewMerged() : onViewCapture(group.id, captureId))
+            : undefined
+        }
+        onOpenFullSize={() => onOpenViewer(viewerSourceFor("after"))}
+      />
     </section>
   );
 }

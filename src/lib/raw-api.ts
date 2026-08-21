@@ -8,7 +8,10 @@ import type {
   ExportResponse,
   HealthResponse,
   ImportToPhotosResponse,
+  MergedResult,
   PresetName,
+  SourceFolderErrorReason,
+  SourceFolderInfo,
 } from "./types";
 
 /** ローカル RAW エンジンのベースURL（docs/API_CONTRACT.md §0）。 */
@@ -35,6 +38,26 @@ class RawApiError extends Error {
     this.name = "RawApiError";
     this.status = status;
   }
+}
+
+/**
+ * POST /api/source-folder の失敗（HTTP 400）。`reason` で分岐したい呼び出し側の
+ * ために、他のエンドポイントと違って理由コードを保持したまま throw する。
+ * RawApiError を継承しているので isEndpointUnavailable もそのまま効く。
+ */
+export class SourceFolderApiError extends RawApiError {
+  /** サーバが `reason` を返さなかった場合（想定外の 5xx 等）は null。 */
+  readonly reason: SourceFolderErrorReason | null;
+
+  constructor(message: string, status: number, reason: SourceFolderErrorReason | null) {
+    super(message, status);
+    this.name = "SourceFolderApiError";
+    this.reason = reason;
+  }
+}
+
+export function isSourceFolderApiError(error: unknown): error is SourceFolderApiError {
+  return error instanceof SourceFolderApiError;
 }
 
 /** 未実装エンドポイント（404）・接続不能を呼び出し側が判別するための印。 */
@@ -108,12 +131,74 @@ export async function developRaw(
   return (await postJson("/api/raw-develop", body, "RAW現像に失敗しました。")) as DevelopedResult;
 }
 
+/**
+ * ブラケット合成のオプション。DevelopOptions と同じ形にしてある（呼び出し側が
+ * 現像と合成で同じ組み立てを使えるようにするため）。
+ */
+export type MergeBracketOptions = DevelopOptions;
+
+/**
+ * 露出ブラケットの複数フレームを 1 枚に合成する。
+ *
+ * `captureIds` は 2〜9 枚。範囲外はサーバが HTTP 400 を返すので、呼び出し側は
+ * ボタンの活性制御でそこへ到達させないこと。フレーム数ぶんの RAW デコードが
+ * 走るため、preview でも数秒、原寸なら数十秒かかる（実行中表示は必須）。
+ */
+export async function mergeBracket(
+  captureIds: CaptureId[],
+  preset: PresetName,
+  options: MergeBracketOptions = {},
+): Promise<MergedResult> {
+  const body: Record<string, unknown> = { capture_ids: captureIds, preset };
+  if (options.adjustments && Object.keys(options.adjustments).length > 0) body.adjustments = options.adjustments;
+  if (options.preview) body.preview = true;
+  if (options.force) body.force = true;
+  if (typeof options.maxEdge === "number") body.max_edge = options.maxEdge;
+  return (await postJson("/api/merge-bracket", body, "ブラケット合成に失敗しました。")) as MergedResult;
+}
+
 export async function exportSelection(batchName: string, items: ExportItem[]): Promise<ExportResponse> {
   return (await postJson(
     "/api/export",
     { batch_name: batchName, items },
     "書き出しに失敗しました。",
   )) as ExportResponse;
+}
+
+/** 現在の現像対象フォルダ。エンジン未起動・未実装時は isEndpointUnavailable が true になる。 */
+export async function getSourceFolder(): Promise<SourceFolderInfo> {
+  return (await getJson("/api/source-folder", "現像対象フォルダを取得できませんでした。")) as SourceFolderInfo;
+}
+
+/**
+ * 現像対象フォルダを変更する。成功時のみ 200 で新しい SourceFolderInfo が返る。
+ * 失敗時は SourceFolderApiError を throw するので、呼び出し側は `reason` で
+ * 分岐すること（特に permission_denied は「写真が無い」と混同させてはならない）。
+ */
+export async function setSourceFolder(path: string): Promise<SourceFolderInfo> {
+  const fallback = "現像対象フォルダを変更できませんでした。";
+  const response = await fetch(`${LOCAL_RAW_API}/api/source-folder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    // readJson と違い、ここでは `reason` を落とさずに詰め替える。
+    const body = (payload ?? {}) as { error?: unknown; reason?: unknown };
+    const message = typeof body.error === "string" && body.error ? body.error : fallback;
+    const reason = typeof body.reason === "string" ? (body.reason as SourceFolderErrorReason) : null;
+    throw new SourceFolderApiError(message, response.status, reason);
+  }
+
+  return payload as SourceFolderInfo;
 }
 
 export async function importToPhotos(batchName: string, album?: string): Promise<ImportToPhotosResponse> {

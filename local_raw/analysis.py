@@ -1,6 +1,7 @@
 """Photo analysis pipeline for GeoFrame RAW Assist.
 
-Scans ``sample/100MSDCF`` for JPG/ARW pairs, scores every JPEG, generates
+Scans the configured source folder (``config.source_root()``, default
+``sample/100MSDCF``) for JPG/ARW pairs, scores every JPEG, generates
 thumbnails, groups consecutive shots and produces RAW-development
 recommendations. The result matches the ``Analysis`` type frozen in
 ``docs/API_CONTRACT.md`` §3 and is cached at ``outputs/analysis/analysis.json``.
@@ -31,6 +32,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from . import config
+
 # OpenCV spawns its own worker pool. Combined with our ThreadPoolExecutor that
 # oversubscribes the CPU badly, so keep cv2 single threaded and let the
 # executor own the parallelism.
@@ -38,7 +41,8 @@ cv2.setNumThreads(1)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"
+# 現像元フォルダはユーザーが切り替えられるため定数にしない。参照は呼び出し時に
+# ``config.source_root()`` で解決する（モジュールレベルで束縛すると import 時に固定される）。
 THUMBS_ROOT = PROJECT_ROOT / "outputs" / "thumbnails"
 ANALYSIS_ROOT = PROJECT_ROOT / "outputs" / "analysis"
 ANALYSIS_PATH = ANALYSIS_ROOT / "analysis.json"
@@ -128,12 +132,12 @@ __all__ = [
     "ANALYSIS_ROOT",
     "ANALYSIS_VERSION",
     "PROJECT_ROOT",
-    "SOURCE_ROOT",
     "THUMBS_ROOT",
     "build_analysis",
     "extract_exif",
     "get_analysis_state",
     "group_photos",
+    "is_analysis_running",
     "make_thumbnail",
     "read_cached_analysis",
     "recommend",
@@ -156,7 +160,7 @@ def scan_pairs(source_root: Path | None = None) -> tuple[dict[str, Any], list[Pa
     ``Analysis.source`` contract shape. ``total_bytes`` covers every JPG and
     ARW file found (that is what the user would copy off the card).
     """
-    root = source_root or SOURCE_ROOT
+    root = source_root if source_root is not None else config.source_root()
     jpg_paths = sorted(root.glob("DSC*.JPG")) if root.is_dir() else []
     arw_paths = sorted(root.glob("DSC*.ARW")) if root.is_dir() else []
 
@@ -170,13 +174,9 @@ def scan_pairs(source_root: Path | None = None) -> tuple[dict[str, Any], list[Pa
         except OSError:
             pass
 
-    try:
-        display_root = str(root.relative_to(PROJECT_ROOT))
-    except ValueError:
-        display_root = str(root)
-
     source_info = {
-        "root": display_root,
+        # ``SourceFolderInfo.display_path`` と同じ整形（プロジェクト相対 / ``~/...`` / 絶対）。
+        "root": config.display_path(root),
         "pairs": len(jpg_stems & arw_stems),
         "jpg_only": len(jpg_stems - arw_stems),
         "arw_only": len(arw_stems - jpg_stems),
@@ -186,12 +186,16 @@ def scan_pairs(source_root: Path | None = None) -> tuple[dict[str, Any], list[Pa
 
 
 def _source_signature(source_root: Path | None = None) -> str:
-    """sha1 over the sorted JPG+ARW filename list; used for cache validation."""
-    root = source_root or SOURCE_ROOT
-    if not root.is_dir():
-        return hashlib.sha1(b"").hexdigest()
-    names = sorted(path.name for path in root.glob("DSC*.[JA][PR][GW]"))
-    return hashlib.sha1("\n".join(names).encode("utf-8")).hexdigest()
+    """sha1 over the resolved root path **and** the sorted JPG+ARW filename list.
+
+    The root path is part of the signature because ``capture_id`` is a camera
+    counter: two different cards can both hold ``DSC02943``. Without it, a
+    similarly shaped folder would silently reuse another folder's analysis.
+    """
+    root = (source_root if source_root is not None else config.source_root()).resolve()
+    names = sorted(path.name for path in root.glob("DSC*.[JA][PR][GW]")) if root.is_dir() else []
+    payload = "\n".join([str(root), *names])
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -305,27 +309,42 @@ def score_photo(path: Path) -> dict[str, float]:
     return score_array(rgb)
 
 
-def make_thumbnail(image: Image.Image, capture_id: str, thumbs_root: Path | None = None) -> str:
-    """Write ``{capture_id}.webp`` (long edge 640, quality 80) and return its URL path."""
+def make_thumbnail(
+    image: Image.Image,
+    capture_id: str,
+    thumbs_root: Path | None = None,
+    root_key: str | None = None,
+) -> str:
+    """Write ``{root_key}-{capture_id}.webp`` (long edge 640, quality 80), return its URL.
+
+    The ``root_key`` prefix keeps two source folders that share a ``capture_id``
+    from overwriting each other's thumbnail. It stays a **flat** prefix on
+    purpose: ``server._serve_from_root`` rejects anything whose resolved parent
+    is not the thumbnails root, and nesting would force that guard to be loosened.
+    """
     root = thumbs_root or THUMBS_ROOT
+    key = root_key or config.source_root_key()
     root.mkdir(parents=True, exist_ok=True)
     thumb = image.copy()
     thumb.thumbnail((THUMB_MAX_EDGE, THUMB_MAX_EDGE), Image.LANCZOS)
-    destination = root / f"{capture_id}.webp"
-    temporary = root / f"{capture_id}.tmp.webp"
+    name = f"{key}-{capture_id}"
+    destination = root / f"{name}.webp"
+    temporary = root / f"{name}.tmp.webp"
     thumb.save(temporary, "WEBP", quality=THUMB_QUALITY)
     os.replace(temporary, destination)
     thumb.close()
-    return f"/thumbs/{capture_id}.webp"
+    return f"/thumbs/{name}.webp"
 
 
-def _process_photo(path: Path, thumbs_root: Path | None = None) -> dict[str, Any]:
+def _process_photo(
+    path: Path, thumbs_root: Path | None = None, root_key: str | None = None
+) -> dict[str, Any]:
     """EXIF + metrics + thumbnail from a single decode."""
     record = extract_exif(path)
     rgb, upright = _decode_small(path)
     try:
         record.update(score_array(rgb))
-        record["thumb"] = make_thumbnail(upright, record["capture_id"], thumbs_root)
+        record["thumb"] = make_thumbnail(upright, record["capture_id"], thumbs_root, root_key)
     finally:
         upright.close()
     return record
@@ -582,13 +601,17 @@ def build_analysis(
     """Run the whole pipeline and return the contract ``Analysis`` payload."""
     reporter = progress or Progress()
     reporter.set_stage("scanning")
-    source_info, jpg_paths = scan_pairs(source_root)
+    # Resolve the root exactly once: every thumbnail name in this run has to
+    # carry the same root_key, even if the user switches folders mid-build.
+    root = (source_root if source_root is not None else config.source_root()).resolve()
+    root_key = config.root_key_for(root)
+    source_info, jpg_paths = scan_pairs(root)
     reporter.set_total(len(jpg_paths))
 
     reporter.set_stage("scoring")
     records: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        for record in pool.map(lambda path: _process_photo(path, thumbs_root), jpg_paths):
+        for record in pool.map(lambda path: _process_photo(path, thumbs_root, root_key), jpg_paths):
             records.append(record)
             reporter.advance()
 
@@ -627,7 +650,7 @@ def build_analysis(
                 "shadow_clip_ratio": round(float(member.get("shadow_clip_ratio") or 0.0), 5),
                 "mean_luma": round(float(member.get("mean_luma") or 0.0), 2),
                 "overall_score": outcome["overall_scores"].get(capture_id, 100.0),
-                "thumb": member.get("thumb") or f"/thumbs/{capture_id}.webp",
+                "thumb": member.get("thumb") or f"/thumbs/{root_key}-{capture_id}.webp",
             }
 
         if raw["level"] in ("recommended", "strong"):
@@ -678,8 +701,12 @@ def _write_analysis(payload: dict[str, Any]) -> None:
     os.replace(temporary, ANALYSIS_PATH)
 
 
-def read_cached_analysis() -> dict[str, Any] | None:
-    """Return the cached Analysis if it is present and still valid, else None."""
+def read_cached_analysis(source_root: Path | None = None) -> dict[str, Any] | None:
+    """Return the cached Analysis if it is present and still valid, else None.
+
+    ``source_root`` is threaded through so a caller that already resolved the
+    folder validates against *that* folder rather than re-resolving the config.
+    """
     if not ANALYSIS_PATH.is_file():
         return None
     try:
@@ -690,7 +717,7 @@ def read_cached_analysis() -> dict[str, Any] | None:
         return None
     if payload.get("analysis_version") != ANALYSIS_VERSION:
         return None
-    if payload.pop(SIGNATURE_KEY, None) != _source_signature():
+    if payload.pop(SIGNATURE_KEY, None) != _source_signature(source_root):
         return None
     return payload
 
@@ -732,11 +759,15 @@ _PROGRESS: Progress | None = None
 _LAST_ERROR: str | None = None
 
 
-def _run_analysis(progress: Progress) -> None:
+def _run_analysis(progress: Progress, source_root: Path) -> None:
     global _RUNNING, _LAST_ERROR
     try:
-        payload = build_analysis(progress)
-        payload[SIGNATURE_KEY] = _source_signature()
+        # The root is captured by start_analysis and passed in, so the payload
+        # and the signature it is stored under always describe the same folder.
+        # (POST /api/source-folder refuses to switch while a job runs; this is
+        # the belt-and-braces half of that guarantee.)
+        payload = build_analysis(progress, source_root)
+        payload[SIGNATURE_KEY] = _source_signature(source_root)
         _write_analysis(payload)
         with _STATE_LOCK:
             _LAST_ERROR = None
@@ -752,16 +783,19 @@ def _run_analysis(progress: Progress) -> None:
 def start_analysis(force: bool = False) -> str:
     """Start a background analysis. Returns started | already_running | ready."""
     global _RUNNING, _PROGRESS
+    source_root = config.source_root().resolve()
     with _STATE_LOCK:
         if _RUNNING:
             return "already_running"
-        if not force and read_cached_analysis() is not None:
+        if not force and read_cached_analysis(source_root) is not None:
             return "ready"
         progress = Progress()
         _PROGRESS = progress
         _RUNNING = True
     try:
-        threading.Thread(target=_run_analysis, args=(progress,), daemon=True, name="raw-analysis").start()
+        threading.Thread(
+            target=_run_analysis, args=(progress, source_root), daemon=True, name="raw-analysis"
+        ).start()
     except RuntimeError:
         # start() failed before the worker could run (e.g. the OS refused a new
         # thread) -- undo the _RUNNING flip above so /api/analysis does not get
@@ -770,6 +804,16 @@ def start_analysis(force: bool = False) -> str:
             _RUNNING = False
         raise
     return "started"
+
+
+def is_analysis_running() -> bool:
+    """解析ジョブが実行中かどうか。
+
+    現像元フォルダの切り替え可否判定（契約 §1 の `analysis_running`）に使う。
+    `get_analysis_state()` と同じく `_STATE_LOCK` の下で読む。
+    """
+    with _STATE_LOCK:
+        return _RUNNING
 
 
 def get_analysis_state() -> dict[str, Any]:

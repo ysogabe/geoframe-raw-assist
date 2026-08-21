@@ -7,6 +7,22 @@
 >
 > 凍結日: 2026-08-10 / 出典: `.claude/plans/vectorized-snacking-falcon-agent-ad862d8a7d0ff47d3.md` §d・§f
 > TypeScript 側の写し: `app/lib/types.ts`（同じく凍結）
+>
+> **追補 2026-08-18（現像元フォルダの選択・ユーザー承認済み）**:
+> `GET/POST /api/source-folder` を §1 に追加、サムネイル命名を §4 で変更、
+> `params_hash` に現像元フォルダのパスを追加（§1）、`SOURCE_ROOT` 定数を
+> `config.source_root()` の呼び出し時解決へ置換（§9）。
+> `Analysis.source.root` の整形を `SourceFolderInfo.display_path` と共通化（§3）。
+>
+> **追補 2026-08-20（ブラケット露出合成・ユーザー承認済み）**:
+> `POST /api/merge-bracket` と `GET /merged/` を §1 に追加、`outputs/merged/` と
+> 合成JPEGの命名を §4 に追加、`POST /api/export` の `variant` に `"merged"` を追加（§1）。
+> 合成方式は Exposure Fusion（Mertens）で、HDR + トーンマッピングは採用しない。
+>
+> **追補 2026-08-20b（プレビュー合成の分離・セキュリティレビュー対応）**:
+> プレビュー合成の出力先を `outputs/merged_preview/` に分離して `GET /merged-preview/` を
+> §1 に追加、§4 のディレクトリ規約に `outputs/merged_preview/` を追加、
+> `POST /api/export` の `variant:"merged"` を**本合成限定**と明記（§1）。
 
 ---
 
@@ -76,6 +92,57 @@ PresetInfo = { name:string, label:string, description:string,
 body { force?:boolean } → { status:"started"|"already_running"|"ready" }
 ```
 
+### `GET /api/source-folder` → `SourceFolderInfo`
+
+### `POST /api/source-folder` → `SourceFolderInfo`
+
+```
+body { path:string }        // 絶対パス。保存に成功したときのみ 200
+→ SourceFolderInfo
+
+SourceFolderInfo = {
+  path:string,              // 解決済みの絶対パス
+  display_path:string,      // 表示用。プロジェクト配下→プロジェクト相対 /
+                            // ホーム配下→"~/..." / それ以外→絶対パス
+  is_default:boolean,       // 既定（sample/100MSDCF）かどうか
+  exists:boolean,
+  readable:boolean,         // 実際に1エントリ読めたか（0組との区別に必須）
+  pairs:number,             // JPG/ARW 両方そろった組数
+  jpg_only:number,
+  arw_only:number,
+  total_bytes:number
+}
+```
+
+- 件数は `analysis.scan_pairs()` の結果をそのまま使う（重複実装しない）。
+- 対象は **JPEG+RAW ペアのみ**（`DSC#####.JPG` と `DSC#####.ARW` の同名ペア）。
+  RAW 単独フォルダ・他機種は対象外。`CAPTURE_ID_PATTERN` と `/source-jpg/` の
+  12文字検証は現状維持。
+- `GET` は設定が無い / 壊れている / 保存先がもう存在しない場合、既定フォルダの情報を返す（エラーにしない）。
+- 読み取れて **0 組**の場合は**エラーにせず保存**し、`pairs: 0` を返す
+  （ユーザーが後からファイルを置くことがあるため）。
+
+POST のエラーは全て **400** で `{ "error": string, "reason": string }`:
+
+| reason | 条件 | 保存 |
+|---|---|---|
+| `invalid` | `path` が文字列でない / 空 / 絶対パスでない / パスとして不正（NUL・長さ超過等） | しない |
+| `not_found` | 存在しない | しない |
+| `not_directory` | ディレクトリでない | しない |
+| `permission_denied` | 読み取り不可（`os.scandir` が `PermissionError`） | **しない** |
+| `analysis_running` | 解析ジョブ実行中 | **しない** |
+
+- `permission_denied` を「0組」と混同させないこと。macOS は `~/Pictures` / `~/Desktop` /
+  外部ボリュームへの初回アクセスで許可を求め、拒否されると `PermissionError` になる
+  （`Path.glob` はこれを握り潰すので、`readable` の判定には `os.scandir` を使う）。
+  メッセージはシステム設定での許可を案内する。
+- §0 の共通 400（64KiB 超過・不正 JSON 等）もこのエンドポイントでは
+  `reason: "invalid"` を付けて形を揃える。
+- **フォルダを切り替えると解析キャッシュは自動的に無効**になる（署名にルートパスを含むため）。
+  切り替え直後の `GET /api/analysis` は `{"status":"absent"}` を返すので、
+  フロントは `POST /api/analyze` で再解析を促すこと。現像キャッシュとサムネイルは
+  フォルダごとにキーが分かれるので、元のフォルダに戻せばそのまま再利用される。
+
 ### `POST /api/raw-develop`
 
 ```
@@ -108,24 +175,127 @@ DevelopedResult = {
 #### キャッシュキー（既存バグの解消）
 
 `params_hash` = `sha1(canonical JSON of { 解決後 adjustments, preset名, max_edge,
-rawpy/Pillow/engine バージョン, lensfun 適用有無 })[:10]`
+rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォルダの解決済み絶対パス** })[:10]`
+
+- **現像元フォルダのパスを必ず含める**（2026-08-18 追補）。`capture_id` はカメラの連番なので
+  カードが違えば別の写真に同じ ID が付く。含めないと、別フォルダの同名 ID を同じプリセットで
+  現像したときに**他人の写真の現像結果が `cached: true` で返る**。
 
 - ファイル名に `hash10` として埋め込む。
 - **ヒット判定はレシピJSON内の `params_hash` の完全一致**で行う
   （現行の「id+preset のみ」でのキャッシュ判定はバグとして廃止する）。
+
+### `POST /api/merge-bracket`
+
+```
+body { capture_ids:string[], preset:string, adjustments?:Partial<Adjustments>,
+       preview?:boolean, force?:boolean, max_edge?:number }
+→ MergedResult
+```
+
+```
+MergedResult = {
+  capture_ids:string[],     // 昇順に正規化して返す
+  frames:number,
+  preset, preset_label,
+  filename:string,          // {先頭id}-merged{枚数}-{preset}-{hash10}.jpg
+  recipe_filename:string,
+  params_hash:string,
+  adjustments:Adjustments,  // 解決後の全量（Partial ではない）
+  width, height, elapsed_seconds, cached:boolean, preview:boolean,
+  aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
+  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  exif_inherited:boolean,
+  output_url:string         // 本合成 /merged/<file>?v=<st_mtime_ns>
+                            // プレビュー /merged-preview/<file>?v=<st_mtime_ns>
+}
+```
+
+露出を変えて撮ったブラケット（解析の `exposure_bracket`）を **Exposure Fusion（Mertens）**
+で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。
+
+- `preview:true` → rawpy `half_size=True` + `max_edge=1600`、出力先 `outputs/merged_preview/`。
+  本合成は `outputs/merged/`（2026-08-20b 追補）。**プレビューと本合成はディレクトリで分ける**:
+  `params_hash` が違うのでファイル名は衝突しないが、同居しているとサーバ側で「原寸か
+  プレビューか」を判定できず、`POST /api/export` の `variant:"merged"` に長辺1600pxの合成を
+  マスターとして書き出せてしまう（現像側の `outputs/developed/` と `outputs/preview/` と同じ形）。
+- `output_url` はサーバ側が `preview` の値でルートを切り替えて付与する
+  （`preview:true` は `/merged-preview/<filename>`、それ以外は `/merged/<filename>`。
+  いずれもキャッシュバスター `?v=<st_mtime_ns>` 付き）。フロントは `output_url` を
+  **そのまま `<img src>` に使うこと**。パスとして再構成しない。
+
+- **フレーム数は 2〜9 枚**。範囲外は 400（`"合成できるのは2〜9枚です。"`）。
+  上限があるのは「1グループ＝1シーン」を保証できないため（実データに1グループ20枚＝
+  別シーンの AEB 4セット分が存在する）。**どのフレームを混ぜるかの選択はフロントの責務**で、
+  エンジンは受け取ったものを合成する。
+- `capture_ids` は現像元フォルダ直下に限定し（`resolve()` 後の親一致）、重複は 400。
+  戻り値・ファイル名・EXIF 継承元・位置合わせの基準は**昇順に正規化した順**に揃える。
+- 処理順序（固定）: rawpy(**`no_auto_bright=True`**) → lensfun補正 → AlignMTB →
+  MergeMertens → クリップ → resize → shadow_lift LUT → Brightness → Contrast →
+  Color → Sharpness → save(exif, icc)
+- **`no_auto_bright=True` が要**。`develop_raw` 側の自動明るさ補正はフレームごとに露出を
+  正規化するため、そのまま流用すると**ブラケットの露出差が消えて合成が無意味になる**
+  （実測: 同ブラケット5枚を `develop_raw` すると平均輝度が 46.7〜49.4 に揃ってしまう）。
+- `Adjustments` のうち **`exposure` と `highlight_recovery` は使わない**（どちらも rawpy 段で
+  フレームごとの露出を動かすパラメータであり、合成の前提を壊すため）。`wb_temp` /
+  `noise_reduction` は全フレームに同一に効くので反映する。トーン調整は**合成結果に対して
+  1回だけ**適用する。
+- EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
+- `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
+  ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
+
+#### キャッシュキー
+
+`params_hash` = `sha1(canonical JSON of { **ソート済み capture_ids**, 解決後 adjustments,
+preset名, max_edge, preview, lensfun 適用可否, 位置合わせの版,
+rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
+
+- `capture_ids` と現像元フォルダのパスを**必ず含める**。`capture_id` はカメラの連番なので、
+  含めないと別フォルダの同じIDに対して**他人の写真の合成結果が `cached: true` で返る**。
+- **`ENGINE_VERSION` も含める**（2026-08-21 追補）。合成はレンズ補正・トーン処理・JPEG保存を
+  §2 の現像パイプラインと共有しているので、そちらの出力が変わる修正で `ENGINE_VERSION` を
+  上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
+- ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
 ### `POST /api/export`
 
 ```
 body { batch_name:string,   // [A-Za-z0-9_-]+ に正規化
        items: ExportItem[] }
-ExportItem = { capture_id:string, variant:"camera_jpg"|"developed",
-               developed_filename?:string }   // variant="developed" 時必須（raw-develop の filename）
+ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
+               developed_filename?:string,   // variant="developed" 時必須（raw-develop の filename）
+               merged_filename?:string }     // variant="merged" 時必須（merge-bracket の filename）
 → { export_dir:string, manifest_path:string, files:string[],
     skipped:{capture_id:string, reason:string}[] }
 ```
 
 `outputs/export/<batch_name>/` へ `shutil.copy2` + `manifest.json` 生成（マニフェスト仕様はプラン §3）。**元ファイルは非破壊**。
+
+`variant:"merged"` は `outputs/merged/` 配下を対象とし、`"developed"` と同じ構造で扱う
+（`resolve()` 後の親一致で確認・レシピJSONを manifest に取り込む）。`merged_filename` は
+`{capture_id}-merged{枚数}-` で始まること（中置が無い現像済みファイル名は 400）。
+
+`variant:"merged"` は**本合成限定**（2026-08-20b 追補）。プレビュー合成は
+`outputs/merged_preview/` にあり、ここでは参照しないので構造的に書き出せない。
+加えて二段目の防御として、**取り込むレシピJSON が `preview:true`（`output.preview`）の場合は
+400** とする（`"プレビュー品質の合成は書き出せません。本合成をやり直してください。"`）。
+「ファイルが単に無い」は `skipped[]`、「入力の取り違え・検証違反」は 400 という
+既存の切り分けに従う（`variant` の取り違えを 400 にしているのと同じ扱い）。
+
+この二段目の防御は `variant:"developed"` にも同じく効く（2026-08-21 追補）。現像レシピにも
+`output.preview` が書かれるので（§2 / `engine.develop_raw`）、プレビュー現像が
+`outputs/developed/` に紛れ込んだ場合に無警告でマスターとして書き出されないようにする。
+文言は合成側と共用（`camera_jpg` はレシピを持たないので対象外）。
+
+**成果物の出所を検証する**（2026-08-21 追補）。`outputs/developed/` と `outputs/merged/` は
+現像元フォルダに依らない固定ディレクトリなので、フォルダ A で作った成果物は B へ
+切り替えた後もそこに残っている。`capture_id` はカメラの連番でカードをまたぐと衝突するため、
+取り込むレシピJSONに記録された出所（現像 `source.path` / 合成 `source.root`）が
+**現在の現像元フォルダと一致しない場合は `skipped[]`** に積む（実体は A なのに manifest の
+`exif` / `group` だけ B、という自己矛盾を防ぐ。解析キャッシュ側は署名照合で同じ取り違えを
+防いでいる）。理由の文言は「成果物が見つからない」と同じにする。レシピに出所が
+**記録されていない**場合（`camera_jpg`・`source` を持たない古い形式）は判定材料が無いので
+従来どおり書き出す。
 
 ### `POST /api/import-to-photos`
 
@@ -143,8 +313,10 @@ body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist
 |---|---|---|
 | `GET /outputs/<file>` | `outputs/developed/` | 既存 |
 | `GET /preview/<file>` | `outputs/preview/` | 新規（Wave 1-B） |
+| `GET /merged/<file>` | `outputs/merged/` | 新規（2026-08-20 追補） |
+| `GET /merged-preview/<file>` | `outputs/merged_preview/` | 新規（2026-08-20b 追補） |
 | `GET /thumbs/<file>` | `outputs/thumbnails/` | 新規（Wave 1-B） |
-| `GET /source-jpg/<DSCxxxxx.JPG>` | `sample/100MSDCF/` | 既存 |
+| `GET /source-jpg/<DSCxxxxx.JPG>` | 現像元フォルダ（`config.source_root()`。既定 `sample/100MSDCF/`） | 既存 |
 
 - いずれも `resolve()` 後に親ディレクトリが所定のルートと一致することを検証する（パストラバーサル防止、現状維持）。
 - `/source-jpg/` のファイル名検証（現状維持）: `DSC` 始まり・`.JPG` 終わり・**長さ12文字**・4〜8文字目が数字。
@@ -189,7 +361,8 @@ Adjustments = {
 ```
 Analysis = {
   analysis_version: 2, generated_at: string,
-  source: { root:string, pairs:number, jpg_only:number, arw_only:number, total_bytes:number },
+  source: { root:string,         // 表示用。SourceFolderInfo.display_path と同じ整形
+            pairs:number, jpg_only:number, arw_only:number, total_bytes:number },
   summary: { groups:number, raw_candidates:number, needs_review:number },
   photos: Record<string, PhotoInfo>,
   groups: GroupInfo[]
@@ -201,7 +374,7 @@ PhotoInfo = { capture_id, captured_at, iso, f_number, shutter, focal_length,
   sharpness_score:number,        // グループ内正規化 0-100
   highlight_clip_ratio:number, shadow_clip_ratio:number, mean_luma:number,
   overall_score:number,
-  thumb:string }                 // 例 "/thumbs/DSC02703.webp"
+  thumb:string }                 // 例 "/thumbs/3f9a1c02-DSC02703.webp"（§4 の命名）
 
 GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
   title:string,                  // 例 "10:42 連写 3枚"
@@ -224,11 +397,21 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 | 種別 | 命名 |
 |---|---|
 | 現像JPEG | `{capture_id}-{preset}-{hash10}.jpg` 例: `DSC02943-nightscape-a1b2c3d4e5.jpg` |
+| 合成JPEG | `{先頭capture_id}-merged{枚数}-{preset}-{hash10}.jpg` 例: `DSC04510-merged5-neutral_recovery-a1b2c3d4e5.jpg` |
 | レシピJSON | 上記と同一ステム + `.json` |
-| サムネイル | `{capture_id}.webp`（長辺640 / quality 80） |
+| サムネイル | `{root_key}-{capture_id}.webp`（長辺640 / quality 80） |
 | 解析キャッシュ | `analysis.json` |
 
 `hash10` は §1 の `params_hash`（sha1 先頭10文字）。
+
+`root_key` は**現像元フォルダの解決済み絶対パスの sha1 先頭8文字**（`config.root_key_for()`）。
+`capture_id` はカメラの連番でカードをまたぐと衝突するため、接頭辞が無いと別フォルダの解析が
+サムネイルを上書きする。**サブディレクトリは掘らずフラットな接頭辞にする**こと:
+`server._serve_from_root()` が `resolve()` 後の親ディレクトリ一致でパストラバーサルを弾いており、
+ネストするとこの防御を緩める必要が出る。
+
+> 旧命名のサムネイル `outputs/thumbnails/{capture_id}.webp` は**無視する。削除しない**
+> （ヒットしなくなるだけ）。
 
 > 既存キャッシュ `outputs/developed/{id}-{preset}.jpg`（旧命名、数件）は新命名移行後は**無視する。削除しない**。
 
@@ -238,9 +421,12 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 outputs/
   developed/    本現像JPEG + レシピJSON          → GET /outputs/
   preview/      プレビュー現像(half_size,1600px) → GET /preview/
+  merged/       ブラケット露出合成JPEG + レシピJSON → GET /merged/
+  merged_preview/ 合成プレビュー(half_size,1600px)  → GET /merged-preview/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
+  config.json   現像元フォルダ等の設定             （HTTP直接配信なし。/api/source-folder 経由）
 ```
 
 `outputs/` 全体が `.gitignore` 済み。JSON の書き込みは全て **tmp + `os.replace`** のアトミック方式
@@ -248,7 +434,7 @@ outputs/
 
 ---
 
-## 5. プリセット9種（凍結版・プラン §f）
+## 5. プリセット11種（凍結版・プラン §f + 2026-08-19 追補）
 
 全プリセットは `Adjustments` の全キーを持つ。rawpy 固定値は AHD / sRGB / 8bit。
 数値は初期案であり、**Wave 3 で実画像を見ながら微調整してよい**（キー構成と name は凍結）。
@@ -263,7 +449,21 @@ outputs/
 | `portrait_soft` | 人物・柔らか | +0.1 | +5 | 20 | 55 | 1.02 | 0.96 | 1.03 | 0.95 | light |
 | `monochrome_street` | モノクロ | 0.0 | 0 | 10 | 60 | 1.0 | 1.15 | 0.0 | 1.10 | light |
 | `highlight_rescue` | 白飛び救済 | -0.5 | 0 | 40 | 100 | 1.05 | 1.0 | 1.0 | 1.02 | light |
+| `shadow_rescue` | 黒つぶれ救済 | +0.3 | 0 | 80 | 65 | 1.05 | 0.98 | 1.06 | 1.02 | full |
+| `backlit_rescue` | 逆光 | +0.35 | +5 | 80 | 90 | 1.04 | 0.96 | 1.08 | 1.05 | light |
 | `vivid_travel` | ビビッド | 0.0 | +5 | 10 | 55 | 1.0 | 1.12 | 1.18 | 1.10 | light |
+
+> **追補 2026-08-19（プリセット2種追加・ユーザー承認済み）**
+> 解析は「暗部の黒つぶれ」「白飛び」を推薦理由として出すのに、救済プリセットは
+> 白飛び側にしか無かった。`shadow_rescue`（黒つぶれ救済）と `backlit_rescue`（逆光）を追加する。
+> 逆光は専用の検出コードを持たず、`highlight_clipping` と `deep_shadows` が
+> **同時に立つこと**をシグナルとして扱う（初期プリセット選択の規則は §6 を参照）。
+>
+> 数値は実写で確認済み（プレビュー現像・SDカードの実データ）:
+> - `shadow_rescue` — 黒つぶれ 45.04% → **14.31%**、平均輝度 34.8 → 58.2（白飛びは 1.12% → 1.67%）
+> - `backlit_rescue` — 白飛び 1.41% → **0.13%**、黒つぶれ 34.37% → **19.06%**
+>   （`highlight_rescue` を同じ写真に当てると平均輝度 23.6・黒つぶれ 42.83% まで沈むため、
+>   逆光には別プリセットが要る、という判断の根拠）
 
 > **Wave 0 時点の実装は旧3種**（`neutral_recovery` / `landscape_clear` / `nightscape`、旧キー体系
 > `exp_shift` / `auto_bright_thr` / `contrast` / `color` / `sharpness`）が `local_raw/presets.py` に
@@ -340,12 +540,54 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 - `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
 - `DEFAULT_PRESET = "neutral_recovery"`
 
+### `local_raw/config.py`（2026-08-18 追補）
+
+現像元フォルダの検証・永続化。保存先は `outputs/config.json`（tmp + `os.replace` のアトミック書き込み）。
+
+- `DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"`
+- `source_root() -> Path` — 現在の設定を解決して返す。設定が無い / 壊れている / 保存先がもう
+  存在しない場合は `DEFAULT_SOURCE_ROOT` にフォールバックし、**例外は投げない**。
+  「読めないだけ」のフォルダはフォールバックしない（UI が許可を案内できるようにするため）
+- `set_source_root(path, *, analysis_running: bool = False) -> Path` — 検証して保存。
+  失敗は `SourceFolderError`（`ValueError` 派生・`reason` 属性つき）で、**保存しない**
+- `root_key_for(path) -> str` / `source_root_key() -> str` — sha1 先頭8文字（§4 の `root_key`）。
+  内部で必ず `resolve()` し、`params_hash` に混ぜるパス文字列と正規化を共有する
+- `display_path(path) -> str` — §1 の `display_path`
+- `source_folder_info(root=None) -> dict` — §1 の `SourceFolderInfo`（件数は `scan_pairs()` 由来）
+
+> ⚠️ **どのモジュールでも `SOURCE_ROOT = config.source_root()` のようにモジュールレベルで
+> 束縛しないこと。** import 時に固定され、フォルダ切り替えが半分しか効かなくなる。
+> 参照はすべてリクエスト処理時の関数呼び出しで解決する。
+
 ### `local_raw/engine.py`（所有: Wave 1-A）
 
-- 既存 export 維持: `SOURCE_ROOT` / `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
+- 既存 export 維持: `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
+- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。現像元フォルダは `config.source_root()` で
+  **呼び出し時に**解決する。`develop_raw()` は 1 リクエストにつき 1 回だけ解決し、パス組み立て・
+  トラバーサル検査・`params_hash` で同じ値を使う。レシピの `source.path` は
+  プロジェクト外フォルダでも壊れないよう相対化に失敗したら絶対パスのまま入る
 - 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
 - `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
   — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
+
+### `local_raw/bracket.py`（2026-08-20 追補）
+
+ブラケット露出合成（Exposure Fusion / Mertens）。`server.py` は呼び出し時に import する。
+
+- `MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"`（`/merged/` 配信元。**本合成のみ**）
+- `MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"`
+  （`/merged-preview/` 配信元。2026-08-20b 追補）
+- `MIN_FRAMES = 2` / `MAX_FRAMES = 9`
+- `merge_bracket(capture_ids: list[str], preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
+  — 戻り値は契約 `MergedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側が付与**する: `preview == true` のファイルは `/merged-preview/<filename>`、それ以外は `/merged/<filename>`（いずれも `?v=<mtime_ns>` 付き。`develop_raw` の `/preview/` と `/outputs/` の切り替えと同じ形）
+- 保存先も `preview` で分ける（`preview == true` → `MERGED_PREVIEW_ROOT`）。同居させると
+  サーバ側で原寸とプレビューを区別できず、`POST /api/export` にプレビューをマスターとして
+  書き出せてしまう
+- 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
+  `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。LUT とトーンは
+  `engine._shadow_lift_table()` / `engine._apply_tone()` を再利用する
+- `cv2.createAlignMTB().process(src, dst)` は **src と同じリストを渡して in-place で受ける**。
+  空リストは何も書かれず、事前確保したリストは**1枚が全面0になる**（実測 OpenCV 5.0.0）
 
 ### `local_raw/lens.py`（所有: Wave 1-A）
 
@@ -354,6 +596,11 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 ### `local_raw/analysis.py`（所有: Wave 1-B）
 
 - `THUMBS_ROOT = PROJECT_ROOT / "outputs" / "thumbnails"`（`/thumbs/` 配信元）
+- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。`scan_pairs()` / `_source_signature()` /
+  `read_cached_analysis()` / `build_analysis()` は引数省略時に `config.source_root()` を
+  呼び出し時解決する。`_source_signature()` は**解決済みルートパスを署名に含む**
+  （含めないと似た構成の別フォルダで解析キャッシュが流用される）
+- `is_analysis_running() -> bool` — `POST /api/source-folder` の `analysis_running` 判定用
 - 分析ジョブ管理（開始/状態取得）の内部 API は 1-B が自由に設計してよい（server.py も 1-B 所有のため外部契約は §1 の HTTP 契約のみ）
 
 ### 並列作業の約束事
