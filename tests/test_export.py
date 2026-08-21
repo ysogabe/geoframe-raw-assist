@@ -569,6 +569,70 @@ class MergedVariantTests(ExportTestCase):
             )
 
 
+class DevelopedPreviewQualityTests(ExportTestCase):
+    """プレビュー品質の**現像**もマスターとして書き出さないこと。
+
+    プレビュー現像は `outputs/preview/` に分けてあるので通常ここへは来ないが、
+    レシピには合成と同じ `output.preview` が書かれる（`engine.develop_raw`）。
+    合成側（`MergedVariantTests.test_rejects_a_preview_quality_merge`）と同じ防御が
+    `developed` にも効いていることを固定する。
+    """
+
+    def write_developed(self, filename, recipe):
+        (self.output_root / filename).write_bytes(b"developed-jpeg-bytes")
+        (self.output_root / f"{Path(filename).stem}.json").write_text(
+            json.dumps(recipe), encoding="utf-8"
+        )
+
+    def developed_item(self, filename):
+        return {"capture_id": CAPTURE, "variant": "developed", "developed_filename": filename}
+
+    def test_rejects_a_preview_quality_develop(self):
+        filename = f"{CAPTURE}-nightscape-c3d4e5f6a7.jpg"
+        self.write_developed(
+            filename,
+            {
+                "recipe_version": 2,
+                "capture_id": CAPTURE,
+                "params_hash": "c3d4e5f6a7",
+                "output": {"max_edge": 1600, "preview": True},
+            },
+        )
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.developed_item(filename)])
+        # 400 で終わるので1件も書き出されないこと（コピーはループを抜けた後）。
+        self.assertFalse((self.export_root / "trip08" / filename).exists())
+
+    def test_rejects_a_preview_flag_at_the_recipe_root(self):
+        """レシピの形が変わっても防御が黙って死なないこと（合成側と同じ二重見）。"""
+        filename = f"{CAPTURE}-nightscape-d4e5f6a7b8.jpg"
+        self.write_developed(filename, {"recipe_version": 2, "preview": True})
+        with self.assertRaises(ValueError):
+            export_batch("trip08", [self.developed_item(filename)])
+
+    def test_full_develop_with_an_explicit_preview_false_is_exported(self):
+        """`preview: false` の本現像は従来どおり通ること（過剰に弾かないこと）。"""
+        filename = f"{CAPTURE}-nightscape-e5f6a7b8c9.jpg"
+        self.write_developed(
+            filename,
+            {
+                "recipe_version": 2,
+                "capture_id": CAPTURE,
+                "params_hash": "e5f6a7b8c9",
+                "output": {"max_edge": 6000, "preview": False},
+            },
+        )
+        result = export_batch("trip08", [self.developed_item(filename)])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip08/{filename}"])
+
+    def test_camera_jpg_has_no_recipe_and_is_unaffected(self):
+        """`camera_jpg` はレシピを持たないので、この防御は素通りすること。"""
+        result = export_batch("trip08", [{"capture_id": CAPTURE, "variant": "camera_jpg"}])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["files"], [f"outputs/export/trip08/{CAPTURE}.JPG"])
+
+
 class DevelopedFilenameValidationTests(ExportTestCase):
     def _expect_reject(self, filename, capture_id=CAPTURE):
         with self.assertRaises(ValueError):

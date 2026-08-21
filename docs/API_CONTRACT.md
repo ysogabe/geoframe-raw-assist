@@ -282,6 +282,11 @@ ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
 「ファイルが単に無い」は `skipped[]`、「入力の取り違え・検証違反」は 400 という
 既存の切り分けに従う（`variant` の取り違えを 400 にしているのと同じ扱い）。
 
+この二段目の防御は `variant:"developed"` にも同じく効く（2026-08-21 追補）。現像レシピにも
+`output.preview` が書かれるので（§2 / `engine.develop_raw`）、プレビュー現像が
+`outputs/developed/` に紛れ込んだ場合に無警告でマスターとして書き出されないようにする。
+文言は合成側と共用（`camera_jpg` はレシピを持たないので対象外）。
+
 ### `POST /api/import-to-photos`
 
 ```

@@ -346,8 +346,13 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         if source_path is None or not source_path.is_file():
             skipped.append({"capture_id": capture_id, "reason": missing_reason})
             continue
-        if variant == "merged" and _recipe_is_preview(recipe):
-            # プレビュー品質（長辺1600px）の合成をマスターとして書き出させない。
+        if _recipe_is_preview(recipe):
+            # プレビュー品質（長辺1600px）の成果物をマスターとして書き出させない。
+            # `variant == "merged"` に限定しない: 現像レシピにも `output.preview` は
+            # 書かれており（`engine.develop_raw`）、プレビュー現像が
+            # `outputs/developed/` に紛れ込んだ場合に無警告で通ってしまう。
+            # `camera_jpg` は `recipe` が None なので、`_recipe_is_preview()` は
+            # `isinstance(recipe, dict)` で False を返し、ここは素通りする。
             # 「ファイルが単に無い」ではなく**入力の取り違え**なので skipped ではなく
             # `ValueError`（→400）にする（`_validate_developed_filename` が変種の取り違えを
             # 沈黙させず 400 にするのと同じ判断）。コピーはループを抜けた後にまとめて行うので、
