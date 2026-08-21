@@ -1,21 +1,29 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
+  acceptedKey,
+  acceptedSummaryOf,
   activePreset,
   changedAdjustmentKeys,
   developedGroupIds,
   effectiveAdjustments,
+  groupMergeResultOf,
+  heroCaptureOf,
   initialState,
   isBracketGroup,
+  isMergedAccepted,
+  isPhotoAccepted,
   isValidBatchName,
   mergeBlockReason,
+  mergedResultFor,
   mergeFramesOf,
   photoOf,
   reducer,
-  selectedCaptureOf,
   selectedGroup,
+  viewingCaptureOf,
+  viewingOf,
   visibleGroups,
   type DevelopMode,
-  type ExportVariantChoice,
+  type PhotoExportVariant,
 } from "./lib/app-state";
 import {
   developRaw,
@@ -44,6 +52,7 @@ import { BootstrapGate } from "./components/BootstrapGate";
 import { GroupList } from "./components/GroupList";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
+import { FullSizeViewer } from "./components/FullSizeViewer";
 import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 
 const EXPORT_UNAVAILABLE = "書き出し機能を準備中です。しばらくしてからお試しください。";
@@ -78,6 +87,9 @@ export default function Home() {
   const comparisonRef = useRef<HTMLDivElement>(null);
 
   const { analysis, health, screen, developMode, mergeMode } = state;
+  // 書き出し行が読んでよい state はこの 3 つだけ。表示カーソル（viewing）を混ぜないよう
+  // 分解して useMemo の依存に並べる（state 全体を依存にすると、読んでいる範囲が隠れる）。
+  const { accepted, fullResults, mergeFullResults } = state;
 
   // ---- ローカルRAWエンジンの死活確認（起動直後は数秒未起動のため再試行あり） -----
   // Tauri内で初回セットアップ（venv作成/pip install）が進行中は、その分だけ
@@ -215,7 +227,9 @@ export default function Home() {
 
   // ---- 派生値 --------------------------------------------------------------
   const group = selectedGroup(state);
-  const captureId = group ? selectedCaptureOf(state, group) : "";
+  // 表示カーソルは 1 本。合成を見ている間は「今の写真」も合成の先頭フレームになる。
+  const viewing = group ? viewingOf(state, group) : null;
+  const captureId = group ? viewingCaptureOf(state, group) : "";
   const photo = photoOf(analysis, captureId);
   const adjustments = effectiveAdjustments(state);
   const changedKeys = changedAdjustmentKeys(state);
@@ -226,6 +240,11 @@ export default function Home() {
   const isBracket = group ? isBracketGroup(group) : false;
   const mergeFrames = useMemo(() => (group ? mergeFramesOf(state, group) : []), [state, group]);
   const mergeBlock = mergeBlockReason(mergeFrames);
+  // 表示に回す合成もグループの関門を通す。属さない合成は「まだ本合成していない」扱いに
+  // なり、タイルはプレースホルダ・採用チップは disabled になる。古い他グループの合成を
+  // 見せて採用させるより、無いことにする方が安全。
+  const mergePreviewResult = group ? groupMergeResultOf(state.mergePreviewResults, group) : undefined;
+  const mergeFullResult = group ? groupMergeResultOf(state.mergeFullResults, group) : undefined;
   // 合成中に別グループへ移動しても fetch は続く（結果は merge/ok の groupId に入る）。
   // 実行中表示はそのグループにだけ出し、重い処理の同時実行防止は全体で効かせる。
   const mergeBusy = mergeMode !== null;
@@ -236,24 +255,51 @@ export default function Home() {
     return first ? (analysis.photos[first.recommended_capture_id]?.thumb ?? null) : null;
   }, [analysis]);
 
+  /**
+   * 書き出す行。**採用アイテムだけから作る**。
+   *
+   * ここが今回の修正の中核。以前は採用がグループ単位のフラグでしかなく、書き出す
+   * 写真を「今の代表」から遅延解決していたため、採用したあとに代表を変えると
+   * 書き出される写真が無言で変わっていた。表示カーソル（state.viewing）は
+   * **絶対に参照しない**こと。
+   *
+   * 一方で成果物（DevelopedResult / MergedResult）はここで引き直す。採用時に
+   * filename を握ると、本現像をやり直したあとも古いファイルを書き出してしまう
+   * （outputs/ には params_hash 違いが残るので、成功するぶん気づけない）。
+   */
   const exportRows = useMemo<ExportRow[]>(() => {
     if (!analysis) return [];
-    return state.acceptedGroupIds
-      .map((groupId) => analysis.groups.find((item) => item.id === groupId))
-      .filter((item): item is NonNullable<typeof item> => Boolean(item))
-      .map((item) => {
-        const chosen = selectedCaptureOf(state, item);
-        const developed = state.fullResults[chosen];
-        // 合成結果はグループ単位。書き出せるのは本合成（プレビューは品質が足りない）。
-        const merged = state.mergeFullResults[item.id];
-        const fallback: ExportVariantChoice = developed ? "developed" : merged ? "merged" : "camera_jpg";
-        const requested = state.exportVariants[chosen] ?? fallback;
-        // 実体の無い選択（結果を出す前に選んだ / 後から状態が消えた）は必ず落とす。
-        const missing =
-          (requested === "developed" && !developed) || (requested === "merged" && !merged);
-        return { group: item, captureId: chosen, developed, merged, variant: missing ? fallback : requested };
-      });
-  }, [analysis, state]);
+    return accepted.flatMap<ExportRow>((item) => {
+      const group = analysis.groups.find((candidate) => candidate.id === item.groupId);
+      // 再解析の結び直しで引けなかったアイテムは reducer 側で落としているので、
+      // ここに来るのは基本的に解析の入れ替わりと表示の間の一瞬だけ。
+      if (!group) return [];
+      switch (item.kind) {
+        case "photo": {
+          const developed = fullResults[item.captureId];
+          // 本現像の結果が無いのに "developed" のままの行は必ずカメラJPGへ落とす
+          // （結果を消してから書き出すと 400 になるため）。
+          const variant: PhotoExportVariant =
+            item.variant === "developed" && !developed ? "camera_jpg" : item.variant;
+          return [
+            { kind: "photo", key: acceptedKey(item), group, captureId: item.captureId, developed, variant },
+          ];
+        }
+        case "merged":
+          return [
+            {
+              kind: "merged",
+              key: acceptedKey(item),
+              group,
+              captureId: item.leadCaptureId,
+              // グループの「現在の」合成だけを見る。全件スキャンだと、IDが使い回されて
+              // 同じ先頭フレームの古い合成が別キーに残っているとき、そちらを拾ってしまう。
+              merged: mergedResultFor(mergeFullResults, group, item.leadCaptureId),
+            },
+          ];
+      }
+    });
+  }, [analysis, accepted, fullResults, mergeFullResults]);
 
   const albumName = `GeoFrame RAW Assist ${isValidBatchName(state.batchName) ? state.batchName : "<バッチ名>"}`;
 
@@ -393,16 +439,35 @@ export default function Home() {
 
   async function runExport() {
     if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
-    dispatch({ type: "export/start" });
-    const items: ExportItem[] = exportRows.map((row) => {
-      if (row.variant === "developed" && row.developed) {
-        return { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename };
+    const items: ExportItem[] = exportRows.flatMap<ExportItem>((row) => {
+      switch (row.kind) {
+        case "merged":
+          // 成果物が失われた行は送れない（書き出し画面には「合成結果なし」として残る）。
+          if (!row.merged) return [];
+          // capture_id は合成ファイル名の先頭IDでなければサーバが 400 を返す。
+          return [
+            { capture_id: row.merged.capture_ids[0], variant: "merged", merged_filename: row.merged.filename },
+          ];
+        case "photo":
+          if (row.variant === "developed" && row.developed) {
+            return [
+              { capture_id: row.captureId, variant: "developed", developed_filename: row.developed.filename },
+            ];
+          }
+          return [{ capture_id: row.captureId, variant: "camera_jpg" }];
       }
-      if (row.variant === "merged" && row.merged) {
-        return { capture_id: row.captureId, variant: "merged", merged_filename: row.merged.filename };
-      }
-      return { capture_id: row.captureId, variant: "camera_jpg" };
     });
+    // 成果物の無い行しか無いと、空のリクエストを投げて「0件を書き出しました」になる。
+    // 何が起きたか分からない成功より、押した理由を否定して理由を出すほうがよい。
+    if (items.length === 0) {
+      dispatch({
+        type: "notice/set",
+        message: "採用したものの成果物が見つかりません。合成し直して採用し直してください。",
+        tone: "error",
+      });
+      return;
+    }
+    dispatch({ type: "export/start" });
     try {
       const result = await exportSelection(state.batchName, items);
       dispatch({ type: "export/ok", result });
@@ -459,8 +524,8 @@ export default function Home() {
           captureId={captureId}
           engineStatus={state.engineStatus}
           engineVersion={engineVersion}
-          canExport={state.acceptedGroupIds.length > 0}
-          acceptedCount={state.acceptedGroupIds.length}
+          canExport={accepted.length > 0}
+          acceptedCount={accepted.length}
           analysisReady={analysisReady}
           reanalyzing={state.analysisState === "running"}
           onReturn={returnToSuggestions}
@@ -489,13 +554,13 @@ export default function Home() {
             busy={state.analyzeRequested}
             onStart={() => void beginAnalyze(false)}
           />
-        ) : screen === "operation" && group ? (
+        ) : screen === "operation" && group && viewing ? (
           <OperationPanel
             analysis={analysis}
             group={group}
             photo={photo}
             captureId={captureId}
-            onChooseCapture={(groupId, id) => dispatch({ type: "group/chooseCapture", groupId, captureId: id })}
+            onViewCapture={(groupId, id) => dispatch({ type: "view/capture", groupId, captureId: id })}
             engineStatus={state.engineStatus}
             engineVersion={engineVersion}
             health={health}
@@ -507,8 +572,34 @@ export default function Home() {
               dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
             }
             onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
-            isAccepted={state.acceptedGroupIds.includes(group.id)}
-            onAccept={() => dispatch({ type: "group/accept", groupId: group.id })}
+            isPhotoAccepted={(id) => isPhotoAccepted(state, id)}
+            onAcceptPhoto={(id) =>
+              dispatch({
+                type: "accept/photo",
+                groupId: group.id,
+                // 宛先は **引数の撮影ID**。フィルムストリップは表示中でない写真も採用できるので、
+                // ここで表示カーソル（captureId）を使うと別の写真の採用として記録される。
+                captureId: id,
+                // 採用した時点で本現像があるならそれを既定にする。以後は行の選択が正で、
+                // あとから本現像しても勝手に昇格させない（無言で書き出す物を変えないため）。
+                variant: state.fullResults[id] ? "developed" : "camera_jpg",
+              })
+            }
+            mergedAccepted={
+              // 採用済み判定も採用の同一性（グループ + 先頭フレーム）で見る。groupId だけで
+              // 見ると、再結合で 2 件同居したときに片方の状態がもう片方に化ける。
+              // 本合成が無い状態ではチップ自体が disabled なので false でよい。
+              mergeFullResult ? isMergedAccepted(state, group.id, mergeFullResult.capture_ids[0]) : false
+            }
+            onAcceptMerged={() => {
+              // グループIDで直に引かない。IDが使い回されて別グループの合成が残っていると、
+              // そのグループに属さない先頭フレームを採用として記録してしまう（書き出しは
+              // ファイル名と capture_id が揃うのでサーバも通り、無言で別の写真が出る）。
+              const merged = groupMergeResultOf(state.mergeFullResults, group);
+              if (!merged) return;
+              // 先頭フレームは合成した瞬間の値で固定する（表示カーソルから引かない）。
+              dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
+            }}
             onDevelop={(mode) => void runDevelop(mode)}
             developMode={developMode}
             elapsedLabel={elapsedLabel}
@@ -524,10 +615,11 @@ export default function Home() {
             mergeBusy={mergeBusy}
             mergeElapsedLabel={mergeElapsedLabel}
             mergeBlockReason={mergeBlock}
-            mergePreviewResult={state.mergePreviewResults[group.id]}
-            mergeFullResult={state.mergeFullResults[group.id]}
-            comparisonView={state.comparisonView}
-            onChangeComparisonView={(view) => dispatch({ type: "comparison/view", view })}
+            mergePreviewResult={mergePreviewResult}
+            mergeFullResult={mergeFullResult}
+            viewing={viewing}
+            onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
+            onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
           />
         ) : screen === "export" ? (
           <ExportPanel
@@ -535,7 +627,7 @@ export default function Home() {
             rows={exportRows}
             batchName={state.batchName}
             onChangeBatchName={(value) => dispatch({ type: "export/batchName", value })}
-            onChangeVariant={(id, variant) => dispatch({ type: "export/variant", captureId: id, variant })}
+            onChangeVariant={(key, variant) => dispatch({ type: "accept/variant", key, variant })}
             onExport={() => void runExport()}
             onImport={() => void runImport()}
             exporting={state.exporting}
@@ -549,8 +641,10 @@ export default function Home() {
           <GroupList
             analysis={analysis}
             visibleGroups={groupsToShow}
-            selectedCaptureOf={(item) => selectedCaptureOf(state, item)}
-            acceptedGroupIds={state.acceptedGroupIds}
+            heroCaptureOf={(item) => heroCaptureOf(state, item)}
+            recommendedCaptureOf={(item) => item.recommended_capture_id}
+            acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+            acceptedItemCount={accepted.length}
             developedGroupIds={developedIds}
             activeView={state.listView}
             onChangeView={(view) => dispatch({ type: "list/view", view })}
@@ -558,6 +652,12 @@ export default function Home() {
           />
         )}
       </main>
+
+      {/* 原寸ビューア。showModal() でトップレイヤーに乗るので DOM 上の位置は問わない。
+          開くたびに新しく mount して、拡大率と面の選択を前回から持ち越さない。 */}
+      {state.viewer && (
+        <FullSizeViewer source={state.viewer} onClose={() => dispatch({ type: "viewer/close" })} />
+      )}
     </div>
   );
 }

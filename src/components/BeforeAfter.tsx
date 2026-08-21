@@ -1,5 +1,4 @@
 import type { RefObject } from "react";
-import type { ComparisonView } from "../lib/app-state";
 import {
   ADJUSTMENT_LABELS,
   formatAdjustmentValue,
@@ -10,6 +9,12 @@ import {
 import { sourceJpgUrl } from "../lib/raw-api";
 import type { Adjustments, CaptureId, DevelopedResult, MergedResult } from "../lib/types";
 
+/**
+ * 比較エリアのタブ。表示状態そのものは State の `viewing` が持っており、
+ * ここはその写像を受け取るだけの見た目用の型（state の形は知らない）。
+ */
+export type ComparisonTab = "develop" | "merged";
+
 type BeforeAfterProps = {
   captureId: CaptureId;
   /** 単写の現像結果、またはブラケット合成の結果。 */
@@ -19,8 +24,13 @@ type BeforeAfterProps = {
    * 現像結果と合成結果の両方があるときだけ渡す表示切替。
    * 片方しか無いときは省略し、押しても何も変わらないタブを出さない。
    */
-  view?: ComparisonView;
-  onChangeView?: (view: ComparisonView) => void;
+  view?: ComparisonTab;
+  onChangeView?: (view: ComparisonTab) => void;
+  /**
+   * 現像後を原寸ビューアで開く。押されたことを伝えるだけにして、どの 2 面を渡すかは
+   * OperationPanel が決める（この画面が state の形を知らずに済む）。
+   */
+  onOpenFullSize: () => void;
 };
 
 const RECIPE_KEYS: (keyof Adjustments)[] = [
@@ -35,7 +45,14 @@ const RECIPE_KEYS: (keyof Adjustments)[] = [
   "noise_reduction",
 ];
 
-export function BeforeAfter({ captureId, result, comparisonRef, view, onChangeView }: BeforeAfterProps) {
+export function BeforeAfter({
+  captureId,
+  result,
+  comparisonRef,
+  view,
+  onChangeView,
+  onOpenFullSize,
+}: BeforeAfterProps) {
   if (!result) return null;
 
   const lens = result.lens_correction;
@@ -92,14 +109,14 @@ export function BeforeAfter({ captureId, result, comparisonRef, view, onChangeVi
           <figcaption><strong>現像前</strong><span>カメラ内 JPG（{beforeCaptureId}）</span></figcaption>
         </figure>
         <figure>
-          <a className="comparison-image" href={result.output_url} target="_blank" rel="noreferrer">
+          <button type="button" className="comparison-image" onClick={onOpenFullSize}>
             <img
               src={result.output_url}
               alt={merged ? `${merged.frames}枚のブラケット合成後` : `${captureId} RAW現像後`}
               decoding="async"
             />
-            <span className="developed-label">原寸で見る ↗</span>
-          </a>
+            <span className="developed-label">原寸で見る</span>
+          </button>
           <figcaption>
             <strong>{merged ? "合成後" : "現像後"}</strong>
             <span>{merged ? `ARW ${merged.frames}枚を合成 / ${result.preset_label}` : `ARW / ${result.preset_label}`}</span>

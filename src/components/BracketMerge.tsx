@@ -29,6 +29,12 @@ type BracketMergeProps = {
   presetLabel: string;
   hasPreview: boolean;
   hasFull: boolean;
+  /**
+   * 合成の採用トグル。フィルムストリップ先頭の合成タイルと **同じ accept/merged を撃つ**。
+   * 導線が二重なのは意図的で、合成し終えた直後にその場で採用できるのが一番自然なため。
+   */
+  accepted: boolean;
+  onAcceptMerged: () => void;
   panelRef: RefObject<HTMLElement | null>;
 };
 
@@ -47,6 +53,8 @@ export function BracketMerge({
   presetLabel,
   hasPreview,
   hasFull,
+  accepted,
+  onAcceptMerged,
   panelRef,
 }: BracketMergeProps) {
   const selected = new Set(frames);
@@ -125,6 +133,24 @@ export function BracketMerge({
         <button className="primary-action" onClick={() => onMerge("full")} disabled={disabled}>
           {mergeMode === "full" ? `本合成中… ${elapsedLabel}` : hasFull ? "本合成をやり直す" : "ブラケット合成"}
         </button>
+      </div>
+
+      {/* 採用は本合成の結果があるときだけ。プレビューは書き出しに使えない。 */}
+      <div className="bracket-accept">
+        <button
+          type="button"
+          className={`accept-toggle${accepted ? " on" : ""}`}
+          aria-pressed={accepted}
+          disabled={!hasFull}
+          onClick={onAcceptMerged}
+        >
+          {accepted ? "採用を外す" : "合成した1枚を採用する"}
+        </button>
+        <small>
+          {hasFull
+            ? "上のフィルムストリップ先頭にある合成タイルと同じ操作です。"
+            : "本合成すると採用できます。"}
+        </small>
       </div>
 
       {blockReason ? (

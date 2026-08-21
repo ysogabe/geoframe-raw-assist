@@ -14,8 +14,8 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -118,21 +118,38 @@ def _sha256(path: Path) -> str:
 
 
 def _temp_path(path: Path, extension: str) -> Path:
-    """`path` と同じ場所に、プロセス/スレッドで一意な一時ファイルパスを作る。
+    """`path` と同じ場所に、呼び出しごとに一意な一時ファイルパスを作る。
 
     同一 params_hash の同時リクエスト（ThreadingHTTPServer への二重クリック等）でも
-    `pid-tid` を挟むことで一時ファイル名が衝突しないようにする。`os.replace` によるアトミック
-    置換自体は変わらず、衝突が起きるのは書き込み中の一時ファイル名だけだったのを塞ぐ。
+    `pid` と `uuid4()` の組み合わせで一時ファイル名が衝突しないようにする。CPython は
+    短命スレッドの終了後に `threading.get_ident()` の値を再利用し得るため、これだけに
+    依存した命名は同時実行環境で衝突の余地がある。呼び出しごとに新しい UUID を振るので
+    別スレッドから同時に呼ばれても、同一スレッド内で連続して呼ばれても全て別のパスになる。
+    `os.replace` によるアトミック置換自体は変わらず、衝突が起きるのは書き込み中の一時
+    ファイル名だけだったのを塞ぐ。元の stem と一時ファイル用拡張子は名前に残す
+    （デバッグ時に何の一時ファイルか判別できるようにするため）。
     """
-    return path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.{extension}")
+    return path.with_suffix(f".{os.getpid()}-{uuid.uuid4().hex}.{extension}")
 
 
 def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
+    """`recipe` を JSON として `recipe_path` にアトミック保存する。
+
+    一時ファイルは成功・失敗いずれの経路でも残さない（`os.replace` 成功後は一時ファイルが
+    存在しないため、`unlink(missing_ok=True)` は安全）。`_save_developed_jpeg` と同じ流儀。
+
+    `_temp_path` が `threading.get_ident()` から `uuid4()` に変わったことで、名前が二度と
+    衝突しなくなった代わりに、**失敗して残った一時ファイルが後続の書き込みで上書きされる
+    こともなくなった**。掃除しないと `outputs/` に永久に溜まる。
+    """
     temporary_path = _temp_path(recipe_path, "tmp.json")
-    temporary_path.write_text(
-        json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary_path, recipe_path)
+    try:
+        temporary_path.write_text(
+            json.dumps(recipe, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary_path, recipe_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _params_hash(

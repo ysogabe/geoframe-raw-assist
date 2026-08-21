@@ -12,8 +12,12 @@ type DevelopControlsProps = {
   onChangePreset: (presetName: PresetName) => void;
   onChangeAdjustment: (key: keyof Adjustments, value: Adjustments[keyof Adjustments]) => void;
   onResetAdjustments: () => void;
-  isAccepted: boolean;
-  onAccept: () => void;
+  /**
+   * 今表示している写真そのものを採用しているか。
+   * 以前はグループ単位のフラグで、「この写真を採用」という文言が実態と食い違っていた。
+   */
+  photoAccepted: boolean;
+  onAcceptPhoto: () => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -33,8 +37,8 @@ export function DevelopControls({
   onChangePreset,
   onChangeAdjustment,
   onResetAdjustments,
-  isAccepted,
-  onAccept,
+  photoAccepted,
+  onAcceptPhoto,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -139,7 +143,14 @@ export function DevelopControls({
       </div>
 
       <div className="operation-actions">
-        <button className="primary-action" onClick={onAccept}>{isAccepted ? "✓ 採用済み" : "この写真を採用"}</button>
+        {/* 採用は二値のトグル。色だけでなく aria-pressed でも状態が読めるようにする。 */}
+        <button
+          className={`primary-action accept-toggle${photoAccepted ? " on" : ""}`}
+          onClick={onAcceptPhoto}
+          aria-pressed={photoAccepted}
+        >
+          {photoAccepted ? "採用を外す" : "この写真を採用する"}
+        </button>
       </div>
     </>
   );
