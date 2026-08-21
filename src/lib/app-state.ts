@@ -69,9 +69,13 @@ export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
  * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
  * `merged:12:DSC02943` まで含めれば衝突しない。
  *
- * `accept/merged` のトグルと isMergedAccepted も同じ 2 つ組（groupId + 先頭フレーム）で
- * 同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合したグループで
- * チップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
+ * `accept/merged` の **採用を外す側** と isMergedAccepted も同じ 2 つ組（groupId +
+ * 先頭フレーム）で同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合した
+ * グループでチップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
+ *
+ * **採用する側だけは groupId 単位で置き換える**（1 グループにつき合成の採用は 1 件）。
+ * 同じグループを合成し直すとリードが変わり、古い採用が成果物を引けないまま件数だけ
+ * 残る（＝取り除けない幽霊になる）ため。詳細は `accept/merged` のコメント。
  */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
@@ -529,31 +533,54 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 同一性は acceptedKey と同じ groupId + leadCaptureId で見る。reconcileAccepted は
-      // 仕様どおり重複除去をしないので、同じ groupId に合成の採用が複数同居しうる
-      // （別々のグループで採用した 2 件の合成が、再解析で 1 グループへ再結合した場合）。
-      // groupId だけで判定すると、そのときチップを 1 回押しただけで 2 件とも消える。
+      // 採用を外すときの同一性は acceptedKey と同じ groupId + leadCaptureId で見る。
+      // reconcileAccepted は仕様どおり重複除去をしないので、同じ groupId に合成の採用が
+      // 複数同居しうる（別々のグループで採用した 2 件の合成が、再解析で 1 グループへ
+      // 再結合した場合）。groupId だけで外すと、そのときチップを 1 回押しただけで
+      // 2 件とも消える。
       const already = state.accepted.some(
         (item) =>
           item.kind === "merged" &&
           item.groupId === action.groupId &&
           item.leadCaptureId === action.leadCaptureId,
       );
+      if (already) {
+        // 完全一致する採用を外す（通常のトグルオフ）。同居している別の合成採用は残す。
+        return {
+          ...state,
+          accepted: state.accepted.filter(
+            (item) =>
+              !(
+                item.kind === "merged" &&
+                item.groupId === action.groupId &&
+                item.leadCaptureId === action.leadCaptureId
+              ),
+          ),
+        };
+      }
+      // 新規採用は **同じグループの古い合成採用を置き換える**（増やさない）。
+      //
+      // 置き換えないと孤児が残る: グループGでリード=Xの合成を採用したあと、フレームを
+      // 選び直して同じGを合成し直すとリードがYになる。mergedResultFor はグループの現在の
+      // 合成しか見ないので {G,X} は成果物を引けなくなり、書き出しからは黙って落ちる。
+      // なのに採用件数は 2 のまま、UI から {G,X} を外す手段も無い（リード=Xの構成で
+      // 合成し直さない限りチップが {G,X} を指さない）。
+      //
+      // ユーザーの意図は「このグループの合成を採用」であって「このグループに合成の採用を
+      // 積み増す」ではない。再結合で 2 件が同居するケース（acceptedKey のコメント参照）は
+      // reconcileAccepted が作るものでこのアクションを経由しないため、ここで消しても
+      // 影響しない。ただし再結合で同居した状態から **さらに** 同じグループを合成し直して
+      // 採用すると、その 2 件は 1 件へまとまる。どちらも同じグループの合成であり、
+      // 書き出せるのは現在の合成 1 件だけなので、これは正しい畳み込みになる。
+      //
+      // 置き換えたぶんは配列の末尾へ移る。accepted の並びは書き出し順なので、
+      // 「合成し直して採用し直す」は採用し直した順に並ぶ（新規採用と同じ扱い）。
       return {
         ...state,
-        accepted: already
-          ? state.accepted.filter(
-              (item) =>
-                !(
-                  item.kind === "merged" &&
-                  item.groupId === action.groupId &&
-                  item.leadCaptureId === action.leadCaptureId
-                ),
-            )
-          : [
-              ...state.accepted,
-              { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
-            ],
+        accepted: [
+          ...state.accepted.filter((item) => !(item.kind === "merged" && item.groupId === action.groupId)),
+          { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
+        ],
       };
     }
 
@@ -877,8 +904,12 @@ export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
  * その合成（グループ + 先頭フレーム）が採用済みか。
  *
  * groupId だけでは足りない。再結合で同じ groupId に合成の採用が複数並びうるし、
- * `accept/merged` のトグルも同じ 2 つ組で同一性を見るため、判定をここだけ groupId に
- * すると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ * `accept/merged` が採用を外すときも同じ 2 つ組で同一性を見るため、判定をここだけ
+ * groupId にすると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ *
+ * 逆に「同じグループの合成を採用し直したら古い方は消える」（accept/merged の新規採用が
+ * groupId 単位で置き換えること）は、この判定と食い違わない。置き換えたあとは新しい
+ * リードだけが残り、チップはそれを指すため。
  */
 export function isMergedAccepted(state: State, groupId: number, leadCaptureId: CaptureId): boolean {
   return state.accepted.some(
