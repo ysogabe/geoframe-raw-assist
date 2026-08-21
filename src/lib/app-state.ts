@@ -278,7 +278,12 @@ export type Action =
   | { type: "merge/fail"; message: string }
   | { type: "export/batchName"; value: string }
   | { type: "export/start" }
-  | { type: "export/ok"; result: ExportResponse }
+  /**
+   * `missingCount` は「採用したのに成果物が引けず、送らなかった行」の数。
+   * サーバ側の `result.skipped`（送ったが書き出せなかったもの）とは別物なので、
+   * 通知の文言でも混ぜない。
+   */
+  | { type: "export/ok"; result: ExportResponse; missingCount?: number }
   | { type: "export/fail"; message: string }
   | { type: "import/start" }
   | { type: "import/ok"; result: ImportToPhotosResponse }
@@ -715,14 +720,23 @@ export function reducer(state: State, action: Action): State {
     case "export/start":
       return { ...state, exporting: true, exportResult: null, importResult: null };
 
-    case "export/ok":
+    case "export/ok": {
+      // 採用したのに成果物が引けなかった行は送っていない。黙って減らすと「採用3件の
+      // うち1件が書き出されなかった」ことに気づけないまま成功トーストが出るので、
+      // 件数と理由を必ず添える。再解析で採用が落ちたとき（analysis/status）と同じ扱いで、
+      // 1 件でも欠けたらトーストは error 側にする（見た目が成功のままだと読み飛ばされる）。
+      const missing = action.missingCount ?? 0;
       return {
         ...state,
         exporting: false,
         exportResult: action.result,
-        notice: `${action.result.files.length}件を書き出しました`,
-        noticeTone: "info",
+        notice:
+          missing > 0
+            ? `${action.result.files.length}件を書き出しました（${missing}件は成果物が失われているため除外）`
+            : `${action.result.files.length}件を書き出しました`,
+        noticeTone: missing > 0 ? "error" : "info",
       };
+    }
 
     case "export/fail":
       return { ...state, exporting: false, notice: action.message, noticeTone: "error" };

@@ -475,10 +475,15 @@ export default function Home() {
       });
       return;
     }
+    // 一部だけ成果物が失われている場合（例: 採用3件のうち1件が合成し直しで孤児化）、
+    // その行は上の flatMap で落ちている。全滅（items.length === 0）だけを止めていると、
+    // 残りが書き出せてしまうぶん「成功」として通知され、欠けたことに気づけない。
+    // 何件落としたかを数えて通知に載せる。
+    const missingCount = exportRows.length - items.length;
     dispatch({ type: "export/start" });
     try {
       const result = await exportSelection(state.batchName, items);
-      dispatch({ type: "export/ok", result });
+      dispatch({ type: "export/ok", result, missingCount });
     } catch (error) {
       dispatch({
         type: "export/fail",
