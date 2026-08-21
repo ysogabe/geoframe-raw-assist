@@ -200,8 +200,9 @@ def source_root() -> Path:
             except PermissionError:
                 # 存在はするが読めない（TCC 拒否・権限なし）。既定へ逃がすと UI が
                 # 「許可すれば直る」ことを案内できなくなるので、そのまま返す。
-                # 読み取り不可の検出と案内は呼び出し側（`scan_pairs` /
-                # `source_folder_info` の `readable`）の責務。
+                # 読み取り不可を検出できるのは `source_folder_info()` の `readable`
+                # （= `_probe_readable()`）だけ。`scan_pairs()` は `Path.glob` が
+                # `PermissionError` を握り潰すので「0組」としか言えない。
                 return candidate.resolve()
             except (OSError, ValueError):
                 # 存在しない・パスとして不正 → 既定へフォールバックする。
