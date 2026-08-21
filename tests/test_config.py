@@ -175,6 +175,30 @@ class FallbackTests(ConfigTestCase):
                 )
                 self.assertEqual(config.source_root(), self.default())
 
+    def test_unreadable_folder_is_not_replaced_by_the_default(self):
+        """「読めないだけ」のフォルダは既定へフォールバックしない（docstring の約束）。
+
+        既定に戻してしまうと、UI は「許可すれば直る」ことを案内できず、ユーザーには
+        選んだフォルダが黙って無かったことにされたように見える。macOS の TCC 拒否は
+        `os.stat` が `PermissionError` になる形で現れるので、その形で再現する。
+        `os.stat` はモジュール全体で共有されているため、対象フォルダ以外は本物へ
+        委譲する（tempfile の後始末まで巻き込まないため）。
+        """
+        folder = self.make_folder("card-a")
+        config.set_source_root(str(folder))
+        real_stat = os.stat
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == folder:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(os, "stat", denied):
+            resolved = config.source_root()
+
+        self.assertEqual(resolved, folder)
+        self.assertNotEqual(resolved, self.default())
+
     def test_never_raises(self):
         """UI から常に呼ばれるので、どんな壊れ方でも例外を投げないこと。"""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)

@@ -69,9 +69,13 @@ export type AcceptedItem = AcceptedPhoto | AcceptedMerged;
  * 2 つ並び、React の duplicate key になる。先頭フレームは合成ごとに必ず違うため、
  * `merged:12:DSC02943` まで含めれば衝突しない。
  *
- * `accept/merged` のトグルと isMergedAccepted も同じ 2 つ組（groupId + 先頭フレーム）で
- * 同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合したグループで
- * チップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
+ * `accept/merged` の **採用を外す側** と isMergedAccepted も同じ 2 つ組（groupId +
+ * 先頭フレーム）で同一性を見る。キーの粒度と採用の同一性が食い違っていると、再結合した
+ * グループでチップを 1 回押しただけで 2 件とも消える。ここを変えるなら両方あわせて変えること。
+ *
+ * **採用する側だけは groupId 単位で置き換える**（1 グループにつき合成の採用は 1 件）。
+ * 同じグループを合成し直すとリードが変わり、古い採用が成果物を引けないまま件数だけ
+ * 残る（＝取り除けない幽霊になる）ため。詳細は `accept/merged` のコメント。
  */
 export function acceptedKey(item: AcceptedItem): string {
   switch (item.kind) {
@@ -140,6 +144,20 @@ export type State = {
   sourceFolderUnavailable: boolean;
   /** POST /api/source-folder の実行中。 */
   sourceFolderBusy: boolean;
+  /**
+   * 現像対象フォルダの世代。フォルダを切り替えるたびに 1 進む。
+   *
+   * 現像・合成は非同期で数十秒かかる。その最中にフォルダを切り替えると、`develop/ok` /
+   * `merge/ok` が届いたときサーバはもう別のフォルダを向いているのに、**前のフォルダの
+   * RAW から作った結果**が新しいフォルダの state へ書き込まれてしまう。capture_id は
+   * カメラの連番でしかなくフォルダをまたいで衝突しうるため、書き込み先まで一致して
+   * しまい、UI 上は正常な現像結果に見える（別の写真が出る、とは気づけない）。
+   *
+   * UI ロック（Sidebar の sourceFolderLocked）だけでは「切替とほぼ同時にレスポンスが
+   * 返る」窓が残るので、リクエスト発行時の世代を結果のアクションに載せ、reducer 側で
+   * 現在の世代と違うものを捨てる。
+   */
+  sourceFolderGeneration: number;
   selectedGroupId: number | null;
   /** グループごとの表示カーソル。未設定なら recommended_capture_id を見ている。 */
   viewing: Record<number, ViewingItem>;
@@ -191,6 +209,7 @@ export const initialState: State = {
   sourceFolder: null,
   sourceFolderUnavailable: false,
   sourceFolderBusy: false,
+  sourceFolderGeneration: 0,
   selectedGroupId: null,
   viewing: {},
   accepted: [],
@@ -247,16 +266,24 @@ export type Action =
   | { type: "adjust/change"; key: keyof Adjustments; value: Adjustments[keyof Adjustments] }
   | { type: "adjust/reset" }
   | { type: "develop/start"; mode: DevelopMode; captureId: CaptureId }
-  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult }
+  /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
+  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number }
+  /** 失敗には generation を持たせない（後述: 通知だけは必ず出す）。 */
   | { type: "develop/fail"; message: string }
   | { type: "merge/toggleFrame"; groupId: number; captureId: CaptureId }
   | { type: "merge/resetFrames"; groupId: number }
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
-  | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult }
+  /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
+  | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult; generation: number }
   | { type: "merge/fail"; message: string }
   | { type: "export/batchName"; value: string }
   | { type: "export/start" }
-  | { type: "export/ok"; result: ExportResponse }
+  /**
+   * `missingCount` は「採用したのに成果物が引けず、送らなかった行」の数。
+   * サーバ側の `result.skipped`（送ったが書き出せなかったもの）とは別物なので、
+   * 通知の文言でも混ぜない。
+   */
+  | { type: "export/ok"; result: ExportResponse; missingCount?: number }
   | { type: "export/fail"; message: string }
   | { type: "import/start" }
   | { type: "import/ok"; result: ImportToPhotosResponse }
@@ -437,12 +464,20 @@ export function reducer(state: State, action: Action): State {
       // 新しいフォルダでは別の写真か、存在しない）。選択・現像結果・書き出し選択を
       // まとめて捨て、エンジン接続情報と選択中プリセットだけを引き継ぐ。
       // 解析のやり直しは呼び出し側が beginAnalyze(true) で行う。
+      //
+      // initialState を土台にするので developMode / mergeMode / developingCapture /
+      // mergingGroupId も null に戻る（＝実行中表示は残らない）。飛んでいる fetch 自体は
+      // 止められないため、遅れて届く結果は sourceFolderGeneration で捨てる。
       return {
         ...initialState,
         health: state.health,
         engineStatus: state.engineStatus,
         presetName: state.presetName,
         sourceFolder: action.info,
+        // **initialState の 0 に戻さない**。ここで進めた値が「今のフォルダ」の目印であり、
+        // 飛んでいる現像・合成のリクエストが持つ古い世代と必ず違う値になる必要がある。
+        // スプレッドより後に置くこと（前に置くと 0 に上書きされ、ガードが無言で死ぬ）。
+        sourceFolderGeneration: state.sourceFolderGeneration + 1,
         notice: action.message,
         noticeTone: action.tone ?? "info",
       };
@@ -503,31 +538,54 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "accept/merged": {
-      // 同一性は acceptedKey と同じ groupId + leadCaptureId で見る。reconcileAccepted は
-      // 仕様どおり重複除去をしないので、同じ groupId に合成の採用が複数同居しうる
-      // （別々のグループで採用した 2 件の合成が、再解析で 1 グループへ再結合した場合）。
-      // groupId だけで判定すると、そのときチップを 1 回押しただけで 2 件とも消える。
+      // 採用を外すときの同一性は acceptedKey と同じ groupId + leadCaptureId で見る。
+      // reconcileAccepted は仕様どおり重複除去をしないので、同じ groupId に合成の採用が
+      // 複数同居しうる（別々のグループで採用した 2 件の合成が、再解析で 1 グループへ
+      // 再結合した場合）。groupId だけで外すと、そのときチップを 1 回押しただけで
+      // 2 件とも消える。
       const already = state.accepted.some(
         (item) =>
           item.kind === "merged" &&
           item.groupId === action.groupId &&
           item.leadCaptureId === action.leadCaptureId,
       );
+      if (already) {
+        // 完全一致する採用を外す（通常のトグルオフ）。同居している別の合成採用は残す。
+        return {
+          ...state,
+          accepted: state.accepted.filter(
+            (item) =>
+              !(
+                item.kind === "merged" &&
+                item.groupId === action.groupId &&
+                item.leadCaptureId === action.leadCaptureId
+              ),
+          ),
+        };
+      }
+      // 新規採用は **同じグループの古い合成採用を置き換える**（増やさない）。
+      //
+      // 置き換えないと孤児が残る: グループGでリード=Xの合成を採用したあと、フレームを
+      // 選び直して同じGを合成し直すとリードがYになる。mergedResultFor はグループの現在の
+      // 合成しか見ないので {G,X} は成果物を引けなくなり、書き出しからは黙って落ちる。
+      // なのに採用件数は 2 のまま、UI から {G,X} を外す手段も無い（リード=Xの構成で
+      // 合成し直さない限りチップが {G,X} を指さない）。
+      //
+      // ユーザーの意図は「このグループの合成を採用」であって「このグループに合成の採用を
+      // 積み増す」ではない。再結合で 2 件が同居するケース（acceptedKey のコメント参照）は
+      // reconcileAccepted が作るものでこのアクションを経由しないため、ここで消しても
+      // 影響しない。ただし再結合で同居した状態から **さらに** 同じグループを合成し直して
+      // 採用すると、その 2 件は 1 件へまとまる。どちらも同じグループの合成であり、
+      // 書き出せるのは現在の合成 1 件だけなので、これは正しい畳み込みになる。
+      //
+      // 置き換えたぶんは配列の末尾へ移る。accepted の並びは書き出し順なので、
+      // 「合成し直して採用し直す」は採用し直した順に並ぶ（新規採用と同じ扱い）。
       return {
         ...state,
-        accepted: already
-          ? state.accepted.filter(
-              (item) =>
-                !(
-                  item.kind === "merged" &&
-                  item.groupId === action.groupId &&
-                  item.leadCaptureId === action.leadCaptureId
-                ),
-            )
-          : [
-              ...state.accepted,
-              { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
-            ],
+        accepted: [
+          ...state.accepted.filter((item) => !(item.kind === "merged" && item.groupId === action.groupId)),
+          { kind: "merged", groupId: action.groupId, leadCaptureId: action.leadCaptureId },
+        ],
       };
     }
 
@@ -559,6 +617,13 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "develop/ok": {
+      // フォルダが切り替わったあとに届いた、**前のフォルダの RAW から作られた結果**。
+      // capture_id はカメラの連番なので新しいフォルダの写真と衝突しうる（同じIDの別写真が
+      // 存在する）。書き込むと「現像したら別の写真が出る」になり、しかもファイル名も
+      // capture_id も整合するので気づけない。結果は捨て、state を一切触らない。
+      // 通知も出さない: フォルダ切替のトーストが出た直後に前のフォルダの完了トーストを
+      // 重ねると、新しいフォルダで何かが起きたように読めるため。
+      if (action.generation !== state.sourceFolderGeneration) return state;
       const { capture_id: captureId } = action.result;
       const elapsed = action.result.cached ? "保存済み結果" : `${action.result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
@@ -619,6 +684,10 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "merge/ok": {
+      // develop/ok と同じ理由で、フォルダ切替後に届いた古いフォルダの合成結果は捨てる。
+      // 合成は groupId をキーに書き込むため、こちらは「新しいフォルダの解析で同じIDに
+      // なったグループ」に前のフォルダの合成が入る、という形で化ける。
+      if (action.generation !== state.sourceFolderGeneration) return state;
       const { result } = action;
       const elapsed = result.cached ? "保存済み結果" : `${result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
@@ -651,14 +720,23 @@ export function reducer(state: State, action: Action): State {
     case "export/start":
       return { ...state, exporting: true, exportResult: null, importResult: null };
 
-    case "export/ok":
+    case "export/ok": {
+      // 採用したのに成果物が引けなかった行は送っていない。黙って減らすと「採用3件の
+      // うち1件が書き出されなかった」ことに気づけないまま成功トーストが出るので、
+      // 件数と理由を必ず添える。再解析で採用が落ちたとき（analysis/status）と同じ扱いで、
+      // 1 件でも欠けたらトーストは error 側にする（見た目が成功のままだと読み飛ばされる）。
+      const missing = action.missingCount ?? 0;
       return {
         ...state,
         exporting: false,
         exportResult: action.result,
-        notice: `${action.result.files.length}件を書き出しました`,
-        noticeTone: "info",
+        notice:
+          missing > 0
+            ? `${action.result.files.length}件を書き出しました（${missing}件は成果物が失われているため除外）`
+            : `${action.result.files.length}件を書き出しました`,
+        noticeTone: missing > 0 ? "error" : "info",
       };
+    }
 
     case "export/fail":
       return { ...state, exporting: false, notice: action.message, noticeTone: "error" };
@@ -840,8 +918,12 @@ export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
  * その合成（グループ + 先頭フレーム）が採用済みか。
  *
  * groupId だけでは足りない。再結合で同じ groupId に合成の採用が複数並びうるし、
- * `accept/merged` のトグルも同じ 2 つ組で同一性を見るため、判定をここだけ groupId に
- * すると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ * `accept/merged` が採用を外すときも同じ 2 つ組で同一性を見るため、判定をここだけ
+ * groupId にすると「採用済みに見えるチップを押すと別の採用が消える」食い違いになる。
+ *
+ * 逆に「同じグループの合成を採用し直したら古い方は消える」（accept/merged の新規採用が
+ * groupId 単位で置き換えること）は、この判定と食い違わない。置き換えたあとは新しい
+ * リードだけが残り、チップはそれを指すため。
  */
 export function isMergedAccepted(state: State, groupId: number, leadCaptureId: CaptureId): boolean {
   return state.accepted.some(

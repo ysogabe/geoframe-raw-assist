@@ -243,6 +243,39 @@ def _load_recipe(output_filename: str, root: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def _recipe_source_root(recipe: dict[str, Any] | None, variant: str) -> Path | None:
+    """レシピJSONに記録された**生成時点の現像元フォルダ**。判定できなければ None。
+
+    出所の書かれる場所は変種で違う（どちらも `engine._relative_path()` を通るので、
+    プロジェクト内なら相対・外なら絶対パスで入る）:
+
+    - 現像（`engine.develop_raw`）: `source.path` … ARW の**ファイル**パス
+    - 合成（`bracket.merge_bracket`）: `source.root` … 現像元**フォルダ**のパス
+
+    比較を1本にするため、どちらもフォルダの絶対パスへ揃えて返す。相対パスは
+    `PROJECT_ROOT` 基準で絶対化する（`_relative_path()` の相対化と対になる）。
+
+    None は「**出所が記録されていない**」であって「一致した」ではない。レシピの無い
+    `camera_jpg` や、`source` を持たない古い形式・壊れたレシピが該当する。判定材料の
+    無いものまで弾くと、そうした成果物が一律で書き出せなくなるため通す側に倒している。
+    """
+    source = recipe.get("source") if isinstance(recipe, dict) else None
+    if not isinstance(source, dict):
+        return None
+    raw_path = source.get("root") if variant == "merged" else source.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    try:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        resolved = candidate.resolve()
+    except (OSError, ValueError):
+        # NUL 文字入り・長すぎるパス等の壊れたレシピ。判定不能として扱う。
+        return None
+    return resolved if variant == "merged" else resolved.parent
+
+
 def _recipe_is_preview(recipe: dict[str, Any] | None) -> bool:
     """レシピJSONがプレビュー品質の出力を指しているか。
 
@@ -346,8 +379,28 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         if source_path is None or not source_path.is_file():
             skipped.append({"capture_id": capture_id, "reason": missing_reason})
             continue
-        if variant == "merged" and _recipe_is_preview(recipe):
-            # プレビュー品質（長辺1600px）の合成をマスターとして書き出させない。
+        recipe_root = _recipe_source_root(recipe, variant)
+        if recipe_root is not None and recipe_root != source_root:
+            # 別のフォルダで作った成果物。`OUTPUT_ROOT` / `MERGED_ROOT` はフォルダに
+            # 依らない固定ディレクトリなので、A で現像した JPEG は B へ切り替えた後も
+            # 同じ名前でそこに残っている。`capture_id` はカメラの連番でカードをまたぐと
+            # 衝突するため、これを素通しすると **実体は A・EXIF と group は B**（後者は
+            # 現在のフォルダから引く）という自己矛盾した manifest が 200 で書き出される。
+            # 解析キャッシュ側は `_load_analysis()` が署名照合で同じ取り違えを防いでいる。
+            #
+            # 現在のフォルダから見れば「その成果物は無い」ので、見つからなかったときと
+            # 同じく `skipped[]` に積んでバッチは続行する（B の写真の書き出しまで
+            # 巻き添えで 400 にしない）。理由も同じ文言にして、どのフォルダに何があるかを
+            # レスポンスから推測させない。
+            skipped.append({"capture_id": capture_id, "reason": missing_reason})
+            continue
+        if _recipe_is_preview(recipe):
+            # プレビュー品質（長辺1600px）の成果物をマスターとして書き出させない。
+            # `variant == "merged"` に限定しない: 現像レシピにも `output.preview` は
+            # 書かれており（`engine.develop_raw`）、プレビュー現像が
+            # `outputs/developed/` に紛れ込んだ場合に無警告で通ってしまう。
+            # `camera_jpg` は `recipe` が None なので、`_recipe_is_preview()` は
+            # `isinstance(recipe, dict)` で False を返し、ここは素通りする。
             # 「ファイルが単に無い」ではなく**入力の取り違え**なので skipped ではなく
             # `ValueError`（→400）にする（`_validate_developed_filename` が変種の取り違えを
             # 沈黙させず 400 にするのと同じ判断）。コピーはループを抜けた後にまとめて行うので、
