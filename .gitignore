@@ -47,3 +47,6 @@ __pycache__/
 *.py[cod]
 /.claude/
 /.serena/
+
+# Google Drive OAuth client secret (personal, not for source control)
+/local_raw/drive_client_secret.json

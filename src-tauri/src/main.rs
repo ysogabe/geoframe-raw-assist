@@ -18,6 +18,7 @@
 //! panicking.
 
 use std::env;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -96,6 +97,57 @@ fn repo_root() -> PathBuf {
 /// `.setup()` hook's "does the venv already exist" check.
 fn venv_python_path() -> PathBuf {
     repo_root().join(".venv").join("bin").join("python")
+}
+
+/// The single source of truth for the Python packages the RAW engine needs,
+/// installed by `npm run setup:raw` and by `run_pip_install` below.
+fn requirements_path() -> PathBuf {
+    repo_root().join("requirements-raw.txt")
+}
+
+/// Records which `requirements-raw.txt` the current `.venv` was last
+/// *successfully* installed from — see `dependencies_up_to_date`.
+///
+/// Deliberately lives inside `.venv` rather than next to it: the marker
+/// describes the state of that one venv, so deleting the venv must also
+/// discard the marker (otherwise a `rm -rf .venv` would leave a stale
+/// "already installed" claim behind). It is also invisible to git twice
+/// over — `/.venv/` is in the repo's `.gitignore`, and `python -m venv`
+/// writes a catch-all `.gitignore` inside the venv itself.
+fn requirements_marker_path() -> PathBuf {
+    repo_root().join(".venv").join(".requirements-installed")
+}
+
+/// Whether the existing `.venv` was already built from the current
+/// `requirements-raw.txt`.
+///
+/// The marker stores the requirements file verbatim (it is a couple of
+/// hundred bytes of committed plaintext), so this is an exact comparison
+/// rather than a digest: no collisions to reason about, no hashing code to
+/// maintain, and `cat .venv/.requirements-installed` shows a human exactly
+/// which dependency set the venv holds.
+///
+/// Fails toward re-installing: a marker that is missing (first launch after
+/// this check shipped, or one deleted by hand), unreadable, or truncated is
+/// treated the same as a mismatch, because none of those can *prove* the
+/// venv is current. The one case that returns `true` without a match is an
+/// unreadable `requirements-raw.txt` — there is then nothing to install
+/// from, so re-running pip could only fail, and the engine should start with
+/// whatever the venv already has, exactly as it did before this check
+/// existed.
+fn dependencies_up_to_date() -> bool {
+    let requirements = match fs::read_to_string(requirements_path()) {
+        Ok(requirements) => requirements,
+        Err(err) => {
+            eprintln!(
+                "[raw-setup] could not read {} ({err}); skipping the dependency check",
+                requirements_path().display()
+            );
+            return true;
+        }
+    };
+
+    matches!(fs::read_to_string(requirements_marker_path()), Ok(recorded) if recorded == requirements)
 }
 
 /// Resolves the Python interpreter used to run the RAW engine.
@@ -203,6 +255,31 @@ fn update_setup_state(app_handle: &AppHandle, next: SetupState) {
     if let Err(err) = app_handle.emit("raw-setup", next) {
         eprintln!("[raw-setup] failed to emit raw-setup event: {err}");
     }
+}
+
+/// Like `update_setup_state`, but carries the log accumulated so far into
+/// the next state instead of starting an empty one. Used when a transition
+/// has to stay diagnosable even though the new stage is not one the
+/// frontend renders a log for — specifically the deliberately non-blocking
+/// "the dependency refresh failed" state in `run_dependency_refresh`, whose
+/// pip output would otherwise be dropped from `setup_status`.
+fn update_setup_state_keeping_log(app_handle: &AppHandle, stage: &str, message: impl Into<String>) {
+    let log = {
+        let state = app_handle.state::<Mutex<SetupState>>();
+        let guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.log.clone()
+    };
+    update_setup_state(
+        app_handle,
+        SetupState {
+            stage: stage.to_string(),
+            message: message.into(),
+            log,
+        },
+    );
 }
 
 /// Appends one line to the managed `SetupState.log` (capping it at
@@ -338,7 +415,8 @@ fn stream_setup_output(app_handle: &AppHandle, mut child: Child) -> std::io::Res
 /// one-time cost of `pip install` (network access + a couple of minutes),
 /// every launch after that finds `.venv/bin/python` already in place and
 /// the `.setup()` hook below skips straight to `spawn_raw_engine`, exactly
-/// like today.
+/// like today — unless `requirements-raw.txt` has changed since, in which
+/// case `run_dependency_refresh` installs just the difference.
 ///
 /// Must run off the main thread: `.setup()` has to return promptly so the
 /// window can open, and `pip install` is a multi-minute network round
@@ -404,19 +482,52 @@ fn run_setup_bootstrap(app_handle: AppHandle) {
         return;
     }
 
-    update_setup_state(
-        &app_handle,
-        SetupState::new(
-            "installing-deps",
-            "必要なライブラリをインストールしています（初回のみ、数分かかることがあります）…",
-        ),
-    );
+    if !run_pip_install(&app_handle, "必要なライブラリをインストールしています（初回のみ、数分かかることがあります）…") {
+        // Brand-new venv: without its dependencies the RAW engine cannot
+        // start at all, so leave the failure on screen and do not spawn it
+        // (unchanged behavior). `run_dependency_refresh` deliberately
+        // differs — see its doc comment.
+        return;
+    }
+
+    update_setup_state(&app_handle, SetupState::new("succeeded", "セットアップが完了しました。"));
+
+    let child = spawn_raw_engine();
+    let state = app_handle.state::<RawEngineState>();
+    let mut guard = match state.0.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = child;
+}
+
+/// Runs `pip install -r requirements-raw.txt` with the venv's own
+/// interpreter, streaming progress into `SetupState` under the
+/// `"installing-deps"` stage, and returns whether it succeeded.
+///
+/// Shared by both callers — the first-launch bootstrap above and the
+/// dependency refresh below — so that the marker write can only ever happen
+/// in one place, immediately after pip exits 0. That ordering is the whole
+/// point: writing the marker any earlier (or on a failed install) would
+/// claim the venv satisfies a `requirements-raw.txt` it does not, and since
+/// `dependencies_up_to_date` then reports a match, the user could never
+/// recover by relaunching — the install would never be retried again.
+///
+/// `caller_message` is the headline shown while pip runs; the two callers
+/// word it differently ("first launch" vs "app update").
+fn run_pip_install(app_handle: &AppHandle, caller_message: &str) -> bool {
+    update_setup_state(app_handle, SetupState::new("installing-deps", caller_message));
+
+    // Snapshot the file before pip reads it, so the marker records exactly
+    // the dependency set that was installed even if the file is edited
+    // while the (multi-minute) install runs.
+    let requirements = fs::read_to_string(requirements_path());
 
     let venv_python = venv_python_path();
     let mut pip_command = Command::new(&venv_python);
     pip_command
         .args(["-m", "pip", "install", "-r"])
-        .arg(repo_root().join("requirements-raw.txt"))
+        .arg(requirements_path())
         .current_dir(repo_root());
 
     let pip_child = match spawn_setup_step(&mut pip_command) {
@@ -424,22 +535,22 @@ fn run_setup_bootstrap(app_handle: AppHandle) {
         Err(err) => {
             eprintln!("[raw-setup] failed to spawn {}: {err}", venv_python.display());
             update_setup_state(
-                &app_handle,
+                app_handle,
                 SetupState::new("failed", format!("pip install の起動に失敗しました: {err}")),
             );
-            return;
+            return false;
         }
     };
 
-    let status = match stream_setup_output(&app_handle, pip_child) {
+    let status = match stream_setup_output(app_handle, pip_child) {
         Ok(status) => status,
         Err(err) => {
             eprintln!("[raw-setup] failed to wait for pip install: {err}");
             update_setup_state(
-                &app_handle,
+                app_handle,
                 SetupState::new("failed", format!("依存ライブラリのインストール中にエラーが発生しました: {err}")),
             );
-            return;
+            return false;
         }
     };
 
@@ -457,11 +568,78 @@ fn run_setup_bootstrap(app_handle: AppHandle) {
             )
         };
         eprintln!("[raw-setup] pip install failed: {status}");
-        update_setup_state(&app_handle, SetupState::new("failed", message));
-        return;
+        update_setup_state(app_handle, SetupState::new("failed", message));
+        return false;
     }
 
-    update_setup_state(&app_handle, SetupState::new("succeeded", "セットアップが完了しました。"));
+    // Only now — pip exited 0 — may the venv be recorded as satisfying this
+    // requirements file. A write failure here is not fatal: the next launch
+    // just sees a mismatch and re-runs an install that has nothing left to
+    // do (pip is idempotent), which is the safe direction to fail in.
+    match requirements {
+        Ok(requirements) => {
+            if let Err(err) = fs::write(requirements_marker_path(), requirements) {
+                eprintln!(
+                    "[raw-setup] failed to write {} ({err}); dependencies will be re-checked on the next launch",
+                    requirements_marker_path().display()
+                );
+            }
+        }
+        Err(err) => eprintln!(
+            "[raw-setup] could not read {} ({err}); skipping the marker write",
+            requirements_path().display()
+        ),
+    }
+
+    true
+}
+
+/// Re-runs `pip install` inside an already-existing `.venv` whose
+/// `requirements-raw.txt` no longer matches what was last installed, then
+/// starts the RAW engine.
+///
+/// # Why this exists
+///
+/// The `.setup()` hook used to treat "`.venv/bin/python` exists" as "the
+/// venv is complete", so an app update that adds a package to
+/// `requirements-raw.txt` never reached anyone who had launched the app
+/// even once — their venv kept whatever it was first built with, forever,
+/// and the feature needing the new package failed at runtime (for the
+/// Google Drive upload that shipped this way: the button was enabled but
+/// every attempt returned `dependencies_missing`). Comparing the
+/// requirements file against the marker written by `run_pip_install` closes
+/// that gap without recreating the venv, which is unnecessary — only the
+/// package set changed, not the interpreter.
+///
+/// # Why a failure here does not block the window
+///
+/// `run_setup_bootstrap` stops at the `"failed"` stage without starting the
+/// engine, which is right when there are no dependencies at all. Here the
+/// user has a working install from yesterday, so a transient failure (no
+/// network on launch, a pip index hiccup) must not cost them the whole app:
+/// the frontend renders `"failed"` as a dead-end gate with no way past it.
+/// So the engine is started regardless and the stage lands on `"ready"`,
+/// leaving the app exactly as capable as it was before this check existed —
+/// everything works except whatever needs the new package. The failure is
+/// still reported on stderr and kept in `SetupState` (message plus the pip
+/// log) for `setup_status`, and because the marker was not written, the
+/// next launch retries the install on its own.
+///
+/// Must run off the main thread, for the same reason as
+/// `run_setup_bootstrap`: `.setup()` has to return promptly so the window
+/// can open. The engine is started only *after* pip finishes — starting it
+/// first would run the server against a venv being mutated underneath it,
+/// and it would not pick up the new packages without a restart anyway.
+fn run_dependency_refresh(app_handle: AppHandle) {
+    if run_pip_install(&app_handle, "アプリの更新にあわせてライブラリを追加インストールしています…") {
+        update_setup_state(&app_handle, SetupState::new("succeeded", "ライブラリの更新が完了しました。"));
+    } else {
+        update_setup_state_keeping_log(
+            &app_handle,
+            "ready",
+            "ライブラリの更新に失敗しました。次回起動時に再試行します（一部の機能が使えない場合があります）。",
+        );
+    }
 
     let child = spawn_raw_engine();
     let state = app_handle.state::<RawEngineState>();
@@ -548,24 +726,34 @@ fn main() {
             let app_handle = app.handle().clone();
 
             if venv_python_path().is_file() {
-                // Common case on a dev machine that already ran
-                // `npm run setup:raw`: no bootstrap needed, behave exactly
-                // as before. Still emit a deterministic "ready" state so
-                // the frontend always gets a first `"raw-setup"` signal
-                // either way, rather than having to distinguish "no
-                // bootstrap needed" from "haven't heard anything yet".
-                update_setup_state(
-                    &app_handle,
-                    SetupState::new("ready", "セットアップは不要です。エンジンを起動しています…"),
-                );
+                if dependencies_up_to_date() {
+                    // Common case on a dev machine that already ran
+                    // `npm run setup:raw`: no bootstrap needed, behave
+                    // exactly as before. Still emit a deterministic "ready"
+                    // state so the frontend always gets a first
+                    // `"raw-setup"` signal either way, rather than having to
+                    // distinguish "no bootstrap needed" from "haven't heard
+                    // anything yet".
+                    update_setup_state(
+                        &app_handle,
+                        SetupState::new("ready", "セットアップは不要です。エンジンを起動しています…"),
+                    );
 
-                let child = spawn_raw_engine();
-                let state = app.state::<RawEngineState>();
-                let mut guard = match state.0.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *guard = child;
+                    let child = spawn_raw_engine();
+                    let state = app.state::<RawEngineState>();
+                    let mut guard = match state.0.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    *guard = child;
+                } else {
+                    // The venv exists but predates the current
+                    // `requirements-raw.txt` (an app update added a
+                    // package). Install the difference on a background
+                    // thread, which then starts the engine itself — see
+                    // run_dependency_refresh's doc comment.
+                    thread::spawn(move || run_dependency_refresh(app_handle));
+                }
             } else {
                 // No venv yet: bootstrap it on a background thread (see
                 // run_setup_bootstrap's doc comment) and let it spawn the

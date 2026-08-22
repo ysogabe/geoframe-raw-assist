@@ -4,6 +4,8 @@ import type {
   AnalyzeResponse,
   CaptureId,
   DevelopedResult,
+  DriveUploadStartResponse,
+  DriveUploadState,
   ExportItem,
   ExportResponse,
   HealthResponse,
@@ -205,4 +207,16 @@ export async function importToPhotos(batchName: string, album?: string): Promise
   const body: Record<string, unknown> = { batch_name: batchName };
   if (album) body.album = album;
   return (await postJson("/api/import-to-photos", body, "Appleフォトへの登録に失敗しました。")) as ImportToPhotosResponse;
+}
+
+export async function startDriveUpload(batchName: string): Promise<DriveUploadStartResponse> {
+  return (await postJson(
+    "/api/drive-upload",
+    { batch_name: batchName },
+    "Google Drive アップロードを開始できませんでした。",
+  )) as DriveUploadStartResponse;
+}
+
+export async function getDriveUploadState(): Promise<DriveUploadState> {
+  return (await getJson("/api/drive-upload", "Google Drive アップロードの状況を取得できませんでした。")) as DriveUploadState;
 }

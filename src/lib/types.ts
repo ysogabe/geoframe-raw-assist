@@ -351,6 +351,72 @@ export type ImportToPhotosError = {
 export type ImportToPhotosResponse = ImportToPhotosOk | ImportToPhotosError;
 
 // ---------------------------------------------------------------------------
+// POST /api/drive-upload, GET /api/drive-upload
+// ---------------------------------------------------------------------------
+
+export type DriveUploadStartResponse = {
+  status: "started" | "already_running";
+};
+
+/** 進行ステージ。将来値が増えうるので string との union にしてある。 */
+export type DriveUploadStage =
+  | "authenticating"
+  | "waiting_for_consent"
+  | "resolving_folder"
+  | "uploading"
+  | (string & {});
+
+export type DriveUploadProgress = {
+  stage: DriveUploadStage;
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+  skipped: string[];
+};
+
+/** エラー分類。将来値が増えうるので string との union にしてある。 */
+export type DriveUploadErrorKind =
+  | "auth_revoked"
+  | "quota"
+  | "rate_limit"
+  | "dependencies_missing"
+  | "network"
+  | "consent_timeout"
+  | "unknown"
+  | (string & {});
+
+export type DriveUploadIdle = {
+  status: "idle";
+  /** false は local_raw/drive_client_secret.json が未配置・不正な場合。 */
+  configured: boolean;
+};
+
+export type DriveUploadRunning = {
+  status: "running";
+  batch_name: string;
+  progress: DriveUploadProgress;
+};
+
+export type DriveUploadDone = {
+  status: "done";
+  batch_name: string;
+  uploaded: number;
+  total: number;
+  skipped: string[];
+  folder_url: string;
+};
+
+export type DriveUploadError = {
+  status: "error";
+  batch_name: string;
+  error: string;
+  error_kind: DriveUploadErrorKind;
+};
+
+export type DriveUploadState = DriveUploadIdle | DriveUploadRunning | DriveUploadDone | DriveUploadError;
+
+// ---------------------------------------------------------------------------
 // マニフェスト（outputs/export/<batch>/manifest.json、プラン §3）
 // ---------------------------------------------------------------------------
 

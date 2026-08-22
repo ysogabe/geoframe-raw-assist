@@ -29,6 +29,7 @@ import {
   developRaw,
   exportSelection,
   getAnalysis,
+  getDriveUploadState,
   getHealth,
   getSourceFolder,
   importToPhotos,
@@ -37,6 +38,7 @@ import {
   mergeBracket,
   setSourceFolder,
   startAnalyze,
+  startDriveUpload,
 } from "./lib/raw-api";
 import {
   SOURCE_FOLDER_NO_PAIRS,
@@ -187,6 +189,28 @@ export default function Home() {
     const timer = window.setInterval(() => void pollAnalysis(), 1000);
     return () => window.clearInterval(timer);
   }, [state.analysisState, pollAnalysis]);
+
+  // ---- Google Drive アップロード状況の取得と 1 秒ポーリング --------------------
+  const pollDriveUpload = useCallback(async () => {
+    try {
+      const response = await getDriveUploadState();
+      dispatch({ type: "drive/poll", response });
+    } catch {
+      // 接続不能・未起動はポーリングを止めるだけで、ユーザーへは何も出さない。
+      // 解析と違ってこの機能は付随的（書き出しが主目的）なので、無言のフォールバックでよい。
+    }
+  }, []);
+
+  useEffect(() => {
+    if (state.engineStatus !== "ready") return;
+    void pollDriveUpload();
+  }, [state.engineStatus, pollDriveUpload]);
+
+  useEffect(() => {
+    if (state.driveUpload?.status !== "running") return;
+    const timer = window.setInterval(() => void pollDriveUpload(), 1000);
+    return () => window.clearInterval(timer);
+  }, [state.driveUpload?.status, pollDriveUpload]);
 
   // ---- 現像対象フォルダの取得 ----------------------------------------------
   // 解析状況と同じくエンジンが ready になってから取りに行く（コールドスタート中は
@@ -506,6 +530,40 @@ export default function Home() {
     }
   }
 
+  async function runDriveUpload() {
+    if (!isValidBatchName(state.batchName)) return;
+    try {
+      const result = await startDriveUpload(state.batchName);
+      if (result.status === "already_running") {
+        // サーバのジョブ状態は単一スロットなので、already_running は「**別の**バッチが
+        // 走っているせいで開始できなかった」ことがある。ExportPanel はバッチ名の一致
+        // しない状況を描かない（別バッチの進捗を自分の結果として出さないため）ので、
+        // ここで黙ってポーリングに任せると、押しても画面が一切変わらない＝無反応に見える。
+        // 直後の状態を見て、動いているのが本当に別バッチのときだけ理由を伝える
+        // （同じバッチ名を連打しただけなら通常のポーリング表示に任せてよい）。
+        const response = await getDriveUploadState();
+        dispatch({ type: "drive/poll", response });
+        if (response.status === "running" && response.batch_name !== state.batchName) {
+          dispatch({
+            type: "notice/set",
+            message: `別のバッチ（${response.batch_name}）の Google Drive アップロードが実行中です。完了をお待ちください。`,
+            tone: "error",
+          });
+        }
+      } else {
+        // 開始できたら以降はポーリングに任せる。
+        void pollDriveUpload();
+      }
+    } catch (error) {
+      dispatch({
+        type: "drive/start-failed",
+        message: isEndpointUnavailable(error)
+          ? EXPORT_UNAVAILABLE
+          : messageOf(error, "Google Drive アップロードを開始できませんでした。"),
+      });
+    }
+  }
+
   const analysisReady = state.analysisState === "ready" && analysis !== null;
   const bootstrapping =
     setupState !== null &&
@@ -654,6 +712,8 @@ export default function Home() {
             exportResult={state.exportResult}
             importResult={state.importResult}
             albumName={albumName}
+            driveUpload={state.driveUpload}
+            onDriveUpload={() => void runDriveUpload()}
             onBack={returnToSuggestions}
           />
         ) : (
