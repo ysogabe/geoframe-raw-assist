@@ -405,6 +405,25 @@ class ExistingFilenamesTests(DriveUploadTestCase):
         self.assertIn("'folder-1' in parents", query)
         self.assertIn("trashed = false", query)
 
+    def test_a_name_prefix_narrows_the_listing_on_the_drive_side(self):
+        """平置きで `GeoFrame` 直下に全バッチが積み上がるので、絞り込みは Drive 側で行う。
+
+        クライアント側で捨てても列挙件数は減らず、バッチが増えるほど遅くなる。
+        """
+        drive = FakeDrive()
+        drive_upload._existing_filenames(drive, "folder-1", name_prefix=f"{BATCH}-")
+        query = drive.list_calls[0]["q"]
+        self.assertIn(f"name contains '{BATCH}-'", query)
+        # 絞り込みは既存の条件に**足す**もの。親とゴミ箱の条件を落としてはいけない。
+        self.assertIn("'folder-1' in parents", query)
+        self.assertIn("trashed = false", query)
+
+    def test_without_a_prefix_the_listing_is_not_narrowed(self):
+        """既定は絞り込み無し（プレフィックスを持たない用途のために残す）。"""
+        drive = FakeDrive()
+        drive_upload._existing_filenames(drive, "folder-1")
+        self.assertNotIn("name contains", drive.list_calls[0]["q"])
+
 
 class UploadFileTests(DriveUploadTestCase):
     """`_upload_file()` は中身をローカルのパスから、名前を `upload_name` から取る。"""
@@ -603,17 +622,26 @@ class SkipExistingTests(DriveUploadTestCase):
             call["q"] for call in drive.list_calls if "mimeType" not in call["q"]
         ]
         self.assertIn("'created-1' in parents", listing_queries[0])
+        # 一覧は自分のバッチのプレフィックスで絞る。絞らないと `GeoFrame` 直下に
+        # 積み上がった全バッチ分を毎回列挙することになる。
+        self.assertIn(f"name contains '{BATCH}-'", listing_queries[0])
 
     def test_the_prefix_uses_the_normalized_batch_name(self):
         """生の入力ではなく正規化済みの名前だけが Drive へ渡ること。
 
-        以前はこの保証の出口が検索クエリ `q` だったが、今は create の `name` が出口。
-        経路が変わっても「生の `batch_name` は Drive へ届かない」を固定しておく。
+        出口は create の `name` と、一覧の絞り込みに使う検索クエリ `q` の 2 つ。
+        どちらの経路にも「生の `batch_name` は Drive へ届かない」を固定しておく。
         """
         self.make_batch(name="my_trip", files={"DSC00001.JPG": b"jpeg"})
         _, _, drive = self.run_upload(batch_name="my trip")
 
         self.assertEqual([upload["name"] for upload in drive.uploads], ["my_trip-DSC00001.JPG"])
+
+        listing_queries = [
+            call["q"] for call in drive.list_calls if "mimeType" not in call["q"]
+        ]
+        self.assertIn("name contains 'my_trip-'", listing_queries[0])
+        self.assertNotIn("my trip", listing_queries[0], "生の入力が `q` へ漏れてはいけない")
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,9 @@
   なお `GeoFrame` 直下の一覧にはフォルダ名も混ざる（旧版が作ったバッチ名の
   サブフォルダが残っている場合など）が、`26_08_hiuchi` と
   `26_08_hiuchi-DSC04431.JPG` は一致しないので誤スキップにはならない。
+- 平置きの副作用として `GeoFrame` 直下には**全バッチ**のファイルが累積するので、
+  スキップ判定の一覧取得は Drive 側の `name contains '<batch_name>-'` で絞る。
+  絞らないと列挙件数がバッチ数に比例して増え、`resolving_folder` に留まる時間も伸びる。
 - 入力の検証は `ValueError`（→ HTTP 400）。認証・通信の失敗はジョブ状態
   （`GET /api/drive-upload` の `status: "error"` + `error_kind`）で返す。
 - ユーザーへ返すエラー文言は**固定文言のみ**。`HttpError` の生レスポンス本文や
@@ -429,14 +432,25 @@ def _resolve_folder(
     return str(folder_id)
 
 
-def _existing_filenames(service: Any, parent_id: str) -> set[str]:
+def _existing_filenames(service: Any, parent_id: str, name_prefix: str | None = None) -> set[str]:
     """`parent_id` 直下にある（ゴミ箱に入っていない）名前の集合。
 
     mimeType で絞っていないのでフォルダ名も混ざる（旧版が作ったバッチ名の
     サブフォルダなど）。スキップ判定に使う名前は `<batch_name>-<ファイル名>` で、
     フォルダ名（`<batch_name>` のみ）とは一致しないため誤スキップにはならない。
+
+    `name_prefix` を指定すると Drive 側の `name contains '<prefix>'` 条件で絞り込む。
+    平置きにしたことで `parent_id` 直下には全バッチのファイルが累積するため、絞らずに
+    列挙すると件数がバッチ数に比例して増え続ける（`resolving_folder` で止まる時間も
+    伸びる）。呼び出し側は自分のバッチのプレフィックス（`<batch_name>-`）を渡して、
+    そのバッチに関係する名前だけを引く。`contains` は部分一致なので別バッチの名前を
+    巻き込むことがあるが、最終的な一致判定は呼び出し側の完全一致（`in existing`）なので
+    誤スキップにはならない（過剰に拾うだけで安全側に倒れる）。
     """
-    query = f"'{_escape_query_value(parent_id)}' in parents and trashed = false"
+    conditions = [f"'{_escape_query_value(parent_id)}' in parents", "trashed = false"]
+    if name_prefix is not None:
+        conditions.append(f"name contains '{_escape_query_value(name_prefix)}'")
+    query = " and ".join(conditions)
     names: set[str] = set()
     page_token: str | None = None
     while True:
@@ -568,7 +582,9 @@ def _run_upload(progress: Progress, batch_name: str) -> dict[str, Any]:
     # 置き先は `GeoFrame` フォルダ**そのもの**。バッチごとのサブフォルダは作らない
     # （消費側の Drive インデックスが非再帰スキャンなので、入れると認識されない）。
     root_id = _resolve_folder(service, DRIVE_FOLDER_NAME, None, owned_only=True)
-    existing = _existing_filenames(service, root_id)
+    # 一覧は自分のバッチのプレフィックスで絞る。平置きで `GeoFrame` 直下に全バッチが
+    # 積み上がるので、絞らないと列挙件数がバッチ数に比例して増え続ける。
+    existing = _existing_filenames(service, root_id, name_prefix=f"{export_dir.name}-")
 
     progress.set_stage("uploading")
     uploaded = 0
