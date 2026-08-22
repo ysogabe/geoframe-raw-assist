@@ -6,6 +6,7 @@
 - `POST /api/merge-bracket` の `output_url` が `preview` で配信ルートを切り替えること
 - `GET /merged-preview/` が `_serve_from_root()` のパストラバーサル検査を緩めていないこと
 - 同じディレクトリを別々に導出している定数（`server` / `bracket` / `export`）が食い違わないこと
+- `/api/drive-upload` の 2 ハンドラが例外を HTTP へ写す分岐（400 / 500）
 
 `RawAssistHandler` はソケットに紐づくのでインスタンス化せず、ハンドラが実際に呼ぶ
 メソッドだけを持つ `StubRequest` を渡す（ポートは一切使わない）。
@@ -18,6 +19,7 @@ from unittest import mock
 from urllib.parse import urlparse
 
 from local_raw import bracket as bracket_module
+from local_raw import drive_upload as drive_upload_module
 from local_raw import export as export_module
 from local_raw import server as server_module
 from local_raw.server import RawAssistHandler
@@ -225,6 +227,90 @@ class PostOriginTests(unittest.TestCase):
                 request, called = self.post({"Origin": origin})
                 self.assertIsNone(request.status)
                 self.assertEqual(called, ["/api/source-folder"])
+
+
+class DriveUploadHandlerTests(unittest.TestCase):
+    """`/api/drive-upload` の 2 ハンドラ（判断は `drive_upload.py` 側なので分岐だけ見る）。"""
+
+    def post(self, payload: dict | None = None) -> StubRequest:
+        request = StubRequest(payload if payload is not None else {"batch_name": "trip-2026"})
+        server_module.handle_drive_upload(request, urlparse("/api/drive-upload"))
+        return request
+
+    def test_a_started_job_returns_the_status(self):
+        with mock.patch.object(drive_upload_module, "start_drive_upload", return_value="started"):
+            request = self.post()
+        self.assertEqual(request.status, 200)
+        self.assertEqual(request.body, {"status": "started"})
+
+    def test_a_second_request_reports_already_running(self):
+        with mock.patch.object(
+            drive_upload_module, "start_drive_upload", return_value="already_running"
+        ):
+            request = self.post()
+        self.assertEqual(request.status, 200)
+        self.assertEqual(request.body, {"status": "already_running"})
+
+    def test_a_validation_failure_is_a_400(self):
+        with mock.patch.object(
+            drive_upload_module,
+            "start_drive_upload",
+            side_effect=ValueError("書き出し済みのフォルダが見つかりません。"),
+        ):
+            request = self.post()
+        self.assertEqual(request.status, 400)
+        self.assertEqual(request.body, {"error": "書き出し済みのフォルダが見つかりません。"})
+
+    def test_an_unexpected_failure_is_a_500_without_the_detail(self):
+        with mock.patch.object(
+            drive_upload_module, "start_drive_upload", side_effect=RuntimeError("/Users/secret")
+        ):
+            request = self.post()
+        self.assertEqual(request.status, 500)
+        self.assertNotIn("/Users/secret", request.body["error"])
+        self.assertTrue(request.logs, "詳細はサーバログにだけ残すこと")
+
+    def test_a_non_object_body_is_a_400(self):
+        request = StubRequest(payload=["not", "an", "object"])
+        server_module.handle_drive_upload(request, urlparse("/api/drive-upload"))
+        self.assertEqual(request.status, 400)
+
+    def test_the_state_endpoint_passes_the_payload_through(self):
+        state = {
+            "status": "running",
+            "batch_name": "trip-2026",
+            "progress": {
+                "stage": "uploading",
+                "done": 1,
+                "total": 2,
+                "bytes_done": 10,
+                "bytes_total": 20,
+                "skipped": [],
+            },
+        }
+        request = StubRequest()
+        with mock.patch.object(
+            drive_upload_module, "get_drive_upload_state", return_value=state
+        ):
+            server_module.handle_get_drive_upload(request, urlparse("/api/drive-upload"))
+        self.assertEqual(request.status, 200)
+        self.assertEqual(request.body, state)
+
+    def test_a_state_failure_is_a_500(self):
+        request = StubRequest()
+        with mock.patch.object(
+            drive_upload_module, "get_drive_upload_state", side_effect=RuntimeError("boom")
+        ):
+            server_module.handle_get_drive_upload(request, urlparse("/api/drive-upload"))
+        self.assertEqual(request.status, 500)
+
+    def test_the_route_table_wires_both_methods(self):
+        self.assertIs(
+            server_module.GET_EXACT["/api/drive-upload"], server_module.handle_get_drive_upload
+        )
+        self.assertIs(
+            server_module.POST_ROUTES["/api/drive-upload"], server_module.handle_drive_upload
+        )
 
 
 class StaticRootConsistencyTests(unittest.TestCase):

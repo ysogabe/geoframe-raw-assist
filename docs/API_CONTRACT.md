@@ -307,6 +307,39 @@ body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist
 
 `outputs/export/<batch>/` 配下の `*.jpg` のみ対象。`osascript` は**配列形式で呼ぶ**（文字列連結でのスクリプト生成は禁止）。
 
+### `POST /api/drive-upload`
+
+```
+body { batch_name:string }
+→ { status:"started"|"already_running" }
+```
+
+`outputs/export/<batch_name>/` を Google Drive の「GeoFrame」フォルダ配下の同名サブフォルダへ
+アップロードする。OAuth（デスクトップアプリ、`local_raw/drive_client_secret.json`）経由。
+バックグラウンドジョブとして実行し、進捗は `GET /api/drive-upload` でポーリングする。
+
+同名ファイルは既アップロード済みとみなしスキップする（上書きしない。部分失敗からの
+再実行で「まだ無いものだけ」を送るレジューム動作）。
+
+### `GET /api/drive-upload`
+
+```
+→ { status:"idle", configured:boolean }
+ | { status:"running", batch_name:string, progress:{ stage:string, done:number, total:number, bytes_done:number, bytes_total:number, skipped:string[] } }
+ | { status:"done", batch_name:string, uploaded:number, total:number, skipped:string[], folder_url:string }
+ | { status:"error", batch_name:string, error:string, error_kind:string }
+```
+
+`configured:false` は `local_raw/drive_client_secret.json` が未配置・不正な場合。
+`error_kind` は `auth_revoked` / `quota` / `rate_limit` / `dependencies_missing` /
+`network` / `consent_timeout` / `unknown` のいずれか。
+
+`stage` は `authenticating` → （初回・失効時のみ）`waiting_for_consent` →
+`resolving_folder` → `uploading` の順に進む。`progress.done` / `bytes_done` は
+**スキップ分も含む「処理済み」**（含めないと再実行時に進捗バーが 100% に届かない）。
+実際に送った件数は `done` 応答の `uploaded` が持ち、`uploaded + skipped.length == total`。
+`done` / `error` はメモリ上のみ保持し、サーバ再起動で `idle` に戻る。
+
 ### 静的ファイル配信
 
 | ルート | 実体 | 状態 |
@@ -602,6 +635,28 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   （含めないと似た構成の別フォルダで解析キャッシュが流用される）
 - `is_analysis_running() -> bool` — `POST /api/source-folder` の `analysis_running` 判定用
 - 分析ジョブ管理（開始/状態取得）の内部 API は 1-B が自由に設計してよい（server.py も 1-B 所有のため外部契約は §1 の HTTP 契約のみ）
+
+### `local_raw/drive_upload.py`（2026-08-22 追補）
+
+書き出し済みバッチの Google Drive アップロード（OAuth デスクトップアプリ）。
+`server.py` は呼び出し時に import する。
+
+- `CLIENT_SECRET_PATH = PROJECT_ROOT / "local_raw" / "drive_client_secret.json"`（**source control 対象外**）
+- `TOKEN_PATH = PROJECT_ROOT / "outputs" / "drive_auth.json"` — リフレッシュトークン。
+  `os.open(..., O_EXCL, 0o600)` で作成した tmp へ書いてから `os.replace`（`write_text` 後の
+  `chmod` だと一瞬 world-readable な窓が空くため）
+- `SCOPES = ["https://www.googleapis.com/auth/drive"]` / `DRIVE_FOLDER_NAME = "GeoFrame"`
+- `is_drive_configured() -> bool` — §1 の `configured`（client secret が存在し `installed` キーを持つか）
+- `start_drive_upload(batch_name: str) -> str` — `"started"` | `"already_running"`。
+  同期検証（バッチ名・書き出しフォルダの存在・対象0件・client secret）の失敗は `ValueError`（→400）
+- `get_drive_upload_state() -> dict` — §1 の `GET /api/drive-upload` ペイロード
+- `DriveUploadError(kind, message)` — `kind` がそのまま `error_kind` になる
+
+> ⚠️ **google 系ライブラリをモジュールのトップレベルで import しないこと。**
+> 未インストール環境でも `import local_raw.drive_upload` は成功する必要がある
+> （`GET /api/drive-upload` が `configured` を返せるようにするため）。遅延 import は
+> `_google_error_types()` / `_credentials_from_payload()` / `_refresh_credentials()` /
+> `_build_service()` / `_media_file_upload()` / `_run_oauth_consent()` に閉じ込める。
 
 ### 並列作業の約束事
 

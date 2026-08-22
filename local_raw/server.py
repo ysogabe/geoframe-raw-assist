@@ -406,10 +406,43 @@ def handle_import_to_photos(req: RawAssistHandler, parsed: ParseResult) -> None:
         _fail(req, "「写真」への取り込みに失敗しました。", error)
 
 
+def handle_drive_upload(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`POST /api/drive-upload` → `{"status": "started"|"already_running"}`（契約 §1）。
+
+    認証・通信の失敗は 500 ではなくジョブ状態（`GET /api/drive-upload` の
+    `status: "error"`）で返るので、ここが写すのは同期検証の失敗だけになる。
+    """
+    try:
+        from .drive_upload import start_drive_upload
+    except Exception as error:
+        _fail(req, "Google Drive アップロード機能を読み込めません。", error)
+        return
+
+    try:
+        payload = _request_payload(req)
+        status = start_drive_upload(payload.get("batch_name"))
+        req._json(HTTPStatus.OK, {"status": status})
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+    except Exception as error:
+        _fail(req, "Google Drive アップロードの開始に失敗しました。", error)
+
+
+def handle_get_drive_upload(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`GET /api/drive-upload` → ジョブ状態（契約 §1）。"""
+    try:
+        from .drive_upload import get_drive_upload_state
+
+        req._json(HTTPStatus.OK, get_drive_upload_state())
+    except Exception as error:
+        _fail(req, "Google Drive アップロードの状態を取得できません。", error)
+
+
 GET_EXACT: dict[str, Handler] = {
     "/api/health": handle_health,
     "/api/analysis": handle_analysis,
     "/api/source-folder": handle_source_folder,
+    "/api/drive-upload": handle_get_drive_upload,
 }
 
 # Order matters: matched top-to-bottom, mirroring the original if-chain.
@@ -429,6 +462,7 @@ POST_ROUTES: dict[str, Handler] = {
     "/api/analyze": handle_analyze,
     "/api/export": handle_export,
     "/api/import-to-photos": handle_import_to_photos,
+    "/api/drive-upload": handle_drive_upload,
 }
 
 
