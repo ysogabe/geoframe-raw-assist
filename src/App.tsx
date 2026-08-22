@@ -533,10 +533,27 @@ export default function Home() {
   async function runDriveUpload() {
     if (!isValidBatchName(state.batchName)) return;
     try {
-      await startDriveUpload(state.batchName);
-      // 開始できたら以降はポーリングに任せる（started/already_running のどちらでも
-      // 直後に pollDriveUpload を叩けば正しい running 状態が返る）。
-      void pollDriveUpload();
+      const result = await startDriveUpload(state.batchName);
+      if (result.status === "already_running") {
+        // サーバのジョブ状態は単一スロットなので、already_running は「**別の**バッチが
+        // 走っているせいで開始できなかった」ことがある。ExportPanel はバッチ名の一致
+        // しない状況を描かない（別バッチの進捗を自分の結果として出さないため）ので、
+        // ここで黙ってポーリングに任せると、押しても画面が一切変わらない＝無反応に見える。
+        // 直後の状態を見て、動いているのが本当に別バッチのときだけ理由を伝える
+        // （同じバッチ名を連打しただけなら通常のポーリング表示に任せてよい）。
+        const response = await getDriveUploadState();
+        dispatch({ type: "drive/poll", response });
+        if (response.status === "running" && response.batch_name !== state.batchName) {
+          dispatch({
+            type: "notice/set",
+            message: `別のバッチ（${response.batch_name}）の Google Drive アップロードが実行中です。完了をお待ちください。`,
+            tone: "error",
+          });
+        }
+      } else {
+        // 開始できたら以降はポーリングに任せる。
+        void pollDriveUpload();
+      }
     } catch (error) {
       dispatch({
         type: "drive/start-failed",

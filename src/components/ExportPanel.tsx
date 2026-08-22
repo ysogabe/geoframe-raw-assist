@@ -97,17 +97,31 @@ export function ExportPanel({
   const nameValid = isValidBatchName(batchName);
   const canExport = rows.length > 0 && nameValid && !exporting;
 
+  // サーバの Drive ジョブ状態は **プロセス全体で単一スロット**（local_raw/drive_upload.py
+  // のモジュールグローバル）なので、GET /api/drive-upload は今この画面で扱っている
+  // バッチとは無関係なジョブを返しうる。照合せずに描くと、別バッチの進捗・完了件数・
+  // Drive フォルダのリンクをこのバッチの結果として出してしまう。
+  //
+  // running / done / error は batch_name を持つので、一致しないものは「このバッチに
+  // ついては未取得」（= null）と同じ扱いにする。idle は特定のバッチに紐づかない
+  // グローバルな設定状態（configured）なので、バッチ名に関わらずそのまま使う。
+  const driveUploadForBatch =
+    driveUpload === null || driveUpload.status === "idle" || driveUpload.batch_name === batchName
+      ? driveUpload
+      : null;
+
   // Drive アップロードの活性制御。状況が未取得（null）のうちは押せる状態にしておく
   // （エンジンが未対応なら POST 側が失敗してトーストで理由が出る）。
-  const driveUploadRunning = driveUpload?.status === "running";
-  const driveUploadConfigured = driveUpload === null || driveUpload.status !== "idle" || driveUpload.configured;
+  const driveUploadRunning = driveUploadForBatch?.status === "running";
+  const driveUploadConfigured =
+    driveUploadForBatch === null || driveUploadForBatch.status !== "idle" || driveUploadForBatch.configured;
   const driveUploadDisabled = driveUploadRunning || !driveUploadConfigured;
   const driveUploadDisabledReason = driveUploadConfigured
     ? undefined
     : "Google Drive 連携が未設定です。local_raw/drive_client_secret.json を配置してください。";
   const driveUploadButtonLabel =
-    driveUpload?.status === "running"
-      ? `${driveUploadStageLabel(driveUpload.progress.stage)}（${driveUpload.progress.done}/${driveUpload.progress.total}）`
+    driveUploadForBatch?.status === "running"
+      ? `${driveUploadStageLabel(driveUploadForBatch.progress.stage)}（${driveUploadForBatch.progress.done}/${driveUploadForBatch.progress.total}）`
       : "Google Drive にアップロード";
 
   return (
@@ -242,18 +256,18 @@ export function ExportPanel({
                 : importResult.error}
             </p>
           )}
-          {driveUpload?.status === "done" && (
+          {driveUploadForBatch?.status === "done" && (
             <p className="drive-upload-result ok">
-              {driveUpload.uploaded}件を Google Drive にアップロードしました
-              {driveUpload.skipped.length > 0 ? `（${driveUpload.skipped.length}件は既存のためスキップ）` : ""}。
+              {driveUploadForBatch.uploaded}件を Google Drive にアップロードしました
+              {driveUploadForBatch.skipped.length > 0 ? `（${driveUploadForBatch.skipped.length}件は既存のためスキップ）` : ""}。
               {" "}
-              <a href={driveUpload.folder_url} target="_blank" rel="noreferrer">
+              <a href={driveUploadForBatch.folder_url} target="_blank" rel="noreferrer">
                 フォルダを開く
               </a>
             </p>
           )}
-          {driveUpload?.status === "error" && (
-            <p className="drive-upload-result error">{driveUpload.error}</p>
+          {driveUploadForBatch?.status === "error" && (
+            <p className="drive-upload-result error">{driveUploadForBatch.error}</p>
           )}
         </div>
       )}

@@ -727,13 +727,20 @@ export function reducer(state: State, action: Action): State {
       return { ...state, mergeMode: null, mergingGroupId: null, notice: action.message, noticeTone: "error" };
 
     case "export/batchName":
-      // バッチ名が変わったら、前のバッチについての結果表示は意味を失う。Drive
-      // アップロードの結果も同じ規則で落とす（サーバ側の状態は消さないが、
-      // 別バッチの「63件アップロードしました」を出したままにはしない）。
-      return { ...state, batchName: action.value, exportResult: null, importResult: null, driveUpload: null };
+      // バッチ名が変わったら、前のバッチについての結果表示は意味を失う。
+      //
+      // ただし **driveUpload は落とさない**。サーバのジョブ状態はプロセス全体で単一
+      // スロットであり、この state はそこを写しているだけなので、null にすると
+      // 「running の間だけ回る」ポーリング（App.tsx）が止まり、実行中のアップロードが
+      // 画面から消えて二度と戻らない。別バッチの「63件アップロードしました」を出さない
+      // ための絞り込みは、ExportPanel 側の batch_name 照合が受け持つ。
+      return { ...state, batchName: action.value, exportResult: null, importResult: null };
 
     case "export/start":
-      return { ...state, exporting: true, exportResult: null, importResult: null, driveUpload: null };
+      // exportResult / importResult と違い driveUpload は落とさない（理由は
+      // export/batchName のコメント: サーバ側で走り続けるジョブの写しなので、
+      // ここで消すとポーリングごと止まる）。
+      return { ...state, exporting: true, exportResult: null, importResult: null };
 
     case "export/ok": {
       // 採用したのに成果物が引けなかった行は送っていない。黙って減らすと「採用3件の
