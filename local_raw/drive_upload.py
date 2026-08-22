@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 import traceback
 import uuid
@@ -51,6 +52,12 @@ FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 #: 決定的な選択（最古を採用）に必要なので明示する。
 FILE_FIELDS = "nextPageToken, files(id, name, createdTime)"
 LIST_PAGE_SIZE = 1000
+
+#: 容量不足を表す reason code。403 で返る（ステータスだけでは権限不足と区別できない）。
+STORAGE_QUOTA_REASON_CODE = "storageQuotaExceeded"
+#: スロットリングを表す reason code。Drive はこれを **403** で返すので、
+#: 429 と同じ「混雑しています」に寄せるにはステータスではなく code を見る必要がある。
+RATE_LIMIT_REASON_CODES = frozenset({"userRateLimitExceeded", "rateLimitExceeded"})
 
 # --- ユーザー向け固定文言 ---------------------------------------------------
 CLIENT_SECRET_MISSING_MESSAGE = (
@@ -182,7 +189,12 @@ def _google_error_types() -> dict[str, type[BaseException] | None]:
     ライブラリ未インストールでも `_classify_error()` が動く必要があるので、
     isinstance 判定の相手をここでまとめて解決し、`None` の分は判定を飛ばす。
     """
-    resolved: dict[str, type[BaseException] | None] = {"refresh_error": None, "http_error": None}
+    resolved: dict[str, type[BaseException] | None] = {
+        "refresh_error": None,
+        "http_error": None,
+        "transport_error": None,
+        "server_not_found": None,
+    }
     try:
         from google.auth.exceptions import RefreshError
 
@@ -193,6 +205,22 @@ def _google_error_types() -> dict[str, type[BaseException] | None]:
         from googleapiclient.errors import HttpError
 
         resolved["http_error"] = HttpError
+    except Exception:
+        pass
+    try:
+        from google.auth.exceptions import TransportError
+
+        resolved["transport_error"] = TransportError
+    except Exception:
+        pass
+    try:
+        # httplib2 は googleapiclient の HTTP トランスポート。名前解決に失敗すると
+        # `ServerNotFoundError` を投げるが、これは `HttpLib2Error` → `Exception` 派生で
+        # **`OSError` ではない**。下の `socket.gaierror` 判定には引っかからないので、
+        # ここで別立てに解決しておく。
+        from httplib2 import ServerNotFoundError
+
+        resolved["server_not_found"] = ServerNotFoundError
     except Exception:
         pass
     return resolved
@@ -336,11 +364,13 @@ def _resolve_folder(
     実行のたびに違うフォルダへ入れてしまうと、スキップ判定（同名ファイルは
     アップロード済み）が成立しなくなるため、選択は決定的でなければならない。
 
-    `owned_only=True` は検索を自分が所有するファイルに限定する（`'me' in owners`）。
-    ルートの `GeoFrame` フォルダ解決に使う: 指定しないと、他人が自分と**共有**している
-    同名フォルダを拾ってしまいうる（共有フォルダは自分の Drive のトップレベルにも
-    並んで見えるため、`parent_id=None` の検索に紛れ込む）。作成は常に自分の
-    My Drive 直下（`parents` 省略）に行われるので、検索側だけ絞らないと
+    `owned_only=True` は検索を **自分所有 かつ My Drive 直下** に限定する
+    （`'me' in owners` と `'root' in parents`）。ルートの `GeoFrame` フォルダ解決に使う。
+    `'me' in owners` だけだと、他人が自分と**共有**している同名フォルダを拾ってしまいうる
+    （共有フォルダは自分の Drive のトップレベルにも並んで見えるため、`parent_id=None` の
+    検索に紛れ込む）。`'root' in parents` も要るのは、所有者を絞っても Drive の
+    **任意の階層**にある自分所有の同名フォルダが依然として一致するため。作成は常に自分の
+    My Drive 直下（`parents` 省略）に行われるので、検索側を同じ場所に揃えないと
     「作成時と検索時で別のフォルダを指す」自己矛盾が起きうる。
     サブフォルダ解決（`parent_id` 指定）には**適用しない**: 共有ドライブ配下の
     サブフォルダは所有者が自分でないことがあり、絞ると正しい検索が壊れる。
@@ -354,6 +384,10 @@ def _resolve_folder(
         conditions.append(f"'{_escape_query_value(parent_id)}' in parents")
     if owned_only:
         conditions.append("'me' in owners")
+        # 所有者だけでは足りない: My Drive の**任意の階層**にある自分所有の同名フォルダを
+        # 拾いうる。作成は必ず My Drive 直下（`parents` 省略）なので、検索も直下に
+        # 揃えないと「昔どこかに作った同名フォルダへ黙って積む」ことになる。
+        conditions.append("'root' in parents")
 
     response = (
         service.files()
@@ -559,9 +593,31 @@ def _http_status(error: BaseException) -> int | None:
     return None
 
 
-def _http_reason(error: BaseException) -> str:
-    reason = getattr(error, "reason", None)
-    return reason if isinstance(reason, str) else ""
+def _http_reason_codes(error: BaseException) -> set[str]:
+    """`HttpError` からマシン可読な reason code を集める。読めなければ空集合。
+
+    ⚠️ `HttpError.reason` は**使えない**。あれはレスポンス本文の
+    `error.message`（人間向け文言。ローカライズもされうる）であって、
+    `storageQuotaExceeded` のようなコードは入らない。コードが載るのは
+    `HttpError.error_details` の側で、Drive v3 の 403 では本文の `error.errors[]` が
+    そのまま入り `[{"domain": ..., "reason": "storageQuotaExceeded", ...}, ...]` になる。
+
+    `error_details` は本文の形しだいで list にも str にも `""` にもなるので、
+    list の dict 要素の `reason` だけを拾う。**str 形の中身は走査しない**:
+    そちらは人間向け文言であり、部分一致を許すと「権限不足の 403」を
+    容量不足と誤診する。
+    """
+    details = getattr(error, "error_details", None)
+    if not isinstance(details, list):
+        return set()
+    codes: set[str] = set()
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason:
+            codes.add(reason)
+    return codes
 
 
 def _classify_error(error: Exception) -> tuple[str, str]:
@@ -588,8 +644,14 @@ def _classify_error(error: Exception) -> tuple[str, str]:
         if status == 401:
             _invalidate_token()
             return "auth_revoked", AUTH_REVOKED_MESSAGE
-        if status == 403 and "storageQuotaExceeded" in _http_reason(error):
-            return "quota", QUOTA_MESSAGE
+        if status == 403:
+            # 403 は容量不足・スロットリング・権限不足が同居する。ステータスでは
+            # 割れないので reason code で分ける（`reason` は人間向け文言なので不可）。
+            codes = _http_reason_codes(error)
+            if STORAGE_QUOTA_REASON_CODE in codes:
+                return "quota", QUOTA_MESSAGE
+            if codes & RATE_LIMIT_REASON_CODES:
+                return "rate_limit", RATE_LIMIT_MESSAGE
         if status == 429 or (status is not None and 500 <= status < 600):
             return "rate_limit", RATE_LIMIT_MESSAGE
         traceback.print_exc()
@@ -597,10 +659,31 @@ def _classify_error(error: Exception) -> tuple[str, str]:
 
     if isinstance(error, ModuleNotFoundError):
         return "dependencies_missing", DEPENDENCIES_MISSING_MESSAGE
-    # ConnectionError は OSError の派生だが、意図を残すため両方並べる。
-    if isinstance(error, (OSError, ConnectionError)):
+
+    # --- ここから通信失敗の判定 ---------------------------------------------
+    # 「`OSError` なら network」で一括りにしてはいけない。`OSError` はローカル I/O
+    # 失敗（フォルダ消失・ディスク書込失敗）でも上がるので、それを「ネットワークに
+    # 接続できませんでした」と案内すると原因究明を誤らせる。逆に本物の通信障害には
+    # `OSError` 派生でないものがある。実際のクラスを名指しで並べる。
+    transport_error = error_types.get("transport_error")
+    if transport_error is not None and isinstance(error, transport_error):
+        # google-auth の通信失敗（トークン更新時など）。`GoogleAuthError` →
+        # `Exception` 派生で `OSError` ではないため、名指ししないと届かない。
         return "network", NETWORK_MESSAGE
 
+    server_not_found = error_types.get("server_not_found")
+    if server_not_found is not None and isinstance(error, server_not_found):
+        # httplib2 の名前解決失敗。`HttpLib2Error` → `Exception` 派生で `OSError`
+        # ではないので、下の `socket.gaierror` では拾えない。
+        return "network", NETWORK_MESSAGE
+
+    # `TimeoutError` は `OSError` 派生だが `ConnectionError` 派生では**ない**
+    # （3.10+ では `socket.timeout` のエイリアス）。名指ししないと、アップロード中の
+    # 接続タイムアウトが下の `unknown` へ落ちてしまう。
+    if isinstance(error, (ConnectionError, TimeoutError, socket.gaierror, socket.herror)):
+        return "network", NETWORK_MESSAGE
+
+    # 残った `OSError` はローカル I/O 失敗とみなし、`unknown` としてログに残す。
     traceback.print_exc()
     return "unknown", UNKNOWN_MESSAGE
 

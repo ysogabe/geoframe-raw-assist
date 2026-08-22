@@ -16,6 +16,7 @@ import importlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -48,18 +49,51 @@ class StubRefreshError(Exception):
     """`google.auth.exceptions.RefreshError` の代役。"""
 
 
+class StubTransportError(Exception):
+    """`google.auth.exceptions.TransportError` の代役。
+
+    本物の MRO は `TransportError` → `GoogleAuthError` → `Exception`（確認済み）。
+    **`OSError` 派生ではない**ので、代役も `Exception` から直に派生させる。
+    ここを `OSError` 派生にすると「`OSError` は全部 network」な実装でも緑になり、
+    本物の通信障害が `unknown` へ落ちる回帰を捕まえられなくなる。
+    """
+
+
+class StubServerNotFoundError(Exception):
+    """`httplib2.ServerNotFoundError`（DNS 失敗）の代役。
+
+    本物の MRO は `ServerNotFoundError` → `HttpLib2Error` → `Exception`（確認済み）。
+    こちらも `OSError` でも `socket.gaierror` でもない。
+    """
+
+
 class StubHttpError(Exception):
     """`googleapiclient.errors.HttpError` の代役。
 
-    本物と同じく `resp.status` / `status_code` / `reason` を持たせる
+    本物と同じく `resp.status` / `status_code` / `reason` / `error_details` を持たせる
     （`_http_status()` が両方の経路を辿れることを確かめるため）。
+
+    ⚠️ **`reason` と `error_details` の役割を本物と揃えること。** 本物の
+    `reason` はレスポンス本文の `error.message`、つまり**人間向け文言**であって、
+    `storageQuotaExceeded` のようなマシン可読コードは入らない。コードが入るのは
+    `error_details` の側で、Drive v3 の 403 では本文の `error.errors[]` が
+    そのまま `[{"domain": ..., "reason": "storageQuotaExceeded", ...}, ...]` という
+    **dict の list** として載る（google-api-python-client 2.199.0 の
+    `HttpError._get_reason()` で確認済み）。ここを取り違えて `reason` にコードを
+    置くと、本番では絶対に発火しない分類がテストでだけ緑になる。
+
+    `codes` は `error_details` へ載せる reason code、`reason` は人間向け文言。
+    `codes` を渡さないときの `error_details` は本物の初期値と同じ `""`（空文字）。
     """
 
-    def __init__(self, status, reason=""):
+    def __init__(self, status, reason="", codes=None):
         super().__init__(f"stub http error {status}")
         self.resp = types.SimpleNamespace(status=status)
         self.status_code = status
         self.reason = reason
+        self.error_details = (
+            [{"domain": "global", "reason": code} for code in codes] if codes is not None else ""
+        )
 
 
 class FakeCredentials:
@@ -326,6 +360,17 @@ class ResolveFolderTests(DriveUploadTestCase):
         drive_upload._resolve_folder(drive, "GeoFrame", None, owned_only=True)
         self.assertIn("'me' in owners", drive.list_calls[0]["q"])
 
+    def test_owned_only_also_scopes_the_search_to_my_drive_root(self):
+        """`'me' in owners` だけでは足りない。
+
+        所有者を絞っても、Drive の**任意の階層**にある自分所有の同名フォルダが一致しうる。
+        作成は必ず My Drive 直下（`parents` 省略）なので、検索も直下へ揃えないと、
+        ユーザーが昔どこか別の場所に作った `GeoFrame` へ黙って積むことになる。
+        """
+        drive = FakeDrive()
+        drive_upload._resolve_folder(drive, "GeoFrame", None, owned_only=True)
+        self.assertIn("'root' in parents", drive.list_calls[0]["q"])
+
     def test_owned_only_defaults_to_off_for_child_folder_lookups(self):
         """サブフォルダ解決には適用しない: 共有ドライブ配下では所有者が自分でないことがある。"""
         drive = FakeDrive()
@@ -422,7 +467,10 @@ class SkipExistingTests(DriveUploadTestCase):
 
         folder_queries = [call["q"] for call in drive.list_calls if "mimeType" in call["q"]]
         self.assertIn("name = 'GeoFrame'", folder_queries[0])
-        self.assertNotIn("in parents", folder_queries[0])
+        # ルート検索の親は My Drive 直下（`'root'`）に固定。**具体的なフォルダIDでは
+        # 絞らない**こと（`GeoFrame` は誰かの配下ではなくトップに作る）。
+        self.assertIn("'root' in parents", folder_queries[0])
+        self.assertNotIn("created-", folder_queries[0])
         self.assertIn(f"name = '{BATCH}'", folder_queries[1])
         self.assertIn("'created-1' in parents", folder_queries[1])
 
@@ -437,6 +485,9 @@ class SkipExistingTests(DriveUploadTestCase):
 
         folder_queries = [call["q"] for call in drive.list_calls if "mimeType" in call["q"]]
         self.assertIn("'me' in owners", folder_queries[0], "ルート検索は自分の所有物に絞ること")
+        self.assertIn(
+            "'root' in parents", folder_queries[0], "ルート検索は My Drive 直下に絞ること"
+        )
         self.assertNotIn("owners", folder_queries[1], "サブフォルダ検索までは絞らないこと")
 
     def test_the_subfolder_uses_the_normalized_batch_name(self):
@@ -972,10 +1023,60 @@ class ClassifyErrorTests(DriveUploadTestCase):
         self.assertFalse(self.token_path.exists())
 
     def test_a_storage_quota_403_is_quota(self):
+        """コードは `error_details` 側（本物と同じ場所）から読むこと。"""
         self.assertEqual(
-            self.classify(StubHttpError(403, reason="storageQuotaExceeded")),
+            self.classify(
+                StubHttpError(
+                    403,
+                    reason="The user's Drive storage quota has been exceeded.",
+                    codes=["storageQuotaExceeded"],
+                )
+            ),
             ("quota", drive_upload.QUOTA_MESSAGE),
         )
+
+    def test_a_403_is_not_quota_when_only_the_human_reason_mentions_it(self):
+        """⚠️ この回帰そのものを止めるテスト。
+
+        本物の `HttpError.reason` は `error.message`（人間向け文言）で、
+        `storageQuotaExceeded` のようなコードは入らない。`reason` を部分一致で見る
+        実装は、テストのフェイクが本物と違う場所にコードを置いていれば緑になるが、
+        本番では**絶対に発火しない**。逆向き（`reason` にだけコードらしき文字列が
+        あり `error_details` には無い）を unknown に落とすことで、`reason` への
+        部分一致フォールバックが後から戻ってきたら落ちるようにする。
+        """
+        self.assertEqual(
+            self.classify(StubHttpError(403, reason="storageQuotaExceeded")),
+            ("unknown", drive_upload.UNKNOWN_MESSAGE),
+        )
+
+    def test_a_403_throttling_code_is_rate_limit(self):
+        """Drive のスロットリングは 429 ではなく **403** で返る。429 と同じ案内に寄せる。"""
+        for code in ("userRateLimitExceeded", "rateLimitExceeded"):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    self.classify(
+                        StubHttpError(403, reason="User Rate Limit Exceeded", codes=[code])
+                    ),
+                    ("rate_limit", drive_upload.RATE_LIMIT_MESSAGE),
+                )
+
+    def test_reason_codes_survive_the_other_error_details_shapes(self):
+        """`error_details` は本文しだいで str にも「余計な要素混じりの list」にもなる。
+
+        str 形は**走査しない**こと（人間向け文言なので部分一致は誤診の元）。
+        """
+        as_string = StubHttpError(403)
+        as_string.error_details = "The user's storageQuotaExceeded quota"
+        self.assertEqual(self.classify(as_string), ("unknown", drive_upload.UNKNOWN_MESSAGE))
+
+        mixed = StubHttpError(403)
+        mixed.error_details = [
+            "not-a-dict",
+            {"domain": "usageLimits"},  # `reason` 欠け
+            {"reason": "rateLimitExceeded"},
+        ]
+        self.assertEqual(self.classify(mixed), ("rate_limit", drive_upload.RATE_LIMIT_MESSAGE))
 
     def test_429_and_5xx_are_rate_limit(self):
         for status in (429, 500, 502, 503):
@@ -992,11 +1093,101 @@ class ClassifyErrorTests(DriveUploadTestCase):
         )
 
     def test_network_failures_are_reported_as_network(self):
-        for error in (ConnectionError("refused"), OSError("unreachable"), TimeoutError("slow")):
+        """通信障害として名指ししたクラスが確かに `network` へ落ちること。
+
+        ⚠️ `TimeoutError` を落とさないこと。3.10+ ではこれが `socket.timeout` の
+        エイリアスで、`OSError` 派生だが **`ConnectionError` 派生ではない**。
+        `ConnectionError` だけを見る実装だとアップロード中の接続タイムアウトが
+        `unknown` に落ちる（「`OSError` は全部 network」だった頃より後退する）。
+        """
+        errors = (
+            ConnectionError("refused"),
+            ConnectionResetError("reset by peer"),
+            TimeoutError("slow"),
+            socket.gaierror("name resolution failed"),
+            socket.herror("host lookup failed"),
+        )
+        for error in errors:
             with self.subTest(error=type(error).__name__):
                 self.assertEqual(
                     self.classify(error), ("network", drive_upload.NETWORK_MESSAGE)
                 )
+
+    def test_timeout_error_is_not_a_connection_error_subclass(self):
+        """上のテストが `TimeoutError` を個別に挙げている理由を、前提ごと固定する。
+
+        この前提が崩れた（= `ConnectionError` に含まれるようになった）なら、
+        実装の名指しは冗長になる。崩れていない限り外してはいけない。
+        """
+        self.assertTrue(issubclass(TimeoutError, OSError))
+        self.assertFalse(issubclass(TimeoutError, ConnectionError))
+
+    def test_local_io_failures_are_not_reported_as_network(self):
+        """ローカル I/O 失敗（フォルダ消失・書込失敗）は `OSError` でも `network` ではない。
+
+        「ネットワークに接続できませんでした」と案内すると原因究明を誤らせる。
+        `unknown` へ寄せ、詳細はサーバログにだけ残す。
+        """
+        for error in (
+            FileNotFoundError("no such export folder"),
+            PermissionError("read-only volume"),
+            IsADirectoryError("expected a file"),
+            OSError("No space left on device"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.print_exc.reset_mock()
+                self.assertEqual(
+                    self.classify(error), ("unknown", drive_upload.UNKNOWN_MESSAGE)
+                )
+                self.assertTrue(
+                    self.print_exc.called, "分類できない例外はサーバログへ残すこと"
+                )
+
+    def test_transport_failures_that_are_not_os_errors_are_network(self):
+        """`OSError` 派生でない本物の通信障害まで届くこと。
+
+        `google.auth.exceptions.TransportError` は `GoogleAuthError` → `Exception` 派生、
+        `httplib2.ServerNotFoundError`（DNS 失敗）は `HttpLib2Error` → `Exception` 派生で、
+        どちらも `OSError` でも `socket.gaierror` でもない。名指ししないと `unknown` に落ちる。
+        """
+        with mock.patch.object(
+            drive_upload,
+            "_google_error_types",
+            return_value={
+                "refresh_error": StubRefreshError,
+                "http_error": StubHttpError,
+                "transport_error": StubTransportError,
+                "server_not_found": StubServerNotFoundError,
+            },
+        ):
+            for error in (
+                StubTransportError("connection failed"),
+                StubServerNotFoundError("Unable to find the server at www.googleapis.com"),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    self.assertEqual(
+                        self.classify(error), ("network", drive_upload.NETWORK_MESSAGE)
+                    )
+
+    def test_transport_classes_that_cannot_be_resolved_are_skipped(self):
+        """引けなかったクラス（`None`）で isinstance を呼ばず、無関係な例外も誤分類しないこと。"""
+        with mock.patch.object(
+            drive_upload,
+            "_google_error_types",
+            return_value={
+                "refresh_error": None,
+                "http_error": None,
+                "transport_error": None,
+                "server_not_found": None,
+            },
+        ):
+            self.assertEqual(
+                self.classify(ConnectionError("refused")),
+                ("network", drive_upload.NETWORK_MESSAGE),
+            )
+            self.assertEqual(
+                self.classify(RuntimeError("boom")), ("unknown", drive_upload.UNKNOWN_MESSAGE)
+            )
 
     def test_a_drive_upload_error_keeps_its_own_kind_and_message(self):
         self.assertEqual(
@@ -1029,12 +1220,17 @@ class ClassifyErrorTests(DriveUploadTestCase):
 
     def test_a_403_for_another_reason_is_not_reported_as_a_full_disk(self):
         """403 は権限不足でも出る。理由を見ずに quota と言うと案内が嘘になる。"""
-        for reason in ("insufficientFilePermissions", "appNotAuthorizedToFile", ""):
-            with self.subTest(reason=reason):
+        for code in ("insufficientFilePermissions", "appNotAuthorizedToFile"):
+            with self.subTest(code=code):
                 self.assertEqual(
-                    self.classify(StubHttpError(403, reason=reason)),
+                    self.classify(StubHttpError(403, codes=[code])),
                     ("unknown", drive_upload.UNKNOWN_MESSAGE),
                 )
+        self.assertEqual(
+            self.classify(StubHttpError(403)),
+            ("unknown", drive_upload.UNKNOWN_MESSAGE),
+            "コードがまったく読めない 403 も quota と決めつけないこと",
+        )
 
     def test_the_message_never_leaks_the_raw_response(self):
         """`HttpError.__str__` は要求URIとレスポンス本文を含む。文言へ混ぜないこと。
@@ -1175,6 +1371,10 @@ class ImportWithoutGoogleLibrariesTest(unittest.TestCase):
         "googleapiclient.discovery",
         "googleapiclient.errors",
         "googleapiclient.http",
+        # httplib2 は google 系ではないが `_google_error_types()` が引く先の一つ。
+        # 塞がないと「実行環境に httplib2 が入っているか」で下の assert が揺れる。
+        "httplib2",
+        "httplib2.error",
     )
 
     MODULE_NAME = "local_raw.drive_upload"
@@ -1201,7 +1401,13 @@ class ImportWithoutGoogleLibrariesTest(unittest.TestCase):
 
             # 遅延 import はすべて失敗するが、例外分類は動くこと。
             self.assertEqual(
-                module._google_error_types(), {"refresh_error": None, "http_error": None}
+                module._google_error_types(),
+                {
+                    "refresh_error": None,
+                    "http_error": None,
+                    "transport_error": None,
+                    "server_not_found": None,
+                },
             )
             with mock.patch.object(
                 module, "CLIENT_SECRET_PATH", Path("/nonexistent/drive_client_secret.json")
