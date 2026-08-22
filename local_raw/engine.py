@@ -49,7 +49,11 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: （lensfunpy の pixel_format を実バッファの dtype に合わせた。local_raw/lens.py 参照）。
 #: 修正前は補正が効くレンズで画像左端およそ25%が白飛びの帯になっており、その壊れた
 #: JPEG がキャッシュに残っている。版を上げて既存の現像キャッシュを無効化する。
-ENGINE_VERSION = 3
+#:
+#: ENGINE_VERSION 4: レンズ歪曲補正に autoscale（ModifyFlags.SCALE）を追加し黒縁を除去。
+#: 出力が変わるため版を上げ、黒縁付きの現像・ブラケット合成キャッシュを無効化する
+#: （ENGINE_VERSION は両経路のキャッシュキーに入っている）。
+ENGINE_VERSION = 4
 RECIPE_VERSION = 2
 
 DEFAULT_MAX_EDGE = 6000

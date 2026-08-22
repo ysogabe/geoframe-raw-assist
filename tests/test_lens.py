@@ -32,10 +32,10 @@ BUNDLED_VIGNETTING_EXIF = {
 #: 正しい pixel_format での実測最大ゲインは ILCE-6400 で
 #:   Sigma 30mm f/1.4 @f/1.4        → 2.09（四隅）
 #:   Sony E 55-210mm @55mm f/4.5    → 2.35（四隅）
-#: 歪曲補正の Lanczos 再標本化が画像外の黒を巻き込む縁でリンギングが乗るため、
-#: apply_lens_correction 通過後の全画素最大は 2.75 まで上がる。他レンズの余地を
-#: 見て 4.0 を上限とした。pixel_format 取り違え時は 1e24 オーダーまで飛ぶので、
-#: この閾値なら正常値は通し異常値は必ず落ちる。
+#: 歪曲補正は autoscale + BORDER_REPLICATE で縁の汚染が無いため、
+#: apply_lens_correction 通過後の全画素最大もビネットの実測値と同じ 2.35 に留まる
+#: （実測 2.348）。他レンズの余地を見て 4.0 を上限とした。pixel_format 取り違え時は
+#: 1e24 オーダーまで飛ぶので、この閾値なら正常値は通し異常値は必ず落ちる。
 MAX_PLAUSIBLE_VIGNETTING_GAIN = 4.0
 
 #: 補正が実際に効いていることの下限。ゲインが恒等（全画素 1.0）だと有限・有界・
@@ -207,6 +207,7 @@ class DatabaseRobustnessTests(unittest.TestCase):
 class _FakeModifyFlags:
     VIGNETTING = 1
     DISTORTION = 2
+    SCALE = 4
 
 
 class _NonFiniteModifier:
@@ -237,8 +238,14 @@ def _fake_lensfunpy(modifier_cls):
     return types.SimpleNamespace(Modifier=modifier_cls, ModifyFlags=_FakeModifyFlags)
 
 
-def _applicable_stub_resolution():
-    """Modifier を差し替える前提の、最低限埋めた LensResolution。"""
+def _applicable_stub_resolution(lens_obj=None):
+    """Modifier を差し替える前提の、最低限埋めた LensResolution。
+
+    既定の lens は「歪曲較正あり」の体（calib_distortion が非空）にして、
+    apply_lens_correction が apply_geometry_distortion() まで到達するようにする。
+    """
+    if lens_obj is None:
+        lens_obj = types.SimpleNamespace(calib_distortion=[object()])
     return LensResolution(
         applicable=True,
         lens_model="Fake Lens",
@@ -246,8 +253,32 @@ def _applicable_stub_resolution():
         focal_length=55.0,
         aperture=4.5,
         camera=types.SimpleNamespace(crop_factor=1.5),
-        lens=object(),
+        lens=lens_obj,
     )
+
+
+def _identity_map(height: int, width: int) -> np.ndarray:
+    """cv2.remap 用の恒等座標マップ (H, W, 2)。meshgrid は x（列）→ y（行）の順。"""
+    return np.dstack(
+        np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    )
+
+
+def _uniform_gain_probe(test: unittest.TestCase, exif: dict):
+    """一様塗り画像に補正をかけ、(実効ゲイン配列, correction) を返す。
+
+    GAIN_PROBE_FILL は最大ゲインがかかっても 1.0 に飽和しない値なので、
+    クリップではなくゲインそのものを測れる。レンズが解決できない環境では skipTest。
+    """
+    resolution = probe_lens(exif)
+    if not resolution.applicable:
+        test.skipTest(f"レンズ未解決のためスキップ: {resolution.reason}")
+
+    rgb = np.full((400, 600, 3), GAIN_PROBE_FILL, dtype=np.uint16)
+    corrected, correction = apply_lens_correction(rgb, resolution)
+    test.assertTrue(correction["applied"], correction)
+    gain = corrected[:, :, 0].astype(np.float64) / GAIN_PROBE_FILL
+    return gain, correction
 
 
 @unittest.skipUnless(lensfunpy_available, "lensfunpy 未導入")
@@ -262,15 +293,8 @@ class VignettingGainTests(unittest.TestCase):
 
     def _effective_gain(self, exif):
         """一様配列に補正をかけ、(実効ゲイン配列, correction) を返す。"""
-        resolution = probe_lens(exif)
-        if not resolution.applicable:
-            self.skipTest(f"レンズ未解決のためスキップ: {resolution.reason}")
-
-        rgb = np.full((400, 600, 3), GAIN_PROBE_FILL, dtype=np.uint16)
-        corrected, correction = apply_lens_correction(rgb, resolution)
-        self.assertTrue(correction["applied"], correction)
+        gain, correction = _uniform_gain_probe(self, exif)
         self.assertIn("vignetting", correction["flags"], correction)
-        gain = corrected[:, :, 0].astype(np.float64) / GAIN_PROBE_FILL
         return gain, correction
 
     def test_gain_is_finite_everywhere(self):
@@ -290,8 +314,9 @@ class VignettingGainTests(unittest.TestCase):
     def test_gain_is_left_right_symmetric(self):
         """本バグは左25%だけを壊すので、左右対称性がそのまま検出器になる。
 
-        画像の両端そのものは歪曲補正の再標本化が画像外を参照して落ち込むため、
-        1/8 だけ内側の列で比べる（壊れた帯＝左25%の内側なので診断力は落ちない）。
+        比較列は 1/8 だけ内側を使う（壊れた帯＝左25%の内側なので診断力は落ちない）。
+        かつては画像端が歪曲補正の画像外参照で落ち込むための回避でもあったが、
+        autoscale 導入で落ち込み自体は消えている。
         """
         gain, _ = self._effective_gain(BUNDLED_VIGNETTING_EXIF)
         height, width = gain.shape
@@ -302,6 +327,97 @@ class VignettingGainTests(unittest.TestCase):
 
         row = gain[height // 2]
         self.assertAlmostEqual(float(row[inset]), float(row[width - 1 - inset]), places=3)
+
+
+@unittest.skipUnless(lensfunpy_available, "lensfunpy 未導入")
+@unittest.skipUnless(cv2_available, "OpenCV 未導入")
+class DistortionBlackBorderTests(unittest.TestCase):
+    """歪曲補正後に縁のアーティファクトが残らないこと。2 つの回帰を検出する。
+
+    - ModifyFlags.SCALE の欠落: autoscale が実行されず、糸巻き型歪曲（望遠側）の
+      remap が入力フレーム外を参照して縁が黒で埋まる（実測: Sony E 55-210mm @80mm で
+      最大 65.8px のはみ出し・画素の約 2% が黒縁。本テストの @55mm でも四隅 gain が
+      0.0 に落ちる）。
+    - remap の BORDER_CONSTANT: autoscale 済みでもマップ端は実質ソース境界上に乗る
+      ため、Lanczos カーネルの足がフレーム外の黒を跨ぎ、縁数 px に明縁/暗帯が残る
+      （実測: 55-210mm で四隅 +24%、Sigma 10-18mm で 0.952〜1.126）。
+      BORDER_REPLICATE で消える（local_raw/lens.py の remap 呼び出しのコメント参照）。
+    """
+
+    def test_pincushion_lens_has_clean_edges(self):
+        gain, correction = _uniform_gain_probe(self, BUNDLED_VIGNETTING_EXIF)
+        self.assertIn("distortion", correction["flags"], correction)
+
+        # 下限: 黒縁（gain≈0）も BORDER_CONSTANT の暗帯もここで落ちる。
+        lo = np.unravel_index(int(gain.argmin()), gain.shape)
+        self.assertGreaterEqual(
+            float(gain.min()), 0.98, f"最暗画素 {lo} = {float(gain.min()):.4f}"
+        )
+        # 上限: ビネット真値（四隅 2.353）+ 余裕。BORDER_CONSTANT の明縁
+        # （実測 2.910）を検出する。
+        hi = np.unravel_index(int(gain.argmax()), gain.shape)
+        self.assertLessEqual(
+            float(gain.max()), 2.6, f"最明画素 {hi} = {float(gain.max()):.4f}"
+        )
+
+    def test_barrel_lens_gain_is_unity(self):
+        """樽型（Sigma 10-18mm、distortion 較正のみ）は一様塗りのゲインが 1.0 のまま。
+
+        ビネット補正が無いレンズなので、縁のアーティファクトは 1.0 からのずれとして
+        そのまま現れる（BORDER_CONSTANT 時の実測: min 0.952 / max 1.126）。
+        """
+        gain, correction = _uniform_gain_probe(self, SONY_EXIF)
+        self.assertEqual(correction["flags"], ["distortion"], correction)
+
+        lo = np.unravel_index(int(gain.argmin()), gain.shape)
+        hi = np.unravel_index(int(gain.argmax()), gain.shape)
+        self.assertGreaterEqual(
+            float(gain.min()), 0.999, f"最暗画素 {lo} = {float(gain.min()):.4f}"
+        )
+        self.assertLessEqual(
+            float(gain.max()), 1.001, f"最明画素 {hi} = {float(gain.max()):.4f}"
+        )
+
+
+class UncalibratedDistortionGuardTests(unittest.TestCase):
+    """歪曲較正の無いレンズに "distortion" フラグが偽って付かないこと。
+
+    SCALE（autoscale）は幾何補正がひとつも無くても恒等マップを返すため、
+    較正の有無（lens.calib_distortion）を見ずにマップを要求すると、未較正の
+    レンズが「distortion 適用済み」として報告され、"lens_not_calibrated"
+    フォールバックにも到達しなくなる。
+    """
+
+    def test_no_spurious_distortion_without_calibration(self):
+        class _NoCalibrationModifier:
+            """較正データを何も持たないレンズの体の偽 Modifier。
+
+            apply_geometry_distortion は SCALE が返しうる恒等マップを返す
+            （ガードが効いていればそもそも呼ばれない）。
+            """
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                return False  # ビネット較正なし
+
+            def apply_geometry_distortion(self):
+                return _identity_map(32, 48)
+
+        resolution = _applicable_stub_resolution(
+            lens_obj=types.SimpleNamespace(calib_distortion=[])
+        )
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_NoCalibrationModifier)):
+            corrected, correction = apply_lens_correction(rgb, resolution)
+
+        self.assertIs(corrected, rgb)
+        self.assertFalse(correction["applied"])
+        self.assertEqual(correction["reason"], "lens_not_calibrated")
 
 
 class NonFiniteVignettingTests(unittest.TestCase):
@@ -325,14 +441,9 @@ class NonFiniteVignettingTests(unittest.TestCase):
     def test_nan_vignetting_does_not_block_distortion(self):
         """歪曲補正が効く場合でも、破棄されるのはビネットだけで NaN は残らない。"""
         height, width = 32, 48
-        identity_map = np.dstack(
-            np.meshgrid(
-                np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32)
-            )
-        )
 
         class _WithDistortion(_NonFiniteModifier):
-            distortion_map = identity_map
+            distortion_map = _identity_map(32, 48)
 
         rgb = np.full((height, width, 3), 100, dtype=np.uint8)
         with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_WithDistortion)):

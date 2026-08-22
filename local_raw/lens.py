@@ -235,12 +235,22 @@ def apply_lens_correction(
         # （実測: 最大 3.4e38・負値・NaN、gain>2 の画素がちょうど 24.5%）。
         # source_dtype ではなく working から導くこと。両者は別物（uint8/uint16 対 float32）で、
         # source_dtype を渡すと同じ種類の食い違いが再発する。
+        #
+        # SCALE は autoscale（scale-to-fill）。`initialize` の `scale` 引数の既定値 0.0 は
+        # 「autoscale せよ」の意味だが、このフラグが無いと実行されない。糸巻き型歪曲
+        # （望遠側）の補正では remap が入力フレーム外を参照し、cv2.remap の既定
+        # BORDER_CONSTANT の黒が縁に残る（実測: Sony E 55-210mm @80mm で最大 65.8px の
+        # はみ出し、画素の約 2% が黒縁・リンギング）。autoscale は補正込みの座標マップに
+        # 画面いっぱいへの拡大を織り込むので画像外参照が 0 になり、出力寸法は W×H のまま
+        # 不変（自前のクロップ・リサイズは不要）。
         modifier.initialize(
             resolution.focal_length,
             resolution.aperture,
             FOCUS_DISTANCE_METERS,
             pixel_format=working.dtype.type,
-            flags=lensfunpy.ModifyFlags.VIGNETTING | lensfunpy.ModifyFlags.DISTORTION,
+            flags=lensfunpy.ModifyFlags.VIGNETTING
+            | lensfunpy.ModifyFlags.DISTORTION
+            | lensfunpy.ModifyFlags.SCALE,
         )
 
         # --- ビネット補正（float32 0..1 で in-place） ---
@@ -266,9 +276,32 @@ def apply_lens_correction(
             corrected = rgb
 
         # --- 歪曲補正 ---
-        coordinates = modifier.apply_geometry_distortion()
+        # 歪曲較正の無いレンズでは幾何マップを要求しない。SCALE（autoscale）は幾何補正が
+        # ひとつも無くても恒等マップ（float32 丸め誤差 ~0.001px 付き）を返すため、そのまま
+        # 呼ぶと "distortion" フラグが偽って付いて無意味な恒等 remap が走り、較正なしの
+        # レンズが "lens_not_calibrated" フォールバックに到達しなくなる。
+        # なお同梱DB・追加DBとも model="none" の歪曲較正は 0 件なので、真偽値で足りる。
+        # getattr なのは、属性が無い/None の異常系でここが AttributeError になると
+        # 外側の catch-all が成功済みのビネット補正まで道連れに破棄するため
+        # （その場合は歪曲だけを黙って諦め、部分適用のまま返すのが正しい）。
+        if getattr(resolution.lens, "calib_distortion", None):
+            coordinates = modifier.apply_geometry_distortion()
+        else:
+            coordinates = None
         if coordinates is not None:
-            corrected = cv2.remap(corrected, coordinates, None, cv2.INTER_LANCZOS4)
+            # autoscale 済みでもマップ端は実質ソース境界上（最近傍 ~0.2px）に乗るため、
+            # 既定の BORDER_CONSTANT だと Lanczos カーネル（8x8 タップ）の足がフレーム外の
+            # 黒を跨ぎ、縁数 px に明縁/暗帯が残る（実測: 55-210mm @55mm で四隅ゲインが
+            # 真値 2.353 → 2.910 の +24% 明縁、Sigma 10-18mm @10.7mm で 0.952〜1.126 の
+            # 暗帯/明縁）。BORDER_REPLICATE で縁画素を複製すると両方消える
+            # （実測: 四隅 2.348 ≈ 真値、Sigma は全画素 1.000）。
+            corrected = cv2.remap(
+                corrected,
+                coordinates,
+                None,
+                cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
             applied_flags.append("distortion")
 
         if not applied_flags:
