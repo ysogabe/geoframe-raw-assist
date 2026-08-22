@@ -281,12 +281,27 @@ def apply_lens_correction(
         # 呼ぶと "distortion" フラグが偽って付いて無意味な恒等 remap が走り、較正なしの
         # レンズが "lens_not_calibrated" フォールバックに到達しなくなる。
         # なお同梱DB・追加DBとも model="none" の歪曲較正は 0 件なので、真偽値で足りる。
-        if resolution.lens.calib_distortion:
+        # getattr なのは、属性が無い/None の異常系でここが AttributeError になると
+        # 外側の catch-all が成功済みのビネット補正まで道連れに破棄するため
+        # （その場合は歪曲だけを黙って諦め、部分適用のまま返すのが正しい）。
+        if getattr(resolution.lens, "calib_distortion", None):
             coordinates = modifier.apply_geometry_distortion()
         else:
             coordinates = None
         if coordinates is not None:
-            corrected = cv2.remap(corrected, coordinates, None, cv2.INTER_LANCZOS4)
+            # autoscale 済みでもマップ端は実質ソース境界上（最近傍 ~0.2px）に乗るため、
+            # 既定の BORDER_CONSTANT だと Lanczos カーネル（8x8 タップ）の足がフレーム外の
+            # 黒を跨ぎ、縁数 px に明縁/暗帯が残る（実測: 55-210mm @55mm で四隅ゲインが
+            # 真値 2.353 → 2.910 の +24% 明縁、Sigma 10-18mm @10.7mm で 0.952〜1.126 の
+            # 暗帯/明縁）。BORDER_REPLICATE で縁画素を複製すると両方消える
+            # （実測: 四隅 2.348 ≈ 真値、Sigma は全画素 1.000）。
+            corrected = cv2.remap(
+                corrected,
+                coordinates,
+                None,
+                cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
             applied_flags.append("distortion")
 
         if not applied_flags:
