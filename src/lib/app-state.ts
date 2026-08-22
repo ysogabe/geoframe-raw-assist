@@ -6,6 +6,7 @@ import type {
   AnalysisResponse,
   CaptureId,
   DevelopedResult,
+  DriveUploadState,
   ExportResponse,
   GroupInfo,
   HealthResponse,
@@ -191,6 +192,12 @@ export type State = {
   exportResult: ExportResponse | null;
   importing: boolean;
   importResult: ImportToPhotosResponse | null;
+  /**
+   * Google Drive アップロードの状況（GET /api/drive-upload をそのまま保持する）。
+   * null は「まだ一度も取りに行っていない」。エンジン ready 後の初回取得と、
+   * running の間の 1 秒ポーリングで更新される。
+   */
+  driveUpload: DriveUploadState | null;
   /** 原寸ビューアで開いている 2 面。null なら閉じている。 */
   viewer: ViewerSource | null;
   notice: string;
@@ -232,6 +239,7 @@ export const initialState: State = {
   exportResult: null,
   importing: false,
   importResult: null,
+  driveUpload: null,
   viewer: null,
   notice: "",
   noticeTone: "info",
@@ -288,6 +296,10 @@ export type Action =
   | { type: "import/start" }
   | { type: "import/ok"; result: ImportToPhotosResponse }
   | { type: "import/fail"; message: string }
+  /** GET /api/drive-upload の取得結果。1 秒ポーリングで何度も届く。 */
+  | { type: "drive/poll"; response: DriveUploadState }
+  /** POST /api/drive-upload 自体が失敗した（400・接続不能）。 */
+  | { type: "drive/start-failed"; message: string }
   | { type: "viewer/open"; source: ViewerSource }
   | { type: "viewer/close" }
   | { type: "notice/set"; message: string; tone?: "info" | "error" }
@@ -715,10 +727,13 @@ export function reducer(state: State, action: Action): State {
       return { ...state, mergeMode: null, mergingGroupId: null, notice: action.message, noticeTone: "error" };
 
     case "export/batchName":
-      return { ...state, batchName: action.value, exportResult: null, importResult: null };
+      // バッチ名が変わったら、前のバッチについての結果表示は意味を失う。Drive
+      // アップロードの結果も同じ規則で落とす（サーバ側の状態は消さないが、
+      // 別バッチの「63件アップロードしました」を出したままにはしない）。
+      return { ...state, batchName: action.value, exportResult: null, importResult: null, driveUpload: null };
 
     case "export/start":
-      return { ...state, exporting: true, exportResult: null, importResult: null };
+      return { ...state, exporting: true, exportResult: null, importResult: null, driveUpload: null };
 
     case "export/ok": {
       // 採用したのに成果物が引けなかった行は送っていない。黙って減らすと「採用3件の
@@ -758,6 +773,14 @@ export function reducer(state: State, action: Action): State {
 
     case "import/fail":
       return { ...state, importing: false, notice: action.message, noticeTone: "error" };
+
+    case "drive/poll":
+      // import/ok と違い通知トーストは出さない。ポーリングのたびに毎秒トーストが
+      // 出ると煩わしいため。成功・失敗の可視化は ExportPanel 側の常時表示に任せる。
+      return { ...state, driveUpload: action.response };
+
+    case "drive/start-failed":
+      return { ...state, driveUpload: null, notice: action.message, noticeTone: "error" };
 
     case "viewer/open":
       return { ...state, viewer: action.source };

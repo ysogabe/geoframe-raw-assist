@@ -6,6 +6,7 @@ import type {
   Analysis,
   CaptureId,
   DevelopedResult,
+  DriveUploadState,
   ExportResponse,
   GroupInfo,
   ImportToPhotosResponse,
@@ -54,8 +55,27 @@ type ExportPanelProps = {
   exportResult: ExportResponse | null;
   importResult: ImportToPhotosResponse | null;
   albumName: string;
+  /** GET /api/drive-upload の最新状況。null は未取得（エンジン未起動・未実装）。 */
+  driveUpload: DriveUploadState | null;
+  onDriveUpload: () => void;
   onBack: () => void;
 };
+
+/** 実行中ボタンに出すステージ名。未知の値は「処理中…」へ落とす。 */
+function driveUploadStageLabel(stage: string): string {
+  switch (stage) {
+    case "authenticating":
+      return "認証を確認しています…";
+    case "waiting_for_consent":
+      return "ブラウザでサインインしてください…";
+    case "resolving_folder":
+      return "フォルダを確認しています…";
+    case "uploading":
+      return "アップロード中…";
+    default:
+      return "処理中…";
+  }
+}
 
 export function ExportPanel({
   analysis,
@@ -70,10 +90,25 @@ export function ExportPanel({
   exportResult,
   importResult,
   albumName,
+  driveUpload,
+  onDriveUpload,
   onBack,
 }: ExportPanelProps) {
   const nameValid = isValidBatchName(batchName);
   const canExport = rows.length > 0 && nameValid && !exporting;
+
+  // Drive アップロードの活性制御。状況が未取得（null）のうちは押せる状態にしておく
+  // （エンジンが未対応なら POST 側が失敗してトーストで理由が出る）。
+  const driveUploadRunning = driveUpload?.status === "running";
+  const driveUploadConfigured = driveUpload === null || driveUpload.status !== "idle" || driveUpload.configured;
+  const driveUploadDisabled = driveUploadRunning || !driveUploadConfigured;
+  const driveUploadDisabledReason = driveUploadConfigured
+    ? undefined
+    : "Google Drive 連携が未設定です。local_raw/drive_client_secret.json を配置してください。";
+  const driveUploadButtonLabel =
+    driveUpload?.status === "running"
+      ? `${driveUploadStageLabel(driveUpload.progress.stage)}（${driveUpload.progress.done}/${driveUpload.progress.total}）`
+      : "Google Drive にアップロード";
 
   return (
     <section className="export-screen screen-enter" aria-label="書き出し">
@@ -190,6 +225,14 @@ export function ExportPanel({
             <button className="secondary-action" onClick={onImport} disabled={importing}>
               {importing ? "登録しています…" : "Apple フォトへ登録"}
             </button>
+            <button
+              className="secondary-action"
+              onClick={onDriveUpload}
+              disabled={driveUploadDisabled}
+              title={driveUploadDisabledReason}
+            >
+              {driveUploadButtonLabel}
+            </button>
             <small>アルバム名: {albumName}</small>
           </div>
           {importResult && (
@@ -198,6 +241,19 @@ export function ExportPanel({
                 ? `${importResult.imported}件を「${importResult.album}」に登録しました。`
                 : importResult.error}
             </p>
+          )}
+          {driveUpload?.status === "done" && (
+            <p className="drive-upload-result ok">
+              {driveUpload.uploaded}件を Google Drive にアップロードしました
+              {driveUpload.skipped.length > 0 ? `（${driveUpload.skipped.length}件は既存のためスキップ）` : ""}。
+              {" "}
+              <a href={driveUpload.folder_url} target="_blank" rel="noreferrer">
+                フォルダを開く
+              </a>
+            </p>
+          )}
+          {driveUpload?.status === "error" && (
+            <p className="drive-upload-result error">{driveUpload.error}</p>
           )}
         </div>
       )}

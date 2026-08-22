@@ -453,12 +453,16 @@ img { display: block; max-width: 100%; }
 .export-dir { margin: 9px 0 0; color: #56635f; font-size: 11px; word-break: break-all; }
 .export-files, .export-skipped { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 3px; color: #5c6a66; font-size: 11px; }
 .export-skipped { color: #a45d3d; }
-.export-import-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #d1e4dc; }
+.export-import-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #d1e4dc; }
 .export-import-row button { min-height: 38px; min-width: 170px; border-radius: 8px; font-size: 11px; font-weight: 800; cursor: pointer; }
 .export-import-row small { color: #77817d; font-size: 11px; }
 .import-result { margin: 10px 0 0; font-size: 11px; }
 .import-result.ok { color: var(--green); }
 .import-result.error { color: #a45d3d; }
+.drive-upload-result { margin: 10px 0 0; font-size: 11px; }
+.drive-upload-result.ok { color: var(--green); }
+.drive-upload-result.error { color: #a45d3d; }
+.drive-upload-result a { color: inherit; font-weight: 800; text-decoration: underline; }
 
 @media (max-width: 860px) {
   .exif-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
