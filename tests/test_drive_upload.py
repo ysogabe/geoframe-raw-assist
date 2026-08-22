@@ -372,7 +372,11 @@ class ResolveFolderTests(DriveUploadTestCase):
         self.assertIn("'root' in parents", drive.list_calls[0]["q"])
 
     def test_owned_only_defaults_to_off_for_child_folder_lookups(self):
-        """サブフォルダ解決には適用しない: 共有ドライブ配下では所有者が自分でないことがある。"""
+        """`parent_id` 指定の検索には既定で適用しない。
+
+        共有ドライブ配下のフォルダは所有者が自分でないことがあり、絞ると検索が壊れる。
+        （アップロード経路はこの枝を使わなくなったが、既定値の意味は保つ。）
+        """
         drive = FakeDrive()
         drive_upload._resolve_folder(drive, BATCH, "root-1")
         self.assertNotIn("owners", drive.list_calls[0]["q"])
@@ -401,16 +405,71 @@ class ExistingFilenamesTests(DriveUploadTestCase):
         self.assertIn("'folder-1' in parents", query)
         self.assertIn("trashed = false", query)
 
+    def test_a_name_prefix_narrows_the_listing_on_the_drive_side(self):
+        """平置きで `GeoFrame` 直下に全バッチが積み上がるので、絞り込みは Drive 側で行う。
+
+        クライアント側で捨てても列挙件数は減らず、バッチが増えるほど遅くなる。
+        """
+        drive = FakeDrive()
+        drive_upload._existing_filenames(drive, "folder-1", name_prefix=f"{BATCH}-")
+        query = drive.list_calls[0]["q"]
+        self.assertIn(f"name contains '{BATCH}-'", query)
+        # 絞り込みは既存の条件に**足す**もの。親とゴミ箱の条件を落としてはいけない。
+        self.assertIn("'folder-1' in parents", query)
+        self.assertIn("trashed = false", query)
+
+    def test_without_a_prefix_the_listing_is_not_narrowed(self):
+        """既定は絞り込み無し（プレフィックスを持たない用途のために残す）。"""
+        drive = FakeDrive()
+        drive_upload._existing_filenames(drive, "folder-1")
+        self.assertNotIn("name contains", drive.list_calls[0]["q"])
+
+
+class UploadFileTests(DriveUploadTestCase):
+    """`_upload_file()` は中身をローカルのパスから、名前を `upload_name` から取る。"""
+
+    def test_the_drive_name_comes_from_upload_name_and_the_body_from_the_path(self):
+        path = self.make_batch(files={"DSC00001.JPG": b"jpeg"}) / "DSC00001.JPG"
+        drive = FakeDrive()
+        with mock.patch.object(
+            drive_upload, "_media_file_upload", side_effect=lambda given: f"media:{given.name}"
+        ) as media:
+            drive_upload._upload_file(drive, path, "folder-1", f"{BATCH}-DSC00001.JPG")
+
+        media.assert_called_once_with(path)
+        self.assertEqual(
+            drive.uploads,
+            [
+                {
+                    "name": f"{BATCH}-DSC00001.JPG",
+                    "parents": ["folder-1"],
+                    "media": "media:DSC00001.JPG",
+                    "num_retries": drive_upload.UPLOAD_NUM_RETRIES,
+                }
+            ],
+        )
+
 
 # ---------------------------------------------------------------------------
-# 2. 同名スキップ / 部分再実行
+# 2. 平置き + バッチ名プレフィックス / 同名スキップ / 部分再実行
 # ---------------------------------------------------------------------------
 
 
 class SkipExistingTests(DriveUploadTestCase):
+    """アップロードは `GeoFrame` **直下**へ平置きし、名前へ `<batch_name>-` を付ける。
+
+    消費側（GeoFrame 本体アプリ）の Drive インデックスが `GeoFrame` を**非再帰**で
+    走査するのでサブフォルダは作れず、平置きにするとバッチ間で
+    `DSC00001.JPG` / `manifest.json` が衝突するため、名前側で分ける。
+    """
+
     FILES = {"DSC00001.JPG": b"a" * 10, "DSC00002.JPG": b"b" * 20, "manifest.json": b"{}"}
 
-    def test_a_fresh_batch_uploads_everything(self):
+    @staticmethod
+    def prefixed(*names, batch=BATCH):
+        return [f"{batch}-{name}" for name in names]
+
+    def test_a_fresh_batch_uploads_everything_with_the_batch_name_prefix(self):
         self.make_batch(files=self.FILES)
         result, _, drive = self.run_upload()
 
@@ -419,28 +478,84 @@ class SkipExistingTests(DriveUploadTestCase):
         self.assertEqual(result["skipped"], [])
         self.assertEqual(
             [upload["name"] for upload in drive.uploads],
-            ["DSC00001.JPG", "DSC00002.JPG", "manifest.json"],
+            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "manifest.json"),
         )
 
     def test_existing_names_are_skipped_and_not_uploaded(self):
+        """スキップ判定は Drive 上の名前（プレフィックス込み）で行うこと。"""
         self.make_batch(files=self.FILES)
-        drive = FakeDrive(listing_pages=[{"files": [{"name": "DSC00001.JPG"}]}])
+        drive = FakeDrive(listing_pages=[{"files": [{"name": f"{BATCH}-DSC00001.JPG"}]}])
         result, _, drive = self.run_upload(drive=drive)
 
         self.assertEqual(result["skipped"], ["DSC00001.JPG"])
         self.assertEqual(result["uploaded"], 2)
         self.assertEqual(result["total"], 3)
-        self.assertNotIn("DSC00001.JPG", [upload["name"] for upload in drive.uploads])
+        self.assertNotIn(
+            f"{BATCH}-DSC00001.JPG", [upload["name"] for upload in drive.uploads]
+        )
+
+    def test_the_skipped_list_holds_the_local_names_without_the_prefix(self):
+        """画面に出すのはバッチ内で見慣れた名前。契約の `skipped` の意味を変えない。"""
+        self.make_batch(files=self.FILES)
+        drive = FakeDrive(
+            listing_pages=[
+                {"files": [{"name": f"{BATCH}-DSC00001.JPG"}, {"name": f"{BATCH}-manifest.json"}]}
+            ]
+        )
+        result, progress, _ = self.run_upload(drive=drive)
+
+        self.assertEqual(result["skipped"], ["DSC00001.JPG", "manifest.json"])
+        self.assertEqual(progress.snapshot()["skipped"], ["DSC00001.JPG", "manifest.json"])
+
+    def test_the_same_name_from_another_batch_does_not_cause_a_skip(self):
+        """平置きの肝。別バッチの `DSC00001.JPG` / `manifest.json` と衝突しないこと。
+
+        プレフィックスが無ければ、カメラ命名のファイルも全バッチが持つ
+        `manifest.json` も先着のバッチに食われて二度と上がらなくなる。
+        """
+        self.make_batch(files=self.FILES)
+        drive = FakeDrive(
+            listing_pages=[
+                {
+                    "files": [
+                        {"name": "other_trip-DSC00001.JPG"},
+                        {"name": "other_trip-manifest.json"},
+                        # プレフィックス無しの素の名前（旧版が上げた残骸）にも引っかからない。
+                        {"name": "DSC00001.JPG"},
+                        {"name": "manifest.json"},
+                        # 旧版が作ったバッチ名のフォルダが同じ一覧に混ざっても無害。
+                        {"name": BATCH},
+                    ]
+                }
+            ]
+        )
+        result, _, drive = self.run_upload(drive=drive)
+
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["uploaded"], 3)
+        self.assertEqual(
+            [upload["name"] for upload in drive.uploads],
+            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "manifest.json"),
+        )
 
     def test_a_partial_rerun_only_sends_what_is_still_missing(self):
         """前回 2/3 だけ成功した状態からの再実行が、残り 1 件だけを送ること。"""
         self.make_batch(files=self.FILES)
         drive = FakeDrive(
-            listing_pages=[{"files": [{"name": "DSC00001.JPG"}, {"name": "DSC00002.JPG"}]}]
+            listing_pages=[
+                {
+                    "files": [
+                        {"name": f"{BATCH}-DSC00001.JPG"},
+                        {"name": f"{BATCH}-DSC00002.JPG"},
+                    ]
+                }
+            ]
         )
         result, progress, drive = self.run_upload(drive=drive)
 
-        self.assertEqual([upload["name"] for upload in drive.uploads], ["manifest.json"])
+        self.assertEqual(
+            [upload["name"] for upload in drive.uploads], self.prefixed("manifest.json")
+        )
         self.assertEqual(result["uploaded"], 1)
         self.assertEqual(result["skipped"], ["DSC00001.JPG", "DSC00002.JPG"])
         self.assertEqual(
@@ -449,33 +564,43 @@ class SkipExistingTests(DriveUploadTestCase):
         )
         self.assertEqual(progress.snapshot()["done"], 3, "スキップ分も処理済みに数える")
 
-    def test_uploads_target_the_batch_subfolder_and_carry_the_retry_count(self):
+    def test_uploads_target_the_geoframe_folder_itself_and_carry_the_retry_count(self):
         self.make_batch(files={"DSC00001.JPG": b"jpeg"})
         result, _, drive = self.run_upload()
 
-        # `_resolve_folder` が 2 回（GeoFrame → バッチ）走るので、バッチ側は created-2。
-        self.assertEqual(drive.uploads[0]["parents"], ["created-2"])
+        # `_resolve_folder` は `GeoFrame` の 1 回だけなので、置き先は created-1。
+        self.assertEqual(drive.uploads[0]["parents"], ["created-1"])
         self.assertEqual(drive.uploads[0]["num_retries"], drive_upload.UPLOAD_NUM_RETRIES)
+        self.assertEqual(drive.uploads[0]["name"], f"{BATCH}-DSC00001.JPG")
+        # メディアは**ローカルのパス**から作る。プレフィックス付きの名前を
+        # `_media_file_upload()` へ渡してしまう取り違えをここで止める。
         self.assertEqual(drive.uploads[0]["media"], "media:DSC00001.JPG")
         self.assertEqual(
-            result["folder_url"], "https://drive.google.com/drive/folders/created-2"
+            result["folder_url"],
+            "https://drive.google.com/drive/folders/created-1",
+            "folder_url は GeoFrame フォルダ自体を指すこと",
         )
 
-    def test_the_subfolder_is_resolved_under_the_geoframe_folder(self):
+    def test_only_the_geoframe_folder_is_resolved(self):
+        """バッチごとのサブフォルダを作らないこと（この変更の中核）。"""
         self.make_batch(files={"DSC00001.JPG": b"jpeg"})
         _, _, drive = self.run_upload()
 
         folder_queries = [call["q"] for call in drive.list_calls if "mimeType" in call["q"]]
+        self.assertEqual(len(folder_queries), 1, "フォルダ解決は GeoFrame の 1 回だけ")
         self.assertIn("name = 'GeoFrame'", folder_queries[0])
         # ルート検索の親は My Drive 直下（`'root'`）に固定。**具体的なフォルダIDでは
         # 絞らない**こと（`GeoFrame` は誰かの配下ではなくトップに作る）。
         self.assertIn("'root' in parents", folder_queries[0])
         self.assertNotIn("created-", folder_queries[0])
-        self.assertIn(f"name = '{BATCH}'", folder_queries[1])
-        self.assertIn("'created-1' in parents", folder_queries[1])
+        self.assertEqual(
+            [call["body"]["name"] for call in drive.created_folders],
+            ["GeoFrame"],
+            "バッチ名のフォルダを作ってはいけない",
+        )
 
     def test_the_root_geoframe_lookup_is_scoped_to_the_users_own_files(self):
-        """ルート検索だけ `owned_only=True` で呼ばれること（サブフォルダ検索は絞らない）。
+        """ルート検索は `owned_only=True` で呼ばれること。
 
         他人が共有した同名の `GeoFrame` フォルダを拾って、実在しないユーザーの
         フォルダへアップロードしてしまう回帰を防ぐ。
@@ -488,16 +613,35 @@ class SkipExistingTests(DriveUploadTestCase):
         self.assertIn(
             "'root' in parents", folder_queries[0], "ルート検索は My Drive 直下に絞ること"
         )
-        self.assertNotIn("owners", folder_queries[1], "サブフォルダ検索までは絞らないこと")
 
-    def test_the_subfolder_uses_the_normalized_batch_name(self):
-        """`q` は文字列連結なので、生の入力ではなく正規化済みの名前だけを埋めること。"""
+    def test_the_existing_names_are_read_from_the_geoframe_folder(self):
+        self.make_batch(files={"DSC00001.JPG": b"jpeg"})
+        _, _, drive = self.run_upload()
+
+        listing_queries = [
+            call["q"] for call in drive.list_calls if "mimeType" not in call["q"]
+        ]
+        self.assertIn("'created-1' in parents", listing_queries[0])
+        # 一覧は自分のバッチのプレフィックスで絞る。絞らないと `GeoFrame` 直下に
+        # 積み上がった全バッチ分を毎回列挙することになる。
+        self.assertIn(f"name contains '{BATCH}-'", listing_queries[0])
+
+    def test_the_prefix_uses_the_normalized_batch_name(self):
+        """生の入力ではなく正規化済みの名前だけが Drive へ渡ること。
+
+        出口は create の `name` と、一覧の絞り込みに使う検索クエリ `q` の 2 つ。
+        どちらの経路にも「生の `batch_name` は Drive へ届かない」を固定しておく。
+        """
         self.make_batch(name="my_trip", files={"DSC00001.JPG": b"jpeg"})
         _, _, drive = self.run_upload(batch_name="my trip")
 
-        folder_queries = [call["q"] for call in drive.list_calls if "mimeType" in call["q"]]
-        self.assertIn("name = 'my_trip'", folder_queries[1])
-        self.assertEqual(drive.created_folders[1]["body"]["name"], "my_trip")
+        self.assertEqual([upload["name"] for upload in drive.uploads], ["my_trip-DSC00001.JPG"])
+
+        listing_queries = [
+            call["q"] for call in drive.list_calls if "mimeType" not in call["q"]
+        ]
+        self.assertIn("name contains 'my_trip-'", listing_queries[0])
+        self.assertNotIn("my trip", listing_queries[0], "生の入力が `q` へ漏れてはいけない")
 
 
 # ---------------------------------------------------------------------------
@@ -937,7 +1081,7 @@ class JobStateTests(DriveUploadTestCase):
             "uploaded": 1,
             "total": 1,
             "skipped": [],
-            "folder_url": "https://drive.google.com/drive/folders/created-2",
+            "folder_url": "https://drive.google.com/drive/folders/created-1",
         }
         with mock.patch.object(drive_upload, "_run_upload", return_value=result):
             drive_upload._run_upload_job(drive_upload.Progress(), BATCH)
