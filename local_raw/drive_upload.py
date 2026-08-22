@@ -4,10 +4,20 @@
 
 方針:
 
-- 対象は `outputs/export/<batch_name>/` **直下**のファイルのみ（`manifest.json` を含む。
-  `.tmp` は書き込み途中なので除外、サブディレクトリは対象外）。
+- 送る側の対象は `outputs/export/<batch_name>/` の**直下にあるファイル**のみ
+  （`manifest.json` を含む。`.tmp` は書き込み途中なので除外、サブディレクトリは対象外）。
+- 置き先は Drive の `GeoFrame` フォルダ**そのものの中**で、バッチごとのサブフォルダは
+  **作らない**。消費側（GeoFrame 本体アプリ）の Drive インデックス処理が `GeoFrame`
+  フォルダを**非再帰**で走査するため、サブフォルダへ入れると一切認識されない。
+- 平置きにするとバッチをまたいでファイル名が衝突しうる（カメラ命名の
+  `DSC04431.JPG` や、全バッチが持つ `manifest.json`）。そこで Drive 上の名前は
+  `<batch_name>-<元のファイル名>`（例 `26_08_hiuchi-DSC04431.JPG`）にする。
 - **同名ファイルは既アップロード済みとみなしてスキップ**する。上書きも別名追加もしない。
-  部分失敗からの再実行が「まだ無いものだけ」を送るレジューム動作になる。
+  判定は Drive 上の名前、つまり**プレフィックス込み**で行う。部分失敗からの再実行が
+  「まだ無いものだけ」を送るレジューム動作になる。
+  なお `GeoFrame` 直下の一覧にはフォルダ名も混ざる（旧版が作ったバッチ名の
+  サブフォルダが残っている場合など）が、`26_08_hiuchi` と
+  `26_08_hiuchi-DSC04431.JPG` は一致しないので誤スキップにはならない。
 - 入力の検証は `ValueError`（→ HTTP 400）。認証・通信の失敗はジョブ状態
   （`GET /api/drive-upload` の `status: "error"` + `error_kind`）で返す。
 - ユーザーへ返すエラー文言は**固定文言のみ**。`HttpError` の生レスポンス本文や
@@ -372,8 +382,10 @@ def _resolve_folder(
     **任意の階層**にある自分所有の同名フォルダが依然として一致するため。作成は常に自分の
     My Drive 直下（`parents` 省略）に行われるので、検索側を同じ場所に揃えないと
     「作成時と検索時で別のフォルダを指す」自己矛盾が起きうる。
-    サブフォルダ解決（`parent_id` 指定）には**適用しない**: 共有ドライブ配下の
-    サブフォルダは所有者が自分でないことがあり、絞ると正しい検索が壊れる。
+    既定が `False` なのは、`parent_id` 指定の検索（配下のフォルダを引く汎用の使い方）に
+    まで広げると壊れるため: 共有ドライブ配下のフォルダは所有者が自分でないことがある。
+    現状 `_run_upload()` からの呼び出しはルートの `GeoFrame` 解決 1 回だけで、
+    バッチごとのサブフォルダは作らない（アップロードは `GeoFrame` 直下へ平置きする）。
     """
     conditions = [
         f"name = '{_escape_query_value(name)}'",
@@ -418,7 +430,12 @@ def _resolve_folder(
 
 
 def _existing_filenames(service: Any, parent_id: str) -> set[str]:
-    """`parent_id` 直下にある（ゴミ箱に入っていない）ファイル名の集合。"""
+    """`parent_id` 直下にある（ゴミ箱に入っていない）名前の集合。
+
+    mimeType で絞っていないのでフォルダ名も混ざる（旧版が作ったバッチ名の
+    サブフォルダなど）。スキップ判定に使う名前は `<batch_name>-<ファイル名>` で、
+    フォルダ名（`<batch_name>` のみ）とは一致しないため誤スキップにはならない。
+    """
     query = f"'{_escape_query_value(parent_id)}' in parents and trashed = false"
     names: set[str] = set()
     page_token: str | None = None
@@ -443,11 +460,15 @@ def _existing_filenames(service: Any, parent_id: str) -> set[str]:
             return names
 
 
-def _upload_file(service: Any, path: Path, parent_id: str) -> None:
-    """1ファイルを再開可能アップロードで送る。"""
+def _upload_file(service: Any, path: Path, parent_id: str, upload_name: str) -> None:
+    """1ファイルを再開可能アップロードで送る。Drive 上のファイル名は `upload_name`。
+
+    中身は `path` から、名前は `upload_name` から取る（平置きの衝突回避で
+    Drive 側にだけプレフィックスを付けるため、両者は一致しない）。
+    """
     media = _media_file_upload(path)
     service.files().create(
-        body={"name": path.name, "parents": [parent_id]}, media_body=media
+        body={"name": upload_name, "parents": [parent_id]}, media_body=media
     ).execute(num_retries=UPLOAD_NUM_RETRIES)
 
 
@@ -544,22 +565,25 @@ def _run_upload(progress: Progress, batch_name: str) -> dict[str, Any]:
     service = _build_service(credentials)
 
     progress.set_stage("resolving_folder")
+    # 置き先は `GeoFrame` フォルダ**そのもの**。バッチごとのサブフォルダは作らない
+    # （消費側の Drive インデックスが非再帰スキャンなので、入れると認識されない）。
     root_id = _resolve_folder(service, DRIVE_FOLDER_NAME, None, owned_only=True)
-    # サブフォルダ名は**正規化済み**のバッチ名（`export_dir.name`）を使う。生の入力を
-    # そのまま `q` へ埋めると引用符を注入できるため、経路をここ一本に絞る。
-    folder_id = _resolve_folder(service, export_dir.name, root_id)
-    existing = _existing_filenames(service, folder_id)
+    existing = _existing_filenames(service, root_id)
 
     progress.set_stage("uploading")
     uploaded = 0
     for path in files:
         size = sizes.get(path.name, 0)
-        if path.name in existing:
+        # プレフィックスには**正規化済み**のバッチ名（`export_dir.name`）だけを使う。
+        # 生の入力を Drive へ渡す経路をここ一本に絞る。
+        upload_name = f"{export_dir.name}-{path.name}"
+        if upload_name in existing:
             # 既にある名前は「アップロード済み」とみなす。上書きも別名追加もしない
             # （部分失敗からの再実行が、まだ無いものだけを送るレジュームになる）。
+            # 進捗へ渡すのは**元のファイル名**（画面にはバッチ内で見慣れた名前を出す）。
             progress.add_skipped(path.name, size)
             continue
-        _upload_file(service, path, folder_id)
+        _upload_file(service, path, root_id, upload_name)
         uploaded += 1
         progress.advance(size)
 
@@ -567,7 +591,7 @@ def _run_upload(progress: Progress, batch_name: str) -> dict[str, Any]:
         "uploaded": uploaded,
         "total": len(files),
         "skipped": progress.snapshot()["skipped"],
-        "folder_url": f"https://drive.google.com/drive/folders/{folder_id}",
+        "folder_url": f"https://drive.google.com/drive/folders/{root_id}",
     }
 
 

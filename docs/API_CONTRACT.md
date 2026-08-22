@@ -314,12 +314,18 @@ body { batch_name:string }
 → { status:"started"|"already_running" }
 ```
 
-`outputs/export/<batch_name>/` を Google Drive の「GeoFrame」フォルダ配下の同名サブフォルダへ
-アップロードする。OAuth（デスクトップアプリ、`local_raw/drive_client_secret.json`）経由。
+`outputs/export/<batch_name>/` 直下のファイルを Google Drive の「GeoFrame」フォルダ
+**直下**へアップロードする（バッチごとのサブフォルダは作らない。消費側の GeoFrame 本体
+アプリが「GeoFrame」フォルダを**非再帰**で走査するため、サブフォルダへ入れると認識されない）。
+Drive 上のファイル名には `<batch_name>-` プレフィックスを付ける
+（例 `26_08_hiuchi-DSC04431.JPG`）。平置きではバッチ間で `DSC04431.JPG` や
+`manifest.json` が衝突するため。`batch_name` は正規化済みの名前。
+OAuth（デスクトップアプリ、`local_raw/drive_client_secret.json`）経由。
 バックグラウンドジョブとして実行し、進捗は `GET /api/drive-upload` でポーリングする。
 
-同名ファイルは既アップロード済みとみなしスキップする（上書きしない。部分失敗からの
-再実行で「まだ無いものだけ」を送るレジューム動作）。
+Drive 上のファイル名（**プレフィックス込み**）が既に存在する場合は既アップロード済みと
+みなしスキップする（上書きしない。部分失敗からの再実行で「まだ無いものだけ」を送る
+レジューム動作）。
 
 ### `GET /api/drive-upload`
 
@@ -338,6 +344,11 @@ body { batch_name:string }
 `resolving_folder` → `uploading` の順に進む。`progress.done` / `bytes_done` は
 **スキップ分も含む「処理済み」**（含めないと再実行時に進捗バーが 100% に届かない）。
 実際に送った件数は `done` 応答の `uploaded` が持ち、`uploaded + skipped.length == total`。
+
+`skipped` の要素は**ローカルのファイル名**（`<batch_name>-` プレフィックスを**含まない**。
+画面にはバッチ内で見慣れた名前を出すため）。スキップ判定に使う Drive 側の名前は
+プレフィックス込みなので、両者は一致しない。
+`folder_url` は「GeoFrame」フォルダ**自体**への URL（バッチごとのフォルダは無い）。
 `done` / `error` はメモリ上のみ保持し、サーバ再起動で `idle` に戻る。
 
 ### 静的ファイル配信
