@@ -167,13 +167,19 @@ img { display: block; max-width: 100%; }
 .empty-state > span { font-size: 30px; color: #aeb6b2; }
 .empty-state h3 { color: var(--ink); font-family: Georgia, serif; font-weight: 500; }
 .empty-state p { font-size: 13px; }
+/* .group-stack はグリッドなので、唯一の子になる空状態はそのままだと 1 セル幅に痩せる。 */
+.group-stack > .empty-state { grid-column: 1 / -1; }
 
 /* --- 操作パネル上部のグループストリップ ------------------------------------
    一覧へ戻らずに次のグループへ移るための帯。カードの幅と縦横比を CSS で固定して
    おくこと。158 枚ぶんの img が loading="lazy" なので、寸法を画像側から取ると
    未読み込みのカードが 0 高さになり、選択カードのセンタリングがずれる。 */
-.group-strip { overflow-x: auto; margin-top: 18px; padding-bottom: 4px; }
-.group-strip-track { display: flex; gap: 8px; margin: 0; padding: 0; list-style: none; }
+/* position: relative は GroupStrip の自動スクロール用。カードの offsetLeft が
+   この帯（＝横スクロールする要素）基準になり、scrollLeft とそのまま揃う。 */
+.group-strip { position: relative; overflow-x: auto; margin-top: 18px; }
+/* 余白は track 側に持たせる。overflow-x のスクロールコンテナは上下も clip するので、
+   帯側に置くとミニカードの focus outline / aria-current の box-shadow が欠ける。 */
+.group-strip-track { display: flex; gap: 8px; margin: 0; padding: 4px 2px; list-style: none; }
 .group-strip-track li { flex: 0 0 auto; }
 .group-strip-card { display: grid; gap: 6px; width: 104px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: inherit; text-align: left; cursor: pointer; }
 .group-strip-card:hover { border-color: #9fcabb; }
@@ -328,7 +334,9 @@ img { display: block; max-width: 100%; }
   .operation-preview { height: auto; }
 }
 
-@media (max-width: 900px) {
+/* 2 列のままだとカード幅が ~300px まで痩せ、.group-footer が .group-card の
+   overflow: hidden に切られる。1000px 以下は 1 列に倒す。 */
+@media (max-width: 1000px) {
   .group-stack { grid-template-columns: 1fr; }
 }
 
@@ -609,10 +617,11 @@ button.comparison-image:hover .developed-label { background: rgba(19,29,26,.92);
 .viewer-switch, .viewer-zoom, .viewer-nav { display: flex; align-items: center; gap: 4px; }
 .viewer-switch button, .viewer-zoom button, .viewer-nav button, .viewer-peek { border: 1px solid #cfd6d1; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
 .viewer-switch button.active { border-color: var(--green); background: var(--green); color: white; }
-.viewer-zoom button:hover, .viewer-nav button:not(:disabled):hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
-/* 送りは端で止まる（ラップしない）。押せないことを見た目でも示す。 */
+.viewer-zoom button:hover, .viewer-nav button:not(:disabled):not([aria-disabled="true"]):hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
+/* 送りは端で止まる（ラップしない）。押せないことは見た目でも示すが、フォーカスを
+   <dialog> 内に残すため disabled ではなく aria-disabled で表す。 */
 .viewer-nav button { min-width: 30px; font-size: 15px; line-height: 1; padding: 5px 8px; }
-.viewer-nav button:disabled { opacity: .34; cursor: not-allowed; }
+.viewer-nav button:disabled, .viewer-nav button[aria-disabled="true"] { opacity: .34; cursor: not-allowed; }
 .viewer-count { min-width: 58px; text-align: center; color: #4f5d59; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .viewer-peek { touch-action: none; user-select: none; }
 .viewer-peek.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }

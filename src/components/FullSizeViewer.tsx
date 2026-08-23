@@ -91,8 +91,6 @@ type FullSizeViewerProps = {
 export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const prevRef = useRef<HTMLButtonElement>(null);
-  const nextRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
 
   const [index, setIndex] = useState(gallery.index);
@@ -196,13 +194,6 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
     const target = index + delta;
     if (target < 0 || target > lastIndex) return;
     goTo(target);
-    // 端に着くと押していたボタンが disabled になる。フォーカスが <dialog> の外（body）へ
-    // 落ちると onKeyDown が届かなくなり、以後キーボードで送れなくなるので先に移す。
-    const edge = delta < 0 ? prevRef.current : nextRef.current;
-    const reachedEdge = delta < 0 ? target === 0 : target === lastIndex;
-    if (reachedEdge && document.activeElement === edge) {
-      (delta < 0 ? nextRef : prevRef).current?.focus();
-    }
   }
 
   // ---- 画像の読み込み ------------------------------------------------------
@@ -478,13 +469,15 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
           )}
 
           <div className="viewer-controls">
-            {/* 送りは輪に 2 枚以上あるときだけ。端では止まる（先頭↔末尾をつながない）。 */}
+            {/* 送りは輪に 2 枚以上あるときだけ。端では止まる（先頭↔末尾をつながない）。
+                端で disabled にはしない。押していたボタンがフォーカスを失うと <dialog> の外
+                （body）へ落ち、onKeyDown が届かなくなってキーボードで送れなくなるため。
+                実際の無効化は step() 冒頭の範囲外 early return が担う。 */}
             {canStep && (
               <div className="viewer-nav" role="group" aria-label="前後の写真へ送る">
                 <button
-                  ref={prevRef}
                   type="button"
-                  disabled={index === 0}
+                  aria-disabled={index === 0 ? "true" : undefined}
                   onClick={() => step(-1)}
                   aria-label="前の写真"
                 >
@@ -494,9 +487,8 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
                   {index + 1} / {gallery.items.length}
                 </span>
                 <button
-                  ref={nextRef}
                   type="button"
-                  disabled={index === lastIndex}
+                  aria-disabled={index === lastIndex ? "true" : undefined}
                   onClick={() => step(1)}
                   aria-label="次の写真"
                 >

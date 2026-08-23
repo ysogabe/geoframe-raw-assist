@@ -26,20 +26,25 @@ export function GroupStrip({
   acceptedSummaryOf,
   onSelectGroup,
 }: GroupStripProps) {
-  const trackRef = useRef<HTMLUListElement>(null);
+  const stripRef = useRef<HTMLElement>(null);
 
   // 選択中のカードを常に見える位置へ寄せる。次々切り替えると選択が端へ流れていき、
   // 「今どこにいるのか」も「次がどれか」も見えなくなるため。
+  // scrollIntoView は使わない。block: "nearest" でも window の縦スクロールに作用しうるので、
+  // グループ切替時の scrollToTop()（window への smooth scroll）と競合する。
+  // 横スクロールする要素（.group-strip）の scrollLeft だけを直接動かす。
   useEffect(() => {
-    const target = trackRef.current?.querySelector(`[data-group-id="${selectedGroupId}"]`);
-    if (!target) return;
+    const strip = stripRef.current;
+    const target = strip?.querySelector<HTMLElement>(`[data-group-id="${selectedGroupId}"]`);
+    if (!strip || !target) return;
+    const left = target.offsetLeft - (strip.clientWidth - target.offsetWidth) / 2;
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    target.scrollIntoView({ inline: "center", block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+    strip.scrollTo({ left, behavior: reduceMotion ? "auto" : "smooth" });
   }, [selectedGroupId]);
 
   return (
-    <nav className="group-strip" aria-label="提案グループの切り替え">
-      <ul className="group-strip-track" ref={trackRef}>
+    <nav className="group-strip" aria-label="提案グループの切り替え" ref={stripRef}>
+      <ul className="group-strip-track">
         {groups.map((group) => {
           const heroCaptureId = heroCaptureOf(group);
           const hero = analysis.photos[heroCaptureId];
