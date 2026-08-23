@@ -12,7 +12,9 @@
 復旧できない。
 """
 
+import contextlib
 import importlib
+import io
 import json
 import os
 import re
@@ -1051,6 +1053,46 @@ class MigrationTests(unittest.TestCase):
         self.write_legacy({"refresh_token": "stale", "token": "old"})
         self.assertFalse(drive_upload.ensure_migrated())
         self.assertEqual(drive_upload._read_token_payload(), self.PAYLOAD)
+
+    def test_a_failed_migration_warns_instead_of_going_silent(self):
+        """旧トークンはあるのに移行できなかった＝再認証が必要になるケースを黙らせない。
+
+        `paths.migrate_legacy_file()` の `False` は「対象なし」と「失敗」を区別しないので、
+        呼び出し側のこの検出が無いと、未認証のまま静かに起動してしまう。失敗は本物を使う
+        （移行先の親に**普通のファイル**を置いて `mkdir` を ENOTDIR にする）。
+
+        警告文にトークンの中身を載せないこと（パスだけ）も併せて見る。
+        """
+        self.write_legacy()
+        self.token_path.parent.write_text("not a directory", encoding="utf-8")
+
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertFalse(drive_upload.ensure_migrated())
+        warning = stream.getvalue()
+        self.assertIn("[migrate]", warning)
+        self.assertIn(str(self.legacy_path), warning)
+        self.assertIn(str(self.token_path), warning)
+        self.assertNotIn(self.PAYLOAD["refresh_token"], warning)
+
+    def test_a_no_op_migration_stays_quiet(self):
+        """移行対象が無いだけの `False` で警告を出さない（毎起動の誤報になる）。"""
+        for label, prepare in (
+            ("旧トークンが無い", lambda: None),
+            ("新パスに既にある（冪等）", self.migrate_once),
+        ):
+            with self.subTest(label):
+                prepare()
+                stream = io.StringIO()
+                with contextlib.redirect_stderr(stream):
+                    drive_upload.ensure_migrated()
+                self.assertEqual(stream.getvalue(), "")
+
+    def migrate_once(self):
+        self.write_legacy()
+        self.assertTrue(drive_upload.ensure_migrated())
+        # 旧トークンを復活させて「両方ある」状態を作る（冪等性で False になる経路）。
+        self.write_legacy({"refresh_token": "stale", "token": "old"})
 
 
 # ---------------------------------------------------------------------------

@@ -633,7 +633,10 @@ fn run_pip_install(app_handle: &AppHandle, caller_message: &str) -> bool {
                     log_tail(&guard.log, 5)
                 )
             };
-            update_setup_state(app_handle, SetupState::new("failed", message));
+            // Keep the log: `SetupState::new` would reset it to empty, throwing away
+            // every pip line the user has been watching — and `message` above is built
+            // from `log_tail`, so the detail it points at would vanish with it.
+            update_setup_state_keeping_log(app_handle, "failed", message);
             return false;
         }
     }

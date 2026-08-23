@@ -599,7 +599,9 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 
 > ⚠️ **`ensure_migrated()` は import 時には呼ばない契約。** `config.py` / `drive_upload.py` の `ensure_migrated()` はどちらも、モジュールロード時ではなく実アプリの `__main__` エントリポイント（`server.main()` / `engine.main()` / `bracket.main()`）から明示的に呼ぶ設計になっている。`npm run test:raw`（`unittest discover`）は対象モジュールを `import` するため、import 時に移行を走らせるとテスト実行だけで実データ（現像元フォルダの設定・生のOAuthリフレッシュトークン）が動いてしまうため。
 >
-> **新しい `__main__` エントリポイントを追加する場合は、対応する `ensure_migrated()`（`config.ensure_migrated()` は必須、Google Drive機能を使うなら `drive_upload.ensure_migrated()` も）を `main()` の先頭で呼ぶこと。** 呼び忘れると、そのエントリポイント経由では移行が起きず、`config.source_root()` の「例外を投げない」設計により**静かに** `DEFAULT_SOURCE_ROOT` へフォールバックする（気づきにくい形で壊れる）。
+> **新しい `__main__` エントリポイントを追加する場合は、対応する `ensure_migrated()`（`config.ensure_migrated()` は必須、Google Drive機能を使うなら `drive_upload.ensure_migrated()` も）を、設定を読む処理より前に呼ぶこと。** 呼び忘れると、そのエントリポイント経由では移行が起きず、`config.source_root()` の「例外を投げない」設計により**静かに** `DEFAULT_SOURCE_ROOT` へフォールバックする（気づきにくい形で壊れる）。
+>
+> 呼ぶ位置は「意味のある実行だと確定してから」（2026-08-23 追補）。argparse を使う CLI（`engine.main()` / `bracket.main()`）は `parse_args()` の**直後**で呼ぶ。`--help` や引数エラーは `SystemExit` で抜けるため、その前に置くと**起動しない実行でも不可逆なファイル移動が走る**。argparse を持たない `server.main()` は `main()` の先頭でよい。あわせて、移行通知は stdout が機械可読な契約を持つ CLI（末尾で `json.dumps` を出す）では **stderr** へ出すこと。
 
 ### `local_raw/config.py`（2026-08-18 追補）
 
@@ -668,7 +670,8 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 ### `local_raw/drive_upload.py`（2026-08-22 追補）
 
 書き出し済みバッチの Google Drive アップロード（OAuth デスクトップアプリ）。
-`server.py` は呼び出し時に import する。
+`server.py` はハンドラ関数内で呼び出し時に import する（ただし `server.main()` 自身は
+`ensure_migrated()` を呼ぶため起動時に import する。2026-08-23 追補）。
 
 - `CLIENT_SECRET_PATH = PROJECT_ROOT / "local_raw" / "drive_client_secret.json"`（**source control 対象外**）
 - `TOKEN_PATH = paths.app_data_dir() / "drive_auth.json"` — リフレッシュトークン（2026-08-23 追補: 旧保存先は `outputs/drive_auth.json`）。

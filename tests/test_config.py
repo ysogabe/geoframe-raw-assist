@@ -6,6 +6,8 @@
 差し替える（`MigrationTests` の注意書きを参照）。
 """
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -455,6 +457,43 @@ class MigrationTests(unittest.TestCase):
             json.loads(self.config_path.read_text(encoding="utf-8"))[config.SOURCE_ROOT_KEY],
             "/cards/a",
         )
+
+    def test_a_failed_migration_warns_instead_of_going_silent(self):
+        """旧ファイルはあるのに移行できなかった＝設定が実質失われるケースを黙らせない。
+
+        `paths.migrate_legacy_file()` の `False` は「対象なし」と「失敗」を区別しないので、
+        呼び出し側のこの検出が無いと、設定を失ったまま既定フォルダで起動してしまう。
+        失敗は本物を使う（移行先の親に**普通のファイル**を置いて `mkdir` を ENOTDIR にする）。
+        """
+        self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/a"})
+        self.config_path.parent.write_text("not a directory", encoding="utf-8")
+
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertFalse(config.ensure_migrated())
+        warning = stream.getvalue()
+        self.assertIn("[migrate]", warning)
+        self.assertIn(str(self.legacy_path), warning)
+        self.assertIn(str(self.config_path), warning)
+
+    def test_a_no_op_migration_stays_quiet(self):
+        """移行対象が無いだけの `False` で警告を出さない（毎起動の誤報になる）。"""
+        for label, prepare in (
+            ("旧ファイルが無い", lambda: None),
+            ("新パスに既にある（冪等）", self.migrate_once),
+        ):
+            with self.subTest(label):
+                prepare()
+                stream = io.StringIO()
+                with contextlib.redirect_stderr(stream):
+                    config.ensure_migrated()
+                self.assertEqual(stream.getvalue(), "")
+
+    def migrate_once(self):
+        self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/a"})
+        self.assertTrue(config.ensure_migrated())
+        # 旧ファイルを復活させて「両方ある」状態を作る（冪等性で False になる経路）。
+        self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/b"})
 
     def test_the_migrated_setting_is_what_source_root_reads(self):
         """移行が実際に効いていること（新パス経由で現像元フォルダが復元される）。"""

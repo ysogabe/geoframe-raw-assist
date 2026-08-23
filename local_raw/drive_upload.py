@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
 import traceback
 import uuid
@@ -205,8 +206,21 @@ def ensure_migrated() -> bool:
     `import local_raw.drive_upload` を伴うため、import 時に移行を走らせると
     テストを実行するだけで生のOAuthリフレッシュトークンが動いてしまう。
     呼び出しは実アプリの起動経路（`server.main()`）からのみ行うこと。
+
+    `paths.migrate_legacy_file()` の `False` は「移行対象なし」と「移行に失敗した」を
+    区別しないので、後者（旧ファイルはあるのに新しい場所へ移せなかった＝再認証が必要に
+    なる）だけをここで検出して警告する。`TOKEN_PATH.exists()` を条件に含めるのは、
+    新しい場所に既にある＝冪等性による正常な `False` を誤検知しないため。
     """
-    return paths.migrate_legacy_file(_LEGACY_TOKEN_PATH, TOKEN_PATH, mode=0o600)
+    old_existed_before = _LEGACY_TOKEN_PATH.is_file()
+    migrated = paths.migrate_legacy_file(_LEGACY_TOKEN_PATH, TOKEN_PATH, mode=0o600)
+    if old_existed_before and not migrated and not TOKEN_PATH.exists():
+        print(
+            f"[migrate] warning: {_LEGACY_TOKEN_PATH} が存在するのに "
+            f"{TOKEN_PATH} への移行に失敗しました（書き込み権限等を確認してください）。",
+            file=sys.stderr,
+        )
+    return migrated
 
 
 # ---------------------------------------------------------------------------

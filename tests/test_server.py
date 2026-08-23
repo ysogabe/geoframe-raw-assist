@@ -7,18 +7,23 @@
 - `GET /merged-preview/` が `_serve_from_root()` のパストラバーサル検査を緩めていないこと
 - 同じディレクトリを別々に導出している定数（`server` / `bracket` / `export`）が食い違わないこと
 - `/api/drive-upload` の 2 ハンドラが例外を HTTP へ写す分岐（400 / 500）
+- `main()` が起動時に旧パスからの移行（`ensure_migrated()`）を呼ぶ配線
 
 `RawAssistHandler` はソケットに紐づくのでインスタンス化せず、ハンドラが実際に呼ぶ
 メソッドだけを持つ `StubRequest` を渡す（ポートは一切使わない）。
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urlparse
 
+from local_raw import analysis as analysis_module
 from local_raw import bracket as bracket_module
+from local_raw import config as config_module
 from local_raw import drive_upload as drive_upload_module
 from local_raw import export as export_module
 from local_raw import server as server_module
@@ -311,6 +316,85 @@ class DriveUploadHandlerTests(unittest.TestCase):
         self.assertIs(
             server_module.POST_ROUTES["/api/drive-upload"], server_module.handle_drive_upload
         )
+
+
+class MainMigrationWiringTests(unittest.TestCase):
+    """`main()` が両方の `ensure_migrated()` を呼ぶこと（実質的な本番経路の配線）。
+
+    Tauri アプリは `python -m local_raw.server` で起動するので、ここが移行の唯一の
+    入口になる。この配線が消えても `config` / `drive_upload` 側の移行テストは
+    そのまま green のままなので、**呼び出し側**をここで固定する。呼ばれなくなると
+    `config.source_root()` の「例外を投げない」設計により、旧設定が静かに無視されて
+    既定フォルダへ落ちる（気づきにくい形で壊れる）。
+
+    ソケットは開かない: `ThreadingHTTPServer` をモックに差し替えるので
+    `serve_forever()` / `server_close()` は何もしない。実データを触らないよう
+    `mkdir` される 6 つのルートはすべて tmpdir へ逃がす。
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name).resolve()
+
+        # `main()` が mkdir するルート。`ANALYSIS_ROOT` だけは `analysis` モジュール上で
+        # 参照されるので、`server` へ patch しても効かない（別モジュールを押さえる）。
+        roots = mock.patch.multiple(
+            server_module,
+            OUTPUT_ROOT=self.tmp / "developed",
+            PREVIEW_ROOT=self.tmp / "preview",
+            MERGED_ROOT=self.tmp / "merged",
+            MERGED_PREVIEW_ROOT=self.tmp / "merged_preview",
+            THUMBS_ROOT=self.tmp / "thumbnails",
+        )
+        roots.start()
+        self.addCleanup(roots.stop)
+        analysis_root = mock.patch.object(
+            analysis_module, "ANALYSIS_ROOT", self.tmp / "analysis"
+        )
+        analysis_root.start()
+        self.addCleanup(analysis_root.stop)
+
+    def run_main(self, *, config_migrated=False, drive_migrated=False):
+        """`main()` を1回走らせ、2つの `ensure_migrated` のモックと stdout を返す。"""
+        server = mock.MagicMock()
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(server_module, "ThreadingHTTPServer", return_value=server),
+            mock.patch.object(
+                config_module, "ensure_migrated", return_value=config_migrated
+            ) as config_migrate,
+            mock.patch.object(
+                drive_upload_module, "ensure_migrated", return_value=drive_migrated
+            ) as drive_migrate,
+            contextlib.redirect_stdout(stdout),
+        ):
+            server_module.main()
+        return config_migrate, drive_migrate, server, stdout.getvalue()
+
+    def test_main_runs_both_migrations(self):
+        config_migrate, drive_migrate, _, _ = self.run_main()
+        config_migrate.assert_called_once_with()
+        drive_migrate.assert_called_once_with()
+
+    def test_the_drive_migration_runs_even_though_the_import_is_function_local(self):
+        """`main()` の `from . import drive_upload` は同じモジュールオブジェクトを指す。
+
+        （patch が素通りしていれば、上のテストごと空振りしていることになる）
+        """
+        _, drive_migrate, _, _ = self.run_main(drive_migrated=True)
+        self.assertEqual(drive_migrate.call_count, 1)
+
+    def test_a_migration_is_announced(self):
+        _, _, _, output = self.run_main(config_migrated=True, drive_migrated=True)
+        self.assertIn(str(config_module.CONFIG_PATH), output)
+        self.assertIn(str(drive_upload_module.TOKEN_PATH), output)
+
+    def test_the_server_is_started_and_closed(self):
+        """移行が済んでから配信を始めること（順序が逆だと初回起動で旧設定を取り逃す）。"""
+        _, _, server, _ = self.run_main()
+        server.serve_forever.assert_called_once_with()
+        server.server_close.assert_called_once_with()
 
 
 class StaticRootConsistencyTests(unittest.TestCase):

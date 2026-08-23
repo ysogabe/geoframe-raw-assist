@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from datetime import UTC, datetime
@@ -526,9 +527,6 @@ def develop_raw(
 
 
 def main() -> None:
-    if config.ensure_migrated():
-        print(f"[migrate] moved to app data dir: {config.CONFIG_PATH}", flush=True)
-
     parser = argparse.ArgumentParser(description="Sony ARWを非破壊でローカル現像します。")
     parser.add_argument("capture_id", help="例: DSC02943")
     parser.add_argument("--preset", choices=sorted(PRESETS), default=DEFAULT_PRESET)
@@ -544,6 +542,17 @@ def main() -> None:
     )
     parser.add_argument("--max-edge", type=int, default=DEFAULT_MAX_EDGE)
     args = parser.parse_args()
+
+    # 移行（不可逆なファイル移動）は `parse_args()` の**後**。`--help` や引数エラーは
+    # ここへ来る前に `SystemExit` するので、意味のある実行だと分かってから副作用を起こす。
+    # 通知は stderr へ。stdout は末尾の `json.dumps(...)` が機械可読な契約を持つため、
+    # 初回だけ行が混ざると `| jq` のような使い方が壊れる。
+    if config.ensure_migrated():
+        print(
+            f"[migrate] moved to app data dir: {config.CONFIG_PATH}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     overrides = None
     if args.adjustments:

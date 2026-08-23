@@ -35,7 +35,20 @@ def app_data_dir() -> Path:
         try:
             return Path.home()
         except (OSError, RuntimeError, KeyError):
-            return Path.cwd()
+            # ⚠️ この行き先は `.gitignore` の守備範囲外になりうる。Tauri は
+            # `current_dir(repo_root())` でエンジンを起動するため、ここでの `Path.cwd()` は
+            # リポジトリルートになり、`<repo>/Library/Application Support/...` へ
+            # 生のリフレッシュトークンが書かれる（`.gitignore` の
+            # `/Library/` `/.local/` `/AppData/` はそのための保険）。
+            # ⚠️ 防げるのは「意図しないコミット」だけで、**書き込みそのものは防げない**。
+            # 警告は出すが**移行は止めない**
+            # （`migrate_legacy_file` の「例外は一切投げない」契約を保つ）。
+            fallback = Path.cwd()
+            print(
+                f"[paths] HOME を解決できないため {fallback} へフォールバックします。",
+                file=sys.stderr,
+            )
+            return fallback
 
     if sys.platform == "darwin":
         return _home() / "Library" / "Application Support" / APP_IDENTIFIER

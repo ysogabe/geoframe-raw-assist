@@ -5,6 +5,9 @@
 作り、`app_data_dir()` が指す**本物の**ユーザーディレクトリには一切書き込まない。
 """
 
+import contextlib
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -15,6 +18,9 @@ from local_raw import paths
 
 #: root で走らせるとパーミッション検査が成立しない（root は 0o500 でも書けてしまう）。
 RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+#: `config.PROJECT_ROOT` と同じ導出（tests/ の1つ上がリポジトリルート）。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class AppDataDirTests(unittest.TestCase):
@@ -77,8 +83,15 @@ class AppDataDirTests(unittest.TestCase):
             self.assertFalse(resolved.exists())
 
     def test_the_identifier_is_the_tauri_bundle_identifier(self):
-        """`src-tauri/tauri.conf.json` の `identifier` とズレると保存先が2つに割れる。"""
-        self.assertEqual(paths.APP_IDENTIFIER, "com.geoframe.rawassist")
+        """`src-tauri/tauri.conf.json` の `identifier` とズレると保存先が2つに割れる。
+
+        リテラルと突き合わせるとこのテストは同語反復になり、`tauri.conf.json` 側だけを
+        書き換えても気づけない。**実ファイルを読んで**クロスファイルの不変条件を見る。
+        """
+        tauri_conf = json.loads(
+            (PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(paths.APP_IDENTIFIER, tauri_conf["identifier"])
 
 
 class HomeResolutionFailureTests(unittest.TestCase):
@@ -99,8 +112,23 @@ class HomeResolutionFailureTests(unittest.TestCase):
                 os.environ.pop(key, None)
             os.environ.update(environ or {})
             # 例外が伝播しないこと自体がここの主張（伝播すればこの行で落ちる）。
-            resolved = paths.app_data_dir()
+            # 警告は stderr へ出るので、捨てずに捕らえて中身も見る（テスト出力を
+            # 汚さないためでもある）。
+            resolved = self.resolve_capturing_stderr()
         self.assertEqual(resolved, Path.cwd().joinpath(*expected_tail, paths.APP_IDENTIFIER))
+
+    def resolve_capturing_stderr(self) -> Path:
+        """`app_data_dir()` を呼び、フォールバック警告が stderr に出ることまで確かめる。
+
+        この警告だけが「本来と違う場所へ書こうとしている」ことの手掛かりなので、
+        黙って消えていないことをここで固定する。
+        """
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            resolved = paths.app_data_dir()
+        self.assertIn("[paths]", stream.getvalue())
+        self.assertIn(str(Path.cwd()), stream.getvalue())
+        return resolved
 
     def test_macos_falls_back_to_the_current_directory(self):
         self.assert_falls_back("darwin", ("Library", "Application Support"))
@@ -117,7 +145,7 @@ class HomeResolutionFailureTests(unittest.TestCase):
             mock.patch.object(paths.Path, "home", side_effect=OSError(2, "no such file")),
         ):
             self.assertEqual(
-                paths.app_data_dir(),
+                self.resolve_capturing_stderr(),
                 Path.cwd() / "Library" / "Application Support" / paths.APP_IDENTIFIER,
             )
 
@@ -130,7 +158,7 @@ class HomeResolutionFailureTests(unittest.TestCase):
         ):
             os.environ.pop("XDG_DATA_HOME", None)
             self.assertEqual(
-                paths.app_data_dir(),
+                self.resolve_capturing_stderr(),
                 Path.cwd() / ".local" / "share" / paths.APP_IDENTIFIER,
             )
 
