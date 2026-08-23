@@ -698,6 +698,8 @@ export default function Home() {
               elapsedLabel={elapsedLabel}
               previewResult={state.previewResults[captureId]}
               fullResult={state.fullResults[captureId]}
+              previewResults={state.previewResults}
+              fullResults={state.fullResults}
               comparisonRef={comparisonRef}
               isBracket={isBracket}
               mergeFrames={mergeFrames}
@@ -712,7 +714,7 @@ export default function Home() {
               mergeFullResult={mergeFullResult}
               viewing={viewing}
               onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
-              onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
+              onOpenViewer={(gallery) => dispatch({ type: "viewer/open", gallery })}
             />
           </>
         ) : screen === "export" ? (
@@ -750,9 +752,11 @@ export default function Home() {
       </main>
 
       {/* 原寸ビューア。showModal() でトップレイヤーに乗るので DOM 上の位置は問わない。
-          開くたびに新しく mount して、拡大率と面の選択を前回から持ち越さない。 */}
-      {state.viewer && (
-        <FullSizeViewer source={state.viewer} onClose={() => dispatch({ type: "viewer/close" })} />
+          開くたびに新しく mount して、拡大率と面の選択を前回から持ち越さない。
+          ビューア内で前後の写真へ送っても selectedGroupId / viewing は動かさないので、
+          閉じたときは開く前の操作パネルがそのまま残る。 */}
+      {state.viewer && state.viewer.items.length > 0 && (
+        <FullSizeViewer gallery={state.viewer} onClose={() => dispatch({ type: "viewer/close" })} />
       )}
     </div>
   );

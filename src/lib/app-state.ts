@@ -107,6 +107,8 @@ export type ViewingItem = { kind: "photo"; captureId: CaptureId } | { kind: "mer
  * 同じ拡大率・同じ位置のまま現像前後を見比べられるビューアを内製する。
  */
 export type ViewerSource = {
+  /** この 2 面が属する写真。送り位置の特定に使う。 */
+  captureId: CaptureId;
   /** 現像前（カメラJPG）の URL。ビューアの基準グリッドはこの画像の実解像度に固定する。 */
   beforeUrl: string;
   /** 現像後 / 合成後の URL。無い場合（まだ現像していない）は undefined。 */
@@ -119,6 +121,23 @@ export type ViewerSource = {
   preview: boolean;
   /** ヘッダに出す見出し（撮影ID など）。 */
   title: string;
+};
+
+/**
+ * 原寸ビューアで前後に送れる写真の輪。
+ *
+ * 送り先をコールバックで引かせず、**開いた時点のスナップショットを配列で渡す**。
+ * ビューアは自分の中の添字だけを動かせばよく、グループ選択（selectedGroupId）や
+ * 表示カーソル（viewing）には一切触れない ＝ 閉じたときに元の操作パネルがそのまま残る。
+ *
+ * スナップショットである以上、ビューアを開いている間に現像が終わってもその結果は
+ * 反映されない（開き直せば入る）。同期機構を足すと「見ている面が勝手に差し替わる」
+ * 方が害が大きいので、これは仕様として許容する。
+ */
+export type ViewerGallery = {
+  items: ViewerSource[];
+  /** items の中で最初に見せる位置。 */
+  index: number;
 };
 
 const DEFAULT_PRESET: PresetName = "neutral_recovery";
@@ -198,8 +217,8 @@ export type State = {
    * running の間の 1 秒ポーリングで更新される。
    */
   driveUpload: DriveUploadState | null;
-  /** 原寸ビューアで開いている 2 面。null なら閉じている。 */
-  viewer: ViewerSource | null;
+  /** 原寸ビューアで開いている写真の輪。null なら閉じている。 */
+  viewer: ViewerGallery | null;
   notice: string;
   noticeTone: "info" | "error";
 };
@@ -300,7 +319,7 @@ export type Action =
   | { type: "drive/poll"; response: DriveUploadState }
   /** POST /api/drive-upload 自体が失敗した（400・接続不能）。 */
   | { type: "drive/start-failed"; message: string }
-  | { type: "viewer/open"; source: ViewerSource }
+  | { type: "viewer/open"; gallery: ViewerGallery }
   | { type: "viewer/close" }
   | { type: "notice/set"; message: string; tone?: "info" | "error" }
   | { type: "notice/clear" };
@@ -790,7 +809,7 @@ export function reducer(state: State, action: Action): State {
       return { ...state, driveUpload: null, notice: action.message, noticeTone: "error" };
 
     case "viewer/open":
-      return { ...state, viewer: action.source };
+      return { ...state, viewer: action.gallery };
 
     case "viewer/close":
       return { ...state, viewer: null };

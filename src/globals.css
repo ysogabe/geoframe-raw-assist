@@ -606,10 +606,14 @@ button.comparison-image:hover .developed-label { background: rgba(19,29,26,.92);
 .viewer-quality small { color: #8a692d; font-size: 10px; font-weight: 800; }
 
 .viewer-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.viewer-switch, .viewer-zoom { display: flex; align-items: center; gap: 4px; }
-.viewer-switch button, .viewer-zoom button, .viewer-peek { border: 1px solid #cfd6d1; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.viewer-switch, .viewer-zoom, .viewer-nav { display: flex; align-items: center; gap: 4px; }
+.viewer-switch button, .viewer-zoom button, .viewer-nav button, .viewer-peek { border: 1px solid #cfd6d1; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
 .viewer-switch button.active { border-color: var(--green); background: var(--green); color: white; }
-.viewer-zoom button:hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
+.viewer-zoom button:hover, .viewer-nav button:not(:disabled):hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
+/* 送りは端で止まる（ラップしない）。押せないことを見た目でも示す。 */
+.viewer-nav button { min-width: 30px; font-size: 15px; line-height: 1; padding: 5px 8px; }
+.viewer-nav button:disabled { opacity: .34; cursor: not-allowed; }
+.viewer-count { min-width: 58px; text-align: center; color: #4f5d59; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .viewer-peek { touch-action: none; user-select: none; }
 .viewer-peek.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }
 .viewer-peek:disabled { opacity: .4; cursor: not-allowed; }
