@@ -50,3 +50,10 @@ __pycache__/
 
 # Google Drive OAuth client secret (personal, not for source control)
 /local_raw/drive_client_secret.json
+
+# local_raw/paths.py の Path.home() 解決失敗時フォールバック（Path.cwd()）が
+# リポジトリルート配下を指しうるための保険。通常は到達しない。
+# 3 プラットフォーム分の行き先をすべて塞ぐ（macOS / Linux / Windows）。
+/Library/
+/.local/
+/AppData/

@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
@@ -515,7 +516,43 @@ fn run_setup_bootstrap(app_handle: AppHandle) {
 ///
 /// `caller_message` is the headline shown while pip runs; the two callers
 /// word it differently ("first launch" vs "app update").
+///
+/// # Retries
+///
+/// pip's most common failure here is not a broken `requirements-raw.txt` but
+/// a flaky network — a DNS hiccup, a dropped TLS handshake, a PyPI mirror
+/// returning 5xx mid-download — and every one of those succeeds on a second
+/// try a few seconds later. So a non-zero *exit code* is retried up to
+/// `PIP_INSTALL_MAX_ATTEMPTS` times (the first attempt plus two retries),
+/// sleeping `PIP_INSTALL_RETRY_DELAY` between them, with the stage held at
+/// `"installing-deps"` and the log carried over so the user sees one
+/// continuous install rather than a flash of `"failed"`.
+///
+/// Two failure modes are deliberately *not* retried, because repeating them
+/// only burns the user's time: failing to **spawn** the interpreter at all
+/// (the venv's python is missing or not executable — no amount of waiting
+/// fixes that) and an **I/O error while waiting** on the child, which is a
+/// failure of the wait itself rather than a result the process produced.
+/// Both still fail fast exactly as before.
+///
+/// # Cost of the retries, and why it is accepted
+///
+/// Because this function is shared, the retries apply to both callers.
+/// `run_dependency_refresh`'s guarantee is unchanged — it still starts the
+/// engine after a failure, so a transient failure still does not cost the
+/// user the whole app. What *does* change is how long "no network at all"
+/// takes to give up: up to `PIP_INSTALL_MAX_ATTEMPTS` full pip attempts plus
+/// the waits between them, where it used to be one. That is the accepted
+/// trade — an offline launch is slower to reach the window, in exchange for
+/// a flaky-network launch usually not failing at all. Both callers already
+/// run off the main thread (see their doc comments), so the blocking sleep
+/// delays only this bootstrap thread and never the UI.
 fn run_pip_install(app_handle: &AppHandle, caller_message: &str) -> bool {
+    /// Total pip attempts before giving up: the first try plus two retries.
+    const PIP_INSTALL_MAX_ATTEMPTS: u32 = 3;
+    /// Pause between attempts, so a momentary network blip has time to clear.
+    const PIP_INSTALL_RETRY_DELAY: Duration = Duration::from_secs(5);
+
     update_setup_state(app_handle, SetupState::new("installing-deps", caller_message));
 
     // Snapshot the file before pip reads it, so the marker records exactly
@@ -524,52 +561,84 @@ fn run_pip_install(app_handle: &AppHandle, caller_message: &str) -> bool {
     let requirements = fs::read_to_string(requirements_path());
 
     let venv_python = venv_python_path();
-    let mut pip_command = Command::new(&venv_python);
-    pip_command
-        .args(["-m", "pip", "install", "-r"])
-        .arg(requirements_path())
-        .current_dir(repo_root());
 
-    let pip_child = match spawn_setup_step(&mut pip_command) {
-        Ok(child) => child,
-        Err(err) => {
-            eprintln!("[raw-setup] failed to spawn {}: {err}", venv_python.display());
-            update_setup_state(
+    for attempt in 1..=PIP_INSTALL_MAX_ATTEMPTS {
+        // Announce the retry *before* sleeping, so the user is looking at an
+        // explanation during the pause rather than at a stalled progress line.
+        if attempt > 1 {
+            update_setup_state_keeping_log(
                 app_handle,
-                SetupState::new("failed", format!("pip install の起動に失敗しました: {err}")),
+                "installing-deps",
+                format!("{caller_message}（再試行しています {attempt}/{PIP_INSTALL_MAX_ATTEMPTS}）…"),
             );
-            return false;
-        }
-    };
-
-    let status = match stream_setup_output(app_handle, pip_child) {
-        Ok(status) => status,
-        Err(err) => {
-            eprintln!("[raw-setup] failed to wait for pip install: {err}");
-            update_setup_state(
+            append_setup_log(
                 app_handle,
-                SetupState::new("failed", format!("依存ライブラリのインストール中にエラーが発生しました: {err}")),
+                format!("[raw-setup] retrying pip install (attempt {attempt}/{PIP_INSTALL_MAX_ATTEMPTS})"),
             );
-            return false;
+            thread::sleep(PIP_INSTALL_RETRY_DELAY);
         }
-    };
 
-    if !status.success() {
-        let message = {
-            let state = app_handle.state::<Mutex<SetupState>>();
-            let guard = match state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            format!(
-                "依存ライブラリのインストールに失敗しました (終了コード {}).\n{}",
-                status.code().map(|c| c.to_string()).unwrap_or_else(|| "不明".to_string()),
-                log_tail(&guard.log, 5)
-            )
+        // A `Command` is consumed by `spawn`, so each attempt needs its own.
+        let mut pip_command = Command::new(&venv_python);
+        pip_command
+            .args(["-m", "pip", "install", "-r"])
+            .arg(requirements_path())
+            .current_dir(repo_root());
+
+        let pip_child = match spawn_setup_step(&mut pip_command) {
+            Ok(child) => child,
+            Err(err) => {
+                // Not retried: the interpreter itself is unusable.
+                eprintln!("[raw-setup] failed to spawn {}: {err}", venv_python.display());
+                update_setup_state(
+                    app_handle,
+                    SetupState::new("failed", format!("pip install の起動に失敗しました: {err}")),
+                );
+                return false;
+            }
         };
-        eprintln!("[raw-setup] pip install failed: {status}");
-        update_setup_state(app_handle, SetupState::new("failed", message));
-        return false;
+
+        let status = match stream_setup_output(app_handle, pip_child) {
+            Ok(status) => status,
+            Err(err) => {
+                // Not retried: the wait failed, so pip's own result is unknown.
+                eprintln!("[raw-setup] failed to wait for pip install: {err}");
+                update_setup_state(
+                    app_handle,
+                    SetupState::new("failed", format!("依存ライブラリのインストール中にエラーが発生しました: {err}")),
+                );
+                return false;
+            }
+        };
+
+        // The only way out of this loop to the marker write below.
+        if status.success() {
+            break;
+        }
+
+        eprintln!(
+            "[raw-setup] pip install failed (attempt {attempt}/{PIP_INSTALL_MAX_ATTEMPTS}): {status}"
+        );
+
+        if attempt == PIP_INSTALL_MAX_ATTEMPTS {
+            let message = {
+                let state = app_handle.state::<Mutex<SetupState>>();
+                let guard = match state.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                format!(
+                    "依存ライブラリのインストールに失敗しました (終了コード {}, {attempt}回試行).\n{}",
+                    status.code().map(|c| c.to_string()).unwrap_or_else(|| "不明".to_string()),
+                    log_tail(&guard.log, 5)
+                )
+            };
+            // Keep the log: `SetupState::new` would reset it to empty, throwing away
+            // every pip line the user has been watching — and `message` above is built
+            // from `log_tail`, so the detail it points at would vanish with it.
+            update_setup_state_keeping_log(app_handle, "failed", message);
+            return false;
+        }
     }
 
     // Only now — pip exited 0 — may the venv be recorded as satisfying this

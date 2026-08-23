@@ -20,18 +20,23 @@ import hashlib
 import json
 import os
 import stat as stat_module
+import sys
 import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"
-CONFIG_PATH = PROJECT_ROOT / "outputs" / "config.json"
+#: 旧パス（outputs/ 配下）。ensure_migrated() が一度きりの移行に使う。
+_LEGACY_CONFIG_PATH = PROJECT_ROOT / "outputs" / "config.json"
+CONFIG_PATH = paths.app_data_dir() / "config.json"
 
 CONFIG_VERSION = 1
 
-#: `outputs/config.json` 内で現像元フォルダを保持するキー。
+#: 設定ファイル（`CONFIG_PATH`）内で現像元フォルダを保持するキー。
 SOURCE_ROOT_KEY = "source_root"
 
 #: `root_key`（サムネイル名の接頭辞 / フォルダ識別子）の長さ。
@@ -53,6 +58,7 @@ __all__ = [
     "PROJECT_ROOT",
     "SourceFolderError",
     "display_path",
+    "ensure_migrated",
     "root_key_for",
     "set_source_root",
     "source_folder_info",
@@ -261,6 +267,32 @@ def set_source_root(path: Any, *, analysis_running: bool = False) -> Path:
     with _WRITE_LOCK:
         _write_config({"config_version": CONFIG_VERSION, SOURCE_ROOT_KEY: str(resolved)})
     return resolved
+
+
+def ensure_migrated() -> bool:
+    """`_LEGACY_CONFIG_PATH`（outputs/config.json）から `CONFIG_PATH` への一度きりの移行。
+
+    `paths.migrate_legacy_file()` の冪等性に従うので、呼び出しごとに実行してよい。
+
+    ⚠️ **モジュールロード時には呼ばないこと。** `npm run test:raw`（`unittest discover`）は
+    `import local_raw.config` を伴うため、import 時に移行を走らせるとテストを実行する
+    だけで実データ（現像元フォルダの設定）が動いてしまう。呼び出しは実アプリの
+    起動経路（`server.main()` / `engine.main()` / `bracket.main()`）からのみ行うこと。
+
+    `paths.migrate_legacy_file()` の `False` は「移行対象なし」と「移行に失敗した」を
+    区別しないので、後者（旧ファイルはあるのに新しい場所へ移せなかった＝設定が実質
+    失われる）だけをここで検出して警告する。`CONFIG_PATH.exists()` を条件に含めるのは、
+    新しい場所に既にある＝冪等性による正常な `False` を誤検知しないため。
+    """
+    old_existed_before = _LEGACY_CONFIG_PATH.is_file()
+    migrated = paths.migrate_legacy_file(_LEGACY_CONFIG_PATH, CONFIG_PATH)
+    if old_existed_before and not migrated and not CONFIG_PATH.exists():
+        print(
+            f"[migrate] warning: {_LEGACY_CONFIG_PATH} が存在するのに "
+            f"{CONFIG_PATH} への移行に失敗しました（書き込み権限等を確認してください）。",
+            file=sys.stderr,
+        )
+    return migrated
 
 
 def source_folder_info(root: Path | None = None) -> dict[str, Any]:
