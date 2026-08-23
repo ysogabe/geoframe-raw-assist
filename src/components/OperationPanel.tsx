@@ -1,5 +1,5 @@
 import { useRef, type RefObject } from "react";
-import type { DevelopMode, EngineStatus, ViewerSource, ViewingItem } from "../lib/app-state";
+import type { DevelopMode, EngineStatus, ViewerGallery, ViewerSource, ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -61,6 +61,12 @@ type OperationPanelProps = {
   elapsedLabel: string;
   previewResult: DevelopedResult | undefined;
   fullResult: DevelopedResult | undefined;
+  /**
+   * 現像結果の全量。原寸ビューアの送り輪（グループ跨ぎの全写真）を組み立てるのに使う。
+   * 単数形の previewResult / fullResult は「今見ている 1 枚」用で、こちらとは役割が別。
+   */
+  previewResults: Record<CaptureId, DevelopedResult>;
+  fullResults: Record<CaptureId, DevelopedResult>;
   comparisonRef: RefObject<HTMLDivElement | null>;
   /** 露出ブラケットのグループか。false なら合成の導線を一切出さない。 */
   isBracket: boolean;
@@ -80,8 +86,8 @@ type OperationPanelProps = {
   /** このグループで今見ている面。比較タブの選択状態はここから導く。 */
   viewing: ViewingItem;
   onViewMerged: () => void;
-  /** アプリ内の原寸ビューアを開く。渡す 2 面はこの画面が組み立てる。 */
-  onOpenViewer: (source: ViewerSource) => void;
+  /** アプリ内の原寸ビューアを開く。送り輪（開いた時点のスナップショット）はこの画面が組み立てる。 */
+  onOpenViewer: (gallery: ViewerGallery) => void;
 };
 
 function ScoreRow({ label, value }: { label: string; value: number }) {
@@ -118,6 +124,8 @@ export function OperationPanel({
   elapsedLabel,
   previewResult,
   fullResult,
+  previewResults,
+  fullResults,
   comparisonRef,
   isBracket,
   mergeFrames,
@@ -169,22 +177,60 @@ export function OperationPanel({
   const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
 
   /**
-   * 原寸ビューアに渡す 2 面をここで組み立てる（起動元が 3 か所あるので 1 か所にまとめる）。
+   * 原寸ビューアの送り輪を組み立てる。**グループを跨いだ全写真**を一覧と同じ並び順で並べ、
+   * 今開こうとしている 1 枚をその中の位置として渡す。ビューアは自分の添字だけを動かすので、
+   * 送っても selectedGroupId / viewing は動かない（閉じれば元の操作パネルがそのまま残る）。
+   *
    * 現像後の URL は `output_url` をそのまま使う。キャッシュバスター付きの完全URLなので
    * assetUrl() を通してはならない。
    */
-  function viewerSourceFor(initial: "before" | "after"): ViewerSource {
+  function photoGalleryFor(initial: "before" | "after"): ViewerGallery {
+    const items: ViewerSource[] = analysis.groups
+      .flatMap((item) => item.capture_ids)
+      .map((id) => {
+        // 本現像があればそちら、無ければプレビュー。どちらも無ければ現像前しか見せられない。
+        const developed = fullResults[id] ?? previewResults[id];
+        return {
+          captureId: id,
+          beforeUrl: sourceJpgUrl(id),
+          afterUrl: developed?.output_url,
+          beforeLabel: "現像前",
+          afterLabel: "現像後",
+          // まだ現像していなければ見せられるのは現像前だけ。
+          initial: developed ? initial : "before",
+          preview: Boolean(developed?.preview),
+          title: id,
+        };
+      });
+    // 表示カーソルがどの写真にも当たらない状況（想定外）でも先頭から開ければ十分。
+    const index = items.findIndex((item) => item.captureId === captureId);
+    return { items, index: index < 0 ? 0 : index };
+  }
+
+  /**
+   * 比較欄（現像 / 合成タブ）から開くときの輪。
+   *
+   * 合成後の 1 枚は複数フレームの産物で、どの 1 枚にも属さない。「前後の写真へ送る」の
+   * 意味と噛み合わないので、合成を見ている間だけは送り先を持たない単独の輪にする。
+   */
+  function viewerGalleryFor(initial: "before" | "after"): ViewerGallery {
     // ここは `result &&` のガードで書く（変数経由だと result の型が絞られない）。
     const merged = result && isMergedResult(result) ? result : null;
+    if (!merged) return photoGalleryFor(initial);
     return {
-      beforeUrl: sourceJpgUrl(captureId),
-      afterUrl: result?.output_url,
-      beforeLabel: "現像前",
-      afterLabel: merged ? "合成後" : "現像後",
-      // まだ現像していなければ見せられるのは現像前だけ。
-      initial: result ? initial : "before",
-      preview: Boolean(result?.preview),
-      title: merged ? `${captureId}（ブラケット合成 ${merged.frames}枚）` : captureId,
+      items: [
+        {
+          captureId,
+          beforeUrl: sourceJpgUrl(captureId),
+          afterUrl: merged.output_url,
+          beforeLabel: "現像前",
+          afterLabel: "合成後",
+          initial,
+          preview: Boolean(merged.preview),
+          title: `${captureId}（ブラケット合成 ${merged.frames}枚）`,
+        },
+      ],
+      index: 0,
     };
   }
 
@@ -212,7 +258,7 @@ export function OperationPanel({
             <button
               type="button"
               className="preview-open"
-              onClick={() => onOpenViewer(viewerSourceFor("before"))}
+              onClick={() => onOpenViewer(photoGalleryFor("before"))}
               aria-label={`${captureId} を原寸で表示`}
             >
               <span>原寸で見る</span>
@@ -220,7 +266,7 @@ export function OperationPanel({
           </div>
           <div className="media-footnote">
             {photo && <span>{formatDimensions(photo)}{isPortrait(photo.orientation) ? "・縦位置" : ""}</span>}
-            <button type="button" onClick={() => onOpenViewer(viewerSourceFor("before"))}>
+            <button type="button" onClick={() => onOpenViewer(photoGalleryFor("before"))}>
               カメラJPGを原寸で開く
             </button>
           </div>
@@ -443,7 +489,7 @@ export function OperationPanel({
             ? (next) => (next === "merged" ? onViewMerged() : onViewCapture(group.id, captureId))
             : undefined
         }
-        onOpenFullSize={() => onOpenViewer(viewerSourceFor("after"))}
+        onOpenFullSize={() => onOpenViewer(viewerGalleryFor("after"))}
       />
     </section>
   );

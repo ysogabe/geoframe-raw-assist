@@ -92,6 +92,18 @@ img { display: block; max-width: 100%; }
 .progress-ring span { transform: rotate(-10deg); font-size: 13px; font-weight: 900; }
 .progress-ring small { font-size: 10px; }
 
+/* --- 一覧画面のヘッダ固定 ---------------------------------------------------
+   Topbar と SummaryStrip をまとめて window スクロールに追従させる。ラッパーは
+   画面によらず必ず出す（三項で消すと Topbar が remount される）ので、位置指定は
+   .page-header-sticky 側だけに置く。
+   背景は var(--paper) の不透明ベタ。.summary-strip 自身の背景は半透明なので、
+   下を流れるカードが透けないかどうかはこのラッパーの塗りだけで決まる。
+   帯の下の余白は margin ではなく padding で取る。ラッパーに下パディングが無いと
+   最後の子の margin-bottom が突き抜けて、塗りの外側に透明な隙間ができる。
+   z-index は .toast(20) より下、.sidebar(5) より下。 */
+.page-header-sticky { position: sticky; top: 0; z-index: 4; background: var(--paper); padding-bottom: 12px; box-shadow: 0 6px 14px -10px rgba(23,33,31,.5); }
+.page-header-sticky .summary-strip { margin: 10px 0 0; }
+
 .toast { position: fixed; right: 28px; top: 22px; z-index: 20; display: flex; align-items: center; gap: 10px; background: var(--ink); color: white; padding: 11px 12px 11px 15px; border-radius: 10px; font-size: 13px; box-shadow: 0 12px 35px rgba(10,20,18,.25); animation: slide-in .2s ease-out; }
 .toast > span { color: #67c7a5; }
 .toast button { border: 0; background: transparent; color: #8fa09a; cursor: pointer; font-size: 16px; }
@@ -113,10 +125,10 @@ img { display: block; max-width: 100%; }
 .view-tabs button { border: 0; background: transparent; color: #808986; font-size: 12px; padding: 9px 11px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .view-tabs button.active { color: var(--ink); font-weight: 800; border-bottom-color: var(--green); }
 .view-tabs span { color: #9ca3a1; margin-left: 3px; }
-.group-stack { display: grid; gap: 13px; }
-.group-card { min-height: 180px; display: grid; grid-template-columns: 220px 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+.group-stack { display: grid; gap: 13px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.group-card { min-height: 150px; display: grid; grid-template-columns: clamp(120px, 38%, 220px) 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
 .group-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(38,49,46,.09); }
-.group-hero { position: relative; min-height: 180px; overflow: hidden; background: #dfe3df; }
+.group-hero { position: relative; min-height: 150px; overflow: hidden; background: #dfe3df; }
 .group-hero img { width: 100%; height: 100%; position: absolute; object-fit: contain; background: #151c1a; transition: filter .2s ease; }
 .group-card:hover .group-hero img { filter: brightness(1.03); }
 .photo-count, .accepted-badge { position: absolute; backdrop-filter: blur(8px); border-radius: 5px; color: white; font-size: 10px; font-weight: 800; padding: 5px 7px; }
@@ -155,6 +167,29 @@ img { display: block; max-width: 100%; }
 .empty-state > span { font-size: 30px; color: #aeb6b2; }
 .empty-state h3 { color: var(--ink); font-family: Georgia, serif; font-weight: 500; }
 .empty-state p { font-size: 13px; }
+/* .group-stack はグリッドなので、唯一の子になる空状態はそのままだと 1 セル幅に痩せる。 */
+.group-stack > .empty-state { grid-column: 1 / -1; }
+
+/* --- 操作パネル上部のグループストリップ ------------------------------------
+   一覧へ戻らずに次のグループへ移るための帯。カードの幅と縦横比を CSS で固定して
+   おくこと。158 枚ぶんの img が loading="lazy" なので、寸法を画像側から取ると
+   未読み込みのカードが 0 高さになり、選択カードのセンタリングがずれる。 */
+/* position: relative は GroupStrip の自動スクロール用。カードの offsetLeft が
+   この帯（＝横スクロールする要素）基準になり、scrollLeft とそのまま揃う。 */
+.group-strip { position: relative; overflow-x: auto; margin-top: 18px; }
+/* 余白は track 側に持たせる。overflow-x のスクロールコンテナは上下も clip するので、
+   帯側に置くとミニカードの focus outline / aria-current の box-shadow が欠ける。 */
+.group-strip-track { display: flex; gap: 8px; margin: 0; padding: 4px 2px; list-style: none; }
+.group-strip-track li { flex: 0 0 auto; }
+.group-strip-card { display: grid; gap: 6px; width: 104px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: inherit; text-align: left; cursor: pointer; }
+.group-strip-card:hover { border-color: #9fcabb; }
+.group-strip-card[aria-current="true"] { border-color: var(--green); box-shadow: 0 0 0 2px rgba(40,119,98,.14); }
+.group-strip-thumb { position: relative; display: block; aspect-ratio: 3 / 2; border-radius: 5px; overflow: hidden; background: #171d1b; }
+.group-strip-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.group-strip-accepted { position: absolute; right: 3px; top: 3px; border-radius: 4px; background: var(--green); color: white; font-size: 10px; font-weight: 800; padding: 1px 4px; }
+.group-strip-label { display: block; min-width: 0; }
+.group-strip-label strong { display: block; font-size: 11px; }
+.group-strip-label small { display: block; margin-top: 2px; color: #7d8783; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .operation-screen { padding: 24px 0 12px; }
 .operation-progress { width: min(520px, 100%); margin: 0 auto 22px; display: grid; grid-template-columns: 32px auto 1fr 32px auto; align-items: center; gap: 10px; }
@@ -287,13 +322,22 @@ img { display: block; max-width: 100%; }
 .accept-toggle.on { background: var(--green-soft); border-color: #9cbeb2; color: var(--green); }
 .safety-note { text-align: center; color: #8b9491; font-size: 11px; margin: 10px 0 0; }
 
+@media (min-width: 1560px) {
+  .group-stack { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 @media (max-width: 1100px) {
   .content-grid { grid-template-columns: minmax(0, 1fr) 370px; gap: 18px; }
-  .group-card { grid-template-columns: 180px 1fr; }
   .summary-strip { grid-template-columns: minmax(245px, 1.5fr) repeat(3, minmax(80px, .5fr)); }
   .progress-ring { display: none; }
   .operation-layout { grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; }
   .operation-preview { height: auto; }
+}
+
+/* 2 列のままだとカード幅が ~300px まで痩せ、.group-footer が .group-card の
+   overflow: hidden に切られる。1000px 以下は 1 列に倒す。 */
+@media (max-width: 1000px) {
+  .group-stack { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 860px) {
@@ -330,7 +374,7 @@ img { display: block; max-width: 100%; }
   .section-heading { display: block; }
   .view-tabs { margin-top: 15px; }
   .view-tabs button { flex: 1; }
-  .group-card { grid-template-columns: 125px 1fr; min-height: 156px; }
+  .group-card { min-height: 156px; }
   .group-hero { min-height: 156px; }
   .group-copy { padding: 13px 12px; }
   .group-copy h3 { font-size: 16px; }
@@ -570,10 +614,15 @@ button.comparison-image:hover .developed-label { background: rgba(19,29,26,.92);
 .viewer-quality small { color: #8a692d; font-size: 10px; font-weight: 800; }
 
 .viewer-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.viewer-switch, .viewer-zoom { display: flex; align-items: center; gap: 4px; }
-.viewer-switch button, .viewer-zoom button, .viewer-peek { border: 1px solid #cfd6d1; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.viewer-switch, .viewer-zoom, .viewer-nav { display: flex; align-items: center; gap: 4px; }
+.viewer-switch button, .viewer-zoom button, .viewer-nav button, .viewer-peek { border: 1px solid #cfd6d1; border-radius: 6px; background: white; color: #5c6a66; padding: 6px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
 .viewer-switch button.active { border-color: var(--green); background: var(--green); color: white; }
-.viewer-zoom button:hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
+.viewer-zoom button:hover, .viewer-nav button:not(:disabled):not([aria-disabled="true"]):hover, .viewer-peek:not(:disabled):hover, .viewer-switch button:not(.active):hover { border-color: #9fcabb; color: var(--green); }
+/* 送りは端で止まる（ラップしない）。押せないことは見た目でも示すが、フォーカスを
+   <dialog> 内に残すため disabled ではなく aria-disabled で表す。 */
+.viewer-nav button { min-width: 30px; font-size: 15px; line-height: 1; padding: 5px 8px; }
+.viewer-nav button:disabled, .viewer-nav button[aria-disabled="true"] { opacity: .34; cursor: not-allowed; }
+.viewer-count { min-width: 58px; text-align: center; color: #4f5d59; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .viewer-peek { touch-action: none; user-select: none; }
 .viewer-peek.active { border-color: var(--green); background: var(--green-soft); color: var(--green); }
 .viewer-peek:disabled { opacity: .4; cursor: not-allowed; }

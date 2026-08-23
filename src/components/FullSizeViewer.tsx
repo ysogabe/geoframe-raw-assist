@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { ViewerSource } from "../lib/app-state";
+import type { ViewerGallery } from "../lib/app-state";
 
 type Face = "before" | "after";
 type Size = { width: number; height: number };
@@ -63,8 +63,13 @@ async function decodeImage(url: string): Promise<Size> {
   return { width: image.naturalWidth, height: image.naturalHeight };
 }
 
+/** その 2 面で最初に見せる面。現像していなければ現像後は選べない。 */
+function faceOf(item: { afterUrl?: string; initial: "before" | "after" }): Face {
+  return item.afterUrl && item.initial === "after" ? "after" : "before";
+}
+
 type FullSizeViewerProps = {
-  source: ViewerSource;
+  gallery: ViewerGallery;
   onClose: () => void;
 };
 
@@ -79,15 +84,23 @@ type FullSizeViewerProps = {
  * この機能の核は「拡大率と位置を保ったまま現像前後を切り替えられること」。そのため
  * 2 面は同じ transform ラッパの中に重ね、`visibility` だけで切り替える。アンマウントすると
  * 切り替えのたびに再デコードが走り、位置も飛ぶ。
+ *
+ * 前後の写真への送りは開いた時点のスナップショット（gallery）の添字を動かすだけで行う。
+ * 送っても親の選択状態は動かないので、閉じれば開く前の画面がそのまま残る。
  */
-export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
+export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
-  const hasAfter = Boolean(source.afterUrl);
+  const [index, setIndex] = useState(gallery.index);
+  const current = gallery.items[index];
+  const lastIndex = gallery.items.length - 1;
+  const canStep = gallery.items.length > 1;
+
+  const hasAfter = Boolean(current.afterUrl);
   // 現像していなければ切替コントロール自体を出さないので、初期面も before に倒す。
-  const initialFace: Face = hasAfter && source.initial === "after" ? "after" : "before";
+  const initialFace: Face = faceOf(current);
 
   const [face, setFace] = useState<Face>(initialFace);
   const [peek, setPeek] = useState(false);
@@ -149,17 +162,51 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
     dialogRef.current?.close();
   }, []);
 
+  // ---- 前後の写真へ送る ----------------------------------------------------
+  /**
+   * 送り先へ移り、写真に紐づく state を **同じイベントハンドラの中で** すべて初期化する。
+   *
+   * useEffect([index]) でリセットすると「添字だけ進んだ 1 フレーム」がペイントされ、
+   * 新しい写真に前の写真の面・倍率・パン位置が乗った中間状態が見える。React は
+   * ハンドラ内の setState を 1 コミットにまとめるので、ここで全部倒しておく。
+   *
+   * base を null に落とすとキャンバスごと外れ、読み込みスピナーに戻る。新しい寸法が
+   * 入った時点で全体表示の計算（recompute(true)）が走るため、送るたびにズームは
+   * 全体表示へ戻る（同一写真内の面切替では base を触らないので位置は保たれる）。
+   */
+  function goTo(nextIndex: number) {
+    const clamped = clamp(nextIndex, 0, lastIndex);
+    if (clamped === index) return;
+    const nextFace = faceOf(gallery.items[clamped]);
+    setIndex(clamped);
+    setFace(nextFace);
+    setPeek(false);
+    setMounted({ before: nextFace === "before", after: nextFace === "after" });
+    setReady({ before: false, after: false });
+    setBase(null);
+    setFailure("");
+    // 全体表示の再計算は base が入ってからの effect（＝ペイント後）なので、ここで倒して
+    // おかないと前の写真の倍率とパン位置で 1 フレーム描かれてしまう。
+    setView({ scale: 1, tx: 0, ty: 0 });
+  }
+
+  function step(delta: 1 | -1) {
+    const target = index + delta;
+    if (target < 0 || target > lastIndex) return;
+    goTo(target);
+  }
+
   // ---- 画像の読み込み ------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
-    const faceUrl = initialFace === "after" && source.afterUrl ? source.afterUrl : source.beforeUrl;
+    const faceUrl = initialFace === "after" && current.afterUrl ? current.afterUrl : current.beforeUrl;
 
     void (async () => {
       try {
         const decoded = await decodeImage(faceUrl);
         // 現像後を先に見せる場合でも、基準グリッドは現像前の実解像度に固定する。
         // 見ない面のデコードは払いたくないので、そのときは寸法だけを測る。
-        const measured = faceUrl === source.beforeUrl ? decoded : await measureImage(source.beforeUrl);
+        const measured = faceUrl === current.beforeUrl ? decoded : await measureImage(current.beforeUrl);
         if (cancelled) return;
         if (!measured.width || !measured.height) throw new Error("画像の寸法を取得できませんでした。");
         setBase(measured);
@@ -173,7 +220,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
     return () => {
       cancelled = true;
     };
-  }, [initialFace, source.beforeUrl, source.afterUrl]);
+  }, [initialFace, current]);
 
   // ---- 全体表示の倍率（ステージ寸法が変わるたびに測り直す） ------------------
   useEffect(() => {
@@ -360,12 +407,24 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
         event.preventDefault();
         zoomTo(1);
         break;
+      // 左右は写真送り、上下は面の切替。左右の方が「次の写真」の連想が強く、
+      // 送りは 1 グループを見る間に何十回も使うのでこちらを主に割り当てる。
       case "ArrowLeft":
+        if (!canStep) break;
+        event.preventDefault();
+        step(-1);
+        break;
+      case "ArrowRight":
+        if (!canStep) break;
+        event.preventDefault();
+        step(1);
+        break;
+      case "ArrowUp":
         if (!hasAfter) break;
         event.preventDefault();
         selectFace("before");
         break;
-      case "ArrowRight":
+      case "ArrowDown":
         if (!hasAfter) break;
         event.preventDefault();
         selectFace("after");
@@ -399,10 +458,10 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
         <header className="viewer-head">
           <div className="viewer-heading">
             <p className="eyebrow">FULL SIZE</p>
-            <h2 id={titleId}>{source.title}</h2>
+            <h2 id={titleId}>{current.title}</h2>
           </div>
 
-          {source.preview && (
+          {current.preview && (
             <p className="viewer-quality">
               <span className="preview-tag">プレビュー品質（長辺1600px）</span>
               <small>本現像すると原寸で比較できます</small>
@@ -410,6 +469,34 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
           )}
 
           <div className="viewer-controls">
+            {/* 送りは輪に 2 枚以上あるときだけ。端では止まる（先頭↔末尾をつながない）。
+                端で disabled にはしない。押していたボタンがフォーカスを失うと <dialog> の外
+                （body）へ落ち、onKeyDown が届かなくなってキーボードで送れなくなるため。
+                実際の無効化は step() 冒頭の範囲外 early return が担う。 */}
+            {canStep && (
+              <div className="viewer-nav" role="group" aria-label="前後の写真へ送る">
+                <button
+                  type="button"
+                  aria-disabled={index === 0 ? "true" : undefined}
+                  onClick={() => step(-1)}
+                  aria-label="前の写真"
+                >
+                  ‹
+                </button>
+                <span className="viewer-count">
+                  {index + 1} / {gallery.items.length}
+                </span>
+                <button
+                  type="button"
+                  aria-disabled={index === lastIndex ? "true" : undefined}
+                  onClick={() => step(1)}
+                  aria-label="次の写真"
+                >
+                  ›
+                </button>
+              </div>
+            )}
+
             {hasAfter && (
               <div className="viewer-switch" role="group" aria-label="表示する面">
                 <button
@@ -420,7 +507,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
                   onFocus={() => warm("before")}
                   onClick={() => selectFace("before")}
                 >
-                  {source.beforeLabel}
+                  {current.beforeLabel}
                 </button>
                 <button
                   type="button"
@@ -430,7 +517,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
                   onFocus={() => warm("after")}
                   onClick={() => selectFace("after")}
                 >
-                  {source.afterLabel}
+                  {current.afterLabel}
                 </button>
               </div>
             )}
@@ -441,7 +528,7 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
                 className={`viewer-peek${peek ? " active" : ""}`}
                 disabled={face === "before"}
                 aria-pressed={peek}
-                aria-label={`長押ししている間だけ${source.beforeLabel}を表示`}
+                aria-label={`長押ししている間だけ${current.beforeLabel}を表示`}
                 onPointerEnter={() => warm("before")}
                 onFocus={() => warm("before")}
                 onPointerDown={startPeek}
@@ -501,27 +588,27 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
               {mounted.before && (
                 <img
                   className="viewer-face"
-                  src={source.beforeUrl}
-                  alt={`${source.title} ${source.beforeLabel}`}
+                  src={current.beforeUrl}
+                  alt={`${current.title} ${current.beforeLabel}`}
                   style={{ visibility: shown === "before" ? "visible" : "hidden" }}
                   draggable={false}
                   decoding="async"
                   ref={readyRefFor("before")}
                   onLoad={() => markReady("before")}
-                  onError={() => setFailure(`${source.beforeLabel}の画像を読み込めませんでした。`)}
+                  onError={() => setFailure(`${current.beforeLabel}の画像を読み込めませんでした。`)}
                 />
               )}
-              {mounted.after && source.afterUrl && (
+              {mounted.after && current.afterUrl && (
                 <img
                   className="viewer-face"
-                  src={source.afterUrl}
-                  alt={`${source.title} ${source.afterLabel}`}
+                  src={current.afterUrl}
+                  alt={`${current.title} ${current.afterLabel}`}
                   style={{ visibility: shown === "after" ? "visible" : "hidden" }}
                   draggable={false}
                   decoding="async"
                   ref={readyRefFor("after")}
                   onLoad={() => markReady("after")}
-                  onError={() => setFailure(`${source.afterLabel}の画像を読み込めませんでした。`)}
+                  onError={() => setFailure(`${current.afterLabel}の画像を読み込めませんでした。`)}
                 />
               )}
             </div>
@@ -545,10 +632,16 @@ export function FullSizeViewer({ source, onClose }: FullSizeViewerProps) {
           <p>
             ドラッグで移動・ホイールでポインタ位置を中心に拡大縮小。
             <kbd>+</kbd> <kbd>-</kbd> 拡大縮小 / <kbd>0</kbd> 全体 / <kbd>1</kbd> 原寸
+            {canStep && (
+              <>
+                {" / "}
+                <kbd>←</kbd> <kbd>→</kbd> 前後の写真
+              </>
+            )}
             {hasAfter && (
               <>
                 {" / "}
-                <kbd>←</kbd> <kbd>→</kbd> 面の切替
+                <kbd>↑</kbd> <kbd>↓</kbd> 現像前後の切替
               </>
             )}
             {" / "}
