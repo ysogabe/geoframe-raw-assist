@@ -1,7 +1,9 @@
 """現像元フォルダ設定（`local_raw.config`）の検証。
 
-実ファイルは合成データのみ。`CONFIG_PATH` は必ず tmpdir に差し替えて、
-リポジトリ内の `outputs/config.json` に触らないようにする。
+実ファイルは合成データのみ。`CONFIG_PATH` は必ず tmpdir に差し替えて、実ユーザーの
+設定ファイル（`~/Library/Application Support/<identifier>/config.json`）に触らないようにする。
+移行を扱うテストは `_LEGACY_CONFIG_PATH`（リポジトリ内の `outputs/config.json`）も
+差し替える（`MigrationTests` の注意書きを参照）。
 """
 
 import json
@@ -12,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from local_raw import config
+from local_raw import config, paths
 from local_raw.config import SourceFolderError
 
 #: root で走らせるとパーミッション検査が成立しない（root は 0o000 でも読めてしまう）。
@@ -385,6 +387,87 @@ class SourceFolderInfoTests(ConfigTestCase):
         self.assertTrue(info["exists"])
         self.assertFalse(info["readable"])
         self.assertEqual(info["pairs"], 0)
+
+
+class AppDataLocationTests(unittest.TestCase):
+    """保存先の定数そのものの検証（差し替えないので、読むだけで書き込みはしない）。"""
+
+    def test_the_config_lives_in_the_app_data_dir(self):
+        self.assertEqual(config.CONFIG_PATH, paths.app_data_dir() / "config.json")
+
+    def test_the_legacy_path_is_the_old_outputs_location(self):
+        self.assertEqual(
+            config._LEGACY_CONFIG_PATH, config.PROJECT_ROOT / "outputs" / "config.json"
+        )
+
+
+class MigrationTests(unittest.TestCase):
+    """`outputs/config.json` → アプリデータディレクトリへの一度きりの移行。
+
+    ⚠️ **`CONFIG_PATH` と `_LEGACY_CONFIG_PATH` の両方**を tmpdir へ差し替えること。
+    片方だけだと、テストを走らせるだけで実データ（リポジトリの `outputs/config.json`、
+    または実ユーザーの `~/Library/Application Support/<identifier>/config.json`）を
+    読み書き・削除してしまう。`ConfigTestCase` は `CONFIG_PATH` しか差し替えないので、
+    ここでは継承せず独立した `setUp` で両方を確実に押さえる。
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # macOS の /var → /private/var シンボリックリンクで比較が壊れないよう resolve する。
+        self.tmp = Path(temporary.name).resolve()
+        self.legacy_path = self.tmp / "outputs" / "config.json"
+        self.config_path = self.tmp / "appdata" / "config.json"
+        patcher = mock.patch.multiple(
+            config,
+            CONFIG_PATH=self.config_path,
+            _LEGACY_CONFIG_PATH=self.legacy_path,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_legacy(self, payload):
+        self.legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        self.legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def test_the_legacy_config_is_moved_to_the_new_location(self):
+        payload = self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/a"})
+        self.assertTrue(config.ensure_migrated())
+        self.assertEqual(json.loads(self.config_path.read_text(encoding="utf-8")), payload)
+        self.assertFalse(self.legacy_path.exists(), "移行後は旧ファイルを残さない")
+
+    def test_nothing_happens_without_a_legacy_file(self):
+        self.assertFalse(self.legacy_path.exists())
+        self.assertFalse(config.ensure_migrated())
+        self.assertFalse(self.config_path.exists())
+        self.assertFalse(self.config_path.parent.exists(), "空振りでディレクトリを作らない")
+
+    def test_a_second_call_is_a_no_op(self):
+        """冪等性: 起動のたびに呼ばれるので、2 回目以降は新パスを書き換えない。"""
+        self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/a"})
+        self.assertTrue(config.ensure_migrated())
+
+        # 旧パスに別の設定が復活しても、新パスがある限り上書きしない。
+        self.write_legacy({config.SOURCE_ROOT_KEY: "/cards/b"})
+        self.assertFalse(config.ensure_migrated())
+        self.assertEqual(
+            json.loads(self.config_path.read_text(encoding="utf-8"))[config.SOURCE_ROOT_KEY],
+            "/cards/a",
+        )
+
+    def test_the_migrated_setting_is_what_source_root_reads(self):
+        """移行が実際に効いていること（新パス経由で現像元フォルダが復元される）。"""
+        folder = self.tmp / "card-a"
+        folder.mkdir()
+        self.write_legacy(
+            {"config_version": config.CONFIG_VERSION, config.SOURCE_ROOT_KEY: str(folder)}
+        )
+        # 移行前は新パスが空なので既定へフォールバックしている。
+        self.assertEqual(config.source_root(), config.DEFAULT_SOURCE_ROOT.resolve())
+
+        self.assertTrue(config.ensure_migrated())
+        self.assertEqual(config.source_root(), folder)
 
 
 if __name__ == "__main__":

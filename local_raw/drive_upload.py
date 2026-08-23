@@ -47,12 +47,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import paths
 from .export import export_dir_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 CLIENT_SECRET_PATH = PROJECT_ROOT / "local_raw" / "drive_client_secret.json"
-TOKEN_PATH = PROJECT_ROOT / "outputs" / "drive_auth.json"
+#: 旧パス（outputs/ 配下）。ensure_migrated() が一度きりの移行に使う。
+_LEGACY_TOKEN_PATH = PROJECT_ROOT / "outputs" / "drive_auth.json"
+TOKEN_PATH = paths.app_data_dir() / "drive_auth.json"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 DRIVE_FOLDER_NAME = "GeoFrame"
 OAUTH_CONSENT_TIMEOUT_SECONDS = 300
@@ -95,6 +98,7 @@ __all__ = [
     "TOKEN_PATH",
     "DriveUploadError",
     "Progress",
+    "ensure_migrated",
     "get_drive_upload_state",
     "is_drive_configured",
     "start_drive_upload",
@@ -189,6 +193,20 @@ def _invalidate_token() -> None:
         TOKEN_PATH.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def ensure_migrated() -> bool:
+    """`_LEGACY_TOKEN_PATH`（outputs/drive_auth.json）から `TOKEN_PATH` への一度きりの移行。
+
+    トークンファイルなので `mode=0o600` を指定する（`_write_token_payload` と同じ、
+    他ユーザーから読めない権限を作成時から保つ）。
+
+    ⚠️ **モジュールロード時には呼ばないこと。** `npm run test:raw` は
+    `import local_raw.drive_upload` を伴うため、import 時に移行を走らせると
+    テストを実行するだけで生のOAuthリフレッシュトークンが動いてしまう。
+    呼び出しは実アプリの起動経路（`server.main()`）からのみ行うこと。
+    """
+    return paths.migrate_legacy_file(_LEGACY_TOKEN_PATH, TOKEN_PATH, mode=0o600)
 
 
 # ---------------------------------------------------------------------------

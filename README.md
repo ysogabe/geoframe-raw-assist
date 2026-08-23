@@ -78,7 +78,6 @@ npm run develop:raw -- DSC02943 --preset nightscape
 ```
 outputs/
 ├── analysis/analysis.json          解析結果（グループ・スコア・推薦）のキャッシュ
-├── config.json                     現像対象フォルダの設定
 ├── thumbnails/<folder>-<ID>.webp   一覧表示用サムネイル（長辺640）
 ├── preview/<ID>-<preset>-<hash>.jpg  プレビュー現像（長辺1600）
 ├── developed/<ID>-<preset>-<hash>.jpg  本現像（原寸）
@@ -89,6 +88,8 @@ outputs/
     ├── <現像ファイル名>.jpg
     └── manifest.json               書き出し内容とレシピの記録
 ```
+
+アプリの設定（現像対象フォルダ・Google DriveのOAuthトークン）は `outputs/` ではなく、OS標準のアプリデータディレクトリ（macOSでは `~/Library/Application Support/com.geoframe.rawassist/`）に保存されます。
 
 `<hash>` は調整値・プリセット・出力サイズ・エンジンバージョン・**現像元フォルダ**から決まる10桁の識別子です。同じ条件で再実行するとキャッシュが再利用されます。`<folder>` は現像元フォルダを識別する8桁で、別フォルダの同じ撮影IDが混ざらないようにするためのものです。
 

@@ -470,11 +470,14 @@ outputs/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
-  config.json   現像元フォルダ等の設定             （HTTP直接配信なし。/api/source-folder 経由）
 ```
 
 `outputs/` 全体が `.gitignore` 済み。JSON の書き込みは全て **tmp + `os.replace`** のアトミック方式
 （既存 `_save_recipe` と同方式）。
+
+`config.json`（現像対象フォルダ等の設定）と Drive の `drive_auth.json`（OAuthトークン）は
+`outputs/` には含まれず、OS標準のアプリデータディレクトリ（`local_raw/paths.app_data_dir()`）に
+保存される（2026-08-23 追補）。
 
 ---
 
@@ -584,9 +587,23 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 - `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
 - `DEFAULT_PRESET = "neutral_recovery"`
 
+### `local_raw/paths.py`（2026-08-23 追補）
+
+アプリの状態ファイル（設定・認証トークン）の保存先ディレクトリ解決と、旧パスからの移行。
+他のどのモジュールにも依存しない葉ノード（`config.py` はほぼ全エントリポイントの最上流にあるため）。
+外部ライブラリは使わない（標準ライブラリのみ）。
+
+- `APP_IDENTIFIER = "com.geoframe.rawassist"` — `tauri.conf.json` の `identifier` と一致させること
+- `app_data_dir() -> Path` — OS標準のアプリデータディレクトリ（macOS: `~/Library/Application Support/<APP_IDENTIFIER>`、Windows: `%APPDATA%/<APP_IDENTIFIER>`、それ以外: `$XDG_DATA_HOME/<APP_IDENTIFIER>`）。ディレクトリ自体は作成しない
+- `migrate_legacy_file(old_path, new_path, *, mode=None) -> bool` — `old_path` にだけ実体があれば `new_path` へ一度だけ移す。**例外は一切投げない**。冪等性の条件は「`new_path` が既に存在するか」だけ
+
+> ⚠️ **`ensure_migrated()` は import 時には呼ばない契約。** `config.py` / `drive_upload.py` の `ensure_migrated()` はどちらも、モジュールロード時ではなく実アプリの `__main__` エントリポイント（`server.main()` / `engine.main()` / `bracket.main()`）から明示的に呼ぶ設計になっている。`npm run test:raw`（`unittest discover`）は対象モジュールを `import` するため、import 時に移行を走らせるとテスト実行だけで実データ（現像元フォルダの設定・生のOAuthリフレッシュトークン）が動いてしまうため。
+>
+> **新しい `__main__` エントリポイントを追加する場合は、対応する `ensure_migrated()`（`config.ensure_migrated()` は必須、Google Drive機能を使うなら `drive_upload.ensure_migrated()` も）を `main()` の先頭で呼ぶこと。** 呼び忘れると、そのエントリポイント経由では移行が起きず、`config.source_root()` の「例外を投げない」設計により**静かに** `DEFAULT_SOURCE_ROOT` へフォールバックする（気づきにくい形で壊れる）。
+
 ### `local_raw/config.py`（2026-08-18 追補）
 
-現像元フォルダの検証・永続化。保存先は `outputs/config.json`（tmp + `os.replace` のアトミック書き込み）。
+現像元フォルダの検証・永続化。保存先は `paths.app_data_dir() / "config.json"`（tmp + `os.replace` のアトミック書き込み。2026-08-23 追補: 旧保存先は `outputs/config.json`）。
 
 - `DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"`
 - `source_root() -> Path` — 現在の設定を解決して返す。設定が無い / 壊れている / 保存先がもう
@@ -598,6 +615,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   内部で必ず `resolve()` し、`params_hash` に混ぜるパス文字列と正規化を共有する
 - `display_path(path) -> str` — §1 の `display_path`
 - `source_folder_info(root=None) -> dict` — §1 の `SourceFolderInfo`（件数は `scan_pairs()` 由来）
+- `ensure_migrated() -> bool`（2026-08-23 追補） — 旧パス `outputs/config.json` からの一度きりの移行。呼び出しは実アプリの起動経路（`main()`）からのみ、モジュールロード時には呼ばない
 
 > ⚠️ **どのモジュールでも `SOURCE_ROOT = config.source_root()` のようにモジュールレベルで
 > 束縛しないこと。** import 時に固定され、フォルダ切り替えが半分しか効かなくなる。
@@ -653,7 +671,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 `server.py` は呼び出し時に import する。
 
 - `CLIENT_SECRET_PATH = PROJECT_ROOT / "local_raw" / "drive_client_secret.json"`（**source control 対象外**）
-- `TOKEN_PATH = PROJECT_ROOT / "outputs" / "drive_auth.json"` — リフレッシュトークン。
+- `TOKEN_PATH = paths.app_data_dir() / "drive_auth.json"` — リフレッシュトークン（2026-08-23 追補: 旧保存先は `outputs/drive_auth.json`）。
   `os.open(..., O_EXCL, 0o600)` で作成した tmp へ書いてから `os.replace`（`write_text` 後の
   `chmod` だと一瞬 world-readable な窓が空くため）
 - `SCOPES = ["https://www.googleapis.com/auth/drive"]` / `DRIVE_FOLDER_NAME = "GeoFrame"`
@@ -662,6 +680,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   同期検証（バッチ名・書き出しフォルダの存在・対象0件・client secret）の失敗は `ValueError`（→400）
 - `get_drive_upload_state() -> dict` — §1 の `GET /api/drive-upload` ペイロード
 - `DriveUploadError(kind, message)` — `kind` がそのまま `error_kind` になる
+- `ensure_migrated() -> bool`（2026-08-23 追補） — 旧パス `outputs/drive_auth.json` からの一度きりの移行（`mode=0o600`）。呼び出しは `server.main()` からのみ、モジュールロード時には呼ばない
 
 > ⚠️ **google 系ライブラリをモジュールのトップレベルで import しないこと。**
 > 未インストール環境でも `import local_raw.drive_upload` は成功する必要がある

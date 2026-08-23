@@ -526,6 +526,9 @@ def develop_raw(
 
 
 def main() -> None:
+    if config.ensure_migrated():
+        print(f"[migrate] moved to app data dir: {config.CONFIG_PATH}", flush=True)
+
     parser = argparse.ArgumentParser(description="Sony ARWを非破壊でローカル現像します。")
     parser.add_argument("capture_id", help="例: DSC02943")
     parser.add_argument("--preset", choices=sorted(PRESETS), default=DEFAULT_PRESET)

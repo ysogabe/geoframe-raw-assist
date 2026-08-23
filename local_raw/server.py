@@ -467,6 +467,14 @@ POST_ROUTES: dict[str, Handler] = {
 
 
 def main() -> None:
+    if config.ensure_migrated():
+        print(f"[migrate] moved to app data dir: {config.CONFIG_PATH}", flush=True)
+
+    from . import drive_upload
+
+    if drive_upload.ensure_migrated():
+        print(f"[migrate] moved to app data dir: {drive_upload.TOKEN_PATH}", flush=True)
+
     for directory in (
         OUTPUT_ROOT,
         PREVIEW_ROOT,

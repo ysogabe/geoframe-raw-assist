@@ -656,6 +656,9 @@ def merge_bracket(
 
 
 def main() -> None:
+    if config.ensure_migrated():
+        print(f"[migrate] moved to app data dir: {config.CONFIG_PATH}", flush=True)
+
     parser = argparse.ArgumentParser(
         description="ブラケット撮影を Exposure Fusion で合成します。"
     )

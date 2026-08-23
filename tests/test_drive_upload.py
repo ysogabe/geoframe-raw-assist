@@ -27,6 +27,7 @@ from unittest import mock
 
 from local_raw import drive_upload
 from local_raw import export as export_module
+from local_raw import paths
 
 #: デスクトップアプリ種別の client secret（`installed` キーを持つ）。
 CLIENT_SECRET = {
@@ -960,6 +961,96 @@ class TokenPersistenceTests(DriveUploadTestCase):
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.token_path.write_text("[1, 2]", encoding="utf-8")
         self.assertIsNone(drive_upload._read_token_payload())
+
+
+class TokenLocationTests(unittest.TestCase):
+    """保存先の定数そのものの検証（差し替えないので、読むだけで書き込みはしない）。"""
+
+    def test_the_token_lives_in_the_app_data_dir(self):
+        self.assertEqual(drive_upload.TOKEN_PATH, paths.app_data_dir() / "drive_auth.json")
+
+    def test_the_legacy_path_is_the_old_outputs_location(self):
+        self.assertEqual(
+            drive_upload._LEGACY_TOKEN_PATH,
+            drive_upload.PROJECT_ROOT / "outputs" / "drive_auth.json",
+        )
+
+    def test_the_client_secret_did_not_move(self):
+        """`drive_client_secret.json` はリポジトリ配下のまま（移行対象外）。"""
+        self.assertEqual(
+            drive_upload.CLIENT_SECRET_PATH,
+            drive_upload.PROJECT_ROOT / "local_raw" / "drive_client_secret.json",
+        )
+
+
+class MigrationTests(unittest.TestCase):
+    """`outputs/drive_auth.json` → アプリデータディレクトリへの一度きりの移行。
+
+    ⚠️ **`TOKEN_PATH` と `_LEGACY_TOKEN_PATH` の両方**を tmpdir へ差し替えること。
+    片方だけだと、テストを走らせるだけで実データ（リポジトリの `outputs/drive_auth.json`、
+    または実ユーザーの `~/Library/Application Support/<identifier>/drive_auth.json`）を
+    読み書き・削除してしまう。中身は生の OAuth リフレッシュトークンなので、消すと
+    ユーザーは再サインインするまで Drive へ送れなくなる。`DriveUploadTestCase` は
+    `TOKEN_PATH` しか差し替えないので、ここでは継承せず独立した `setUp` で両方を押さえる。
+    """
+
+    PAYLOAD = {"refresh_token": "secret", "token": "access"}
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # macOS の /var → /private/var シンボリックリンク対策に resolve する。
+        self.root = Path(temporary.name).resolve()
+        self.legacy_path = self.root / "outputs" / "drive_auth.json"
+        self.token_path = self.root / "appdata" / "drive_auth.json"
+        patcher = mock.patch.multiple(
+            drive_upload,
+            TOKEN_PATH=self.token_path,
+            _LEGACY_TOKEN_PATH=self.legacy_path,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_legacy(self, payload=None):
+        payload = self.PAYLOAD if payload is None else payload
+        self.legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        self.legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def test_the_legacy_token_is_moved_to_the_new_location(self):
+        payload = self.write_legacy()
+        self.assertTrue(drive_upload.ensure_migrated())
+        self.assertEqual(drive_upload._read_token_payload(), payload)
+        self.assertFalse(self.legacy_path.exists(), "移行後は旧トークンを残さない")
+
+    def test_the_migrated_token_is_unreadable_by_other_users(self):
+        """umask に依存しない形で見る（`== 0o600` は umask 次第で偽陽性になる）。
+
+        長期の認証情報なので、移行先も `_write_token_payload` と同じ 0600 でなければ
+        ならない（旧パスが緩い権限だった場合に、それを引き継いでしまわないこと）。
+        """
+        self.legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        self.legacy_path.write_text(json.dumps(self.PAYLOAD), encoding="utf-8")
+        self.legacy_path.chmod(0o644)
+
+        self.assertTrue(drive_upload.ensure_migrated())
+        self.assertEqual(os.stat(self.token_path).st_mode & 0o077, 0)
+
+    def test_nothing_happens_without_a_legacy_token(self):
+        self.assertFalse(self.legacy_path.exists())
+        self.assertFalse(drive_upload.ensure_migrated())
+        self.assertFalse(self.token_path.exists())
+        self.assertFalse(self.token_path.parent.exists(), "空振りでディレクトリを作らない")
+
+    def test_a_second_call_is_a_no_op(self):
+        """冪等性: 起動のたびに呼ばれるので、2 回目以降は新パスを書き換えない。"""
+        self.write_legacy()
+        self.assertTrue(drive_upload.ensure_migrated())
+
+        # 旧パスに別のトークンが復活しても、新パスがある限り上書きしない。
+        self.write_legacy({"refresh_token": "stale", "token": "old"})
+        self.assertFalse(drive_upload.ensure_migrated())
+        self.assertEqual(drive_upload._read_token_payload(), self.PAYLOAD)
 
 
 # ---------------------------------------------------------------------------
