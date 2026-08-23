@@ -52,6 +52,7 @@ import { SummaryStrip } from "./components/SummaryStrip";
 import { AnalysisGate } from "./components/AnalysisGate";
 import { BootstrapGate } from "./components/BootstrapGate";
 import { GroupList } from "./components/GroupList";
+import { GroupStrip } from "./components/GroupStrip";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 import { FullSizeViewer } from "./components/FullSizeViewer";
@@ -594,23 +595,27 @@ export default function Home() {
       />
 
       <main className="workspace">
-        <Topbar
-          screen={screen}
-          groupTitle={group?.title ?? ""}
-          groupKind={group ? group.raw.label : ""}
-          captureId={captureId}
-          engineStatus={state.engineStatus}
-          engineVersion={engineVersion}
-          canExport={accepted.length > 0}
-          acceptedCount={accepted.length}
-          analysisReady={analysisReady}
-          reanalyzing={state.analysisState === "running"}
-          onReturn={returnToSuggestions}
-          onOpenExport={openExportScreen}
-          onReanalyze={() => void beginAnalyze(true)}
-        />
+        {/* 要素構造は画面によらず同一にし、クラス名だけを切り替える。三項でラッパーの
+            有無を切り替えると Topbar が remount される。 */}
+        <div className={screen === "suggestions" ? "page-header page-header-sticky" : "page-header"}>
+          <Topbar
+            screen={screen}
+            groupTitle={group?.title ?? ""}
+            groupKind={group ? group.raw.label : ""}
+            captureId={captureId}
+            engineStatus={state.engineStatus}
+            engineVersion={engineVersion}
+            canExport={accepted.length > 0}
+            acceptedCount={accepted.length}
+            analysisReady={analysisReady}
+            reanalyzing={state.analysisState === "running"}
+            onReturn={returnToSuggestions}
+            onOpenExport={openExportScreen}
+            onReanalyze={() => void beginAnalyze(true)}
+          />
 
-        {screen === "suggestions" && analysisReady && analysis && <SummaryStrip analysis={analysis} />}
+          {screen === "suggestions" && analysisReady && analysis && <SummaryStrip analysis={analysis} />}
+        </div>
 
         {state.notice && (
           <div className={`toast${state.noticeTone === "error" ? " error" : ""}`} role="status">
@@ -632,72 +637,84 @@ export default function Home() {
             onStart={() => void beginAnalyze(false)}
           />
         ) : screen === "operation" && group && viewing ? (
-          <OperationPanel
-            analysis={analysis}
-            group={group}
-            photo={photo}
-            captureId={captureId}
-            onViewCapture={(groupId, id) => dispatch({ type: "view/capture", groupId, captureId: id })}
-            engineStatus={state.engineStatus}
-            engineVersion={engineVersion}
-            health={health}
-            presetName={state.presetName}
-            adjustments={adjustments}
-            changedKeys={changedKeys}
-            onChangePreset={(presetName) => dispatch({ type: "preset/change", presetName })}
-            onChangeAdjustment={(key, value) =>
-              dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
-            }
-            onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
-            isPhotoAccepted={(id) => isPhotoAccepted(state, id)}
-            onAcceptPhoto={(id) =>
-              dispatch({
-                type: "accept/photo",
-                groupId: group.id,
-                // 宛先は **引数の撮影ID**。フィルムストリップは表示中でない写真も採用できるので、
-                // ここで表示カーソル（captureId）を使うと別の写真の採用として記録される。
-                captureId: id,
-                // 採用した時点で本現像があるならそれを既定にする。以後は行の選択が正で、
-                // あとから本現像しても勝手に昇格させない（無言で書き出す物を変えないため）。
-                variant: state.fullResults[id] ? "developed" : "camera_jpg",
-              })
-            }
-            mergedAccepted={
-              // 採用済み判定も採用の同一性（グループ + 先頭フレーム）で見る。groupId だけで
-              // 見ると、再結合で 2 件同居したときに片方の状態がもう片方に化ける。
-              // 本合成が無い状態ではチップ自体が disabled なので false でよい。
-              mergeFullResult ? isMergedAccepted(state, group.id, mergeFullResult.capture_ids[0]) : false
-            }
-            onAcceptMerged={() => {
-              // グループIDで直に引かない。IDが使い回されて別グループの合成が残っていると、
-              // そのグループに属さない先頭フレームを採用として記録してしまう（書き出しは
-              // ファイル名と capture_id が揃うのでサーバも通り、無言で別の写真が出る）。
-              const merged = groupMergeResultOf(state.mergeFullResults, group);
-              if (!merged) return;
-              // 先頭フレームは合成した瞬間の値で固定する（表示カーソルから引かない）。
-              dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
-            }}
-            onDevelop={(mode) => void runDevelop(mode)}
-            developMode={developMode}
-            elapsedLabel={elapsedLabel}
-            previewResult={state.previewResults[captureId]}
-            fullResult={state.fullResults[captureId]}
-            comparisonRef={comparisonRef}
-            isBracket={isBracket}
-            mergeFrames={mergeFrames}
-            onToggleMergeFrame={(id) => dispatch({ type: "merge/toggleFrame", groupId: group.id, captureId: id })}
-            onResetMergeFrames={() => dispatch({ type: "merge/resetFrames", groupId: group.id })}
-            onMerge={(mode) => void runMerge(mode)}
-            mergeMode={groupMergeMode}
-            mergeBusy={mergeBusy}
-            mergeElapsedLabel={mergeElapsedLabel}
-            mergeBlockReason={mergeBlock}
-            mergePreviewResult={mergePreviewResult}
-            mergeFullResult={mergeFullResult}
-            viewing={viewing}
-            onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
-            onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
-          />
+          <>
+            {/* 一覧へ戻らずに次のグループへ移るための帯。フィルタタブの状態は反映せず、
+                常に全グループを渡す（絞り込みの外へ移動できなくなるため）。 */}
+            <GroupStrip
+              analysis={analysis}
+              groups={analysis.groups}
+              selectedGroupId={group.id}
+              heroCaptureOf={(item) => heroCaptureOf(state, item)}
+              acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+              onSelectGroup={openOperationScreen}
+            />
+            <OperationPanel
+              analysis={analysis}
+              group={group}
+              photo={photo}
+              captureId={captureId}
+              onViewCapture={(groupId, id) => dispatch({ type: "view/capture", groupId, captureId: id })}
+              engineStatus={state.engineStatus}
+              engineVersion={engineVersion}
+              health={health}
+              presetName={state.presetName}
+              adjustments={adjustments}
+              changedKeys={changedKeys}
+              onChangePreset={(presetName) => dispatch({ type: "preset/change", presetName })}
+              onChangeAdjustment={(key, value) =>
+                dispatch({ type: "adjust/change", key, value: value as Adjustments[keyof Adjustments] })
+              }
+              onResetAdjustments={() => dispatch({ type: "adjust/reset" })}
+              isPhotoAccepted={(id) => isPhotoAccepted(state, id)}
+              onAcceptPhoto={(id) =>
+                dispatch({
+                  type: "accept/photo",
+                  groupId: group.id,
+                  // 宛先は **引数の撮影ID**。フィルムストリップは表示中でない写真も採用できるので、
+                  // ここで表示カーソル（captureId）を使うと別の写真の採用として記録される。
+                  captureId: id,
+                  // 採用した時点で本現像があるならそれを既定にする。以後は行の選択が正で、
+                  // あとから本現像しても勝手に昇格させない（無言で書き出す物を変えないため）。
+                  variant: state.fullResults[id] ? "developed" : "camera_jpg",
+                })
+              }
+              mergedAccepted={
+                // 採用済み判定も採用の同一性（グループ + 先頭フレーム）で見る。groupId だけで
+                // 見ると、再結合で 2 件同居したときに片方の状態がもう片方に化ける。
+                // 本合成が無い状態ではチップ自体が disabled なので false でよい。
+                mergeFullResult ? isMergedAccepted(state, group.id, mergeFullResult.capture_ids[0]) : false
+              }
+              onAcceptMerged={() => {
+                // グループIDで直に引かない。IDが使い回されて別グループの合成が残っていると、
+                // そのグループに属さない先頭フレームを採用として記録してしまう（書き出しは
+                // ファイル名と capture_id が揃うのでサーバも通り、無言で別の写真が出る）。
+                const merged = groupMergeResultOf(state.mergeFullResults, group);
+                if (!merged) return;
+                // 先頭フレームは合成した瞬間の値で固定する（表示カーソルから引かない）。
+                dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
+              }}
+              onDevelop={(mode) => void runDevelop(mode)}
+              developMode={developMode}
+              elapsedLabel={elapsedLabel}
+              previewResult={state.previewResults[captureId]}
+              fullResult={state.fullResults[captureId]}
+              comparisonRef={comparisonRef}
+              isBracket={isBracket}
+              mergeFrames={mergeFrames}
+              onToggleMergeFrame={(id) => dispatch({ type: "merge/toggleFrame", groupId: group.id, captureId: id })}
+              onResetMergeFrames={() => dispatch({ type: "merge/resetFrames", groupId: group.id })}
+              onMerge={(mode) => void runMerge(mode)}
+              mergeMode={groupMergeMode}
+              mergeBusy={mergeBusy}
+              mergeElapsedLabel={mergeElapsedLabel}
+              mergeBlockReason={mergeBlock}
+              mergePreviewResult={mergePreviewResult}
+              mergeFullResult={mergeFullResult}
+              viewing={viewing}
+              onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
+              onOpenViewer={(source) => dispatch({ type: "viewer/open", source })}
+            />
+          </>
         ) : screen === "export" ? (
           <ExportPanel
             analysis={analysis}
