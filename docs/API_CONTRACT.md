@@ -691,6 +691,14 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 > `_google_error_types()` / `_credentials_from_payload()` / `_refresh_credentials()` /
 > `_build_service()` / `_media_file_upload()` / `_run_oauth_consent()` に閉じ込める。
 
+### `src-tauri/src/main.rs`（2026-08-25 追補）
+
+RAW エンジン（Python サブプロセス）の stdout/stderr は `<paths.app_data_dir()>/logs/raw-engine.log`
+（Rust 側の `open_raw_engine_log` が起動毎に作成・truncate して書く。append し続けるログではない）
+へリダイレクトされる。app-data ディレクトリの解決・`logs/` の作成・ファイルオープンのいずれかに
+失敗した場合のみ、警告を stderr に出したうえで親プロセスの stdio へフォールバックする
+（`Stdio::inherit()`。起動自体は失敗させない）。
+
 ### 並列作業の約束事
 
 - Wave 1-A は **local_raw/server.py を起動も編集もしない**（ポート 8788 は 1-B の検証専用）
