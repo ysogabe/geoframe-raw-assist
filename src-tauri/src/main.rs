@@ -174,14 +174,83 @@ fn resolve_python_binary() -> PathBuf {
     venv_python_path()
 }
 
+/// Opens (creating the directory and truncating any previous file)
+/// `<app_data_dir>/logs/raw-engine.log` for the RAW-engine child's
+/// stdout/stderr.
+///
+/// Returns `None` (after warning on stderr) if the app-data directory
+/// can't be resolved, the `logs` directory can't be created, or the file
+/// can't be opened -- callers must treat that as "fall back to inheriting
+/// the parent's stdio", not as a reason to abort the launch. One truncate
+/// per process launch is deliberate (`spawn_raw_engine` normally runs
+/// once per app run): this is not meant to be an append-forever log.
+fn open_raw_engine_log(app_handle: &AppHandle) -> Option<fs::File> {
+    let app_data_dir = match app_handle.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("[raw-engine] failed to resolve app data dir for logging: {err}");
+            return None;
+        }
+    };
+
+    let log_dir = app_data_dir.join("logs");
+    if let Err(err) = fs::create_dir_all(&log_dir) {
+        eprintln!("[raw-engine] failed to create log directory {}: {err}", log_dir.display());
+        return None;
+    }
+
+    let log_path = log_dir.join("raw-engine.log");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    // Match drive_upload.py's 0600 convention for this same app-data
+    // directory (drive_auth.json) rather than the OpenOptions default of
+    // 0666 & ~umask: engine output can carry request paths and, per
+    // drive_upload.py's own HttpError handling notes, conceivably other
+    // diagnostic detail, so it should not default to world-readable.
+    //
+    // `mode()` on `create(true)` (not `create_new`) is only honored by
+    // open(2) when the file doesn't already exist -- it's silently a
+    // no-op against a file some earlier run already created with looser
+    // permissions. `set_permissions` below covers that case explicitly
+    // instead of relying on every past run of this binary having gotten
+    // the mode right.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&log_path) {
+        Ok(file) => {
+            #[cfg(unix)]
+            if let Err(err) = file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600)) {
+                eprintln!("[raw-engine] failed to set log file permissions on {}: {err}", log_path.display());
+            }
+            eprintln!("[raw-engine] logging to {}", log_path.display());
+            Some(file)
+        }
+        Err(err) => {
+            eprintln!("[raw-engine] failed to open log file {}: {err}", log_path.display());
+            None
+        }
+    }
+}
+
 /// Spawns `python -m local_raw.server` with `current_dir` set to the repo
 /// root (server.py itself also resolves `PROJECT_ROOT` independently of
 /// cwd, but we match it anyway for predictable relative-path behavior).
 ///
+/// stdout/stderr are redirected to `<app_data_dir>/logs/raw-engine.log`
+/// (see `open_raw_engine_log`) so the engine's output is somewhere durable
+/// instead of only ever reaching a parent stdio that may not exist (a
+/// bundled `.app` has no console) or that dumps it into a Terminal window
+/// the user did not ask for (a double-clicked unbundled binary). If the
+/// log file can't be opened, this falls back to inheriting the parent's
+/// stdio (the pre-existing behavior) rather than failing the launch.
+///
 /// Never panics: a missing venv or a spawn failure is logged to stderr and
 /// the shell keeps going with `None`, matching the frontend's existing
 /// "engine unreachable" health-check gate.
-fn spawn_raw_engine() -> Option<Child> {
+fn spawn_raw_engine(app_handle: &AppHandle) -> Option<Child> {
     let python = resolve_python_binary();
 
     if !python.is_file() {
@@ -195,12 +264,45 @@ fn spawn_raw_engine() -> Option<Child> {
         return None;
     }
 
-    match Command::new(&python)
+    let mut command = Command::new(&python);
+    command
         .args(["-m", "local_raw.server"])
         .current_dir(repo_root())
         .stdin(Stdio::null())
-        .spawn()
-    {
+        // stdout/stderr now land in a real file instead of a tty, which
+        // switches CPython from line-buffered to ~8KiB block-buffered.
+        // kill_raw_engine's Child::kill() is SIGKILL on Unix -- no atexit,
+        // no flush -- so without this, exactly the output most useful for
+        // diagnosing a bad shutdown (server.py's log_message/_fail, which
+        // print() without flush=True) is the output most likely to be lost.
+        .env("PYTHONUNBUFFERED", "1");
+
+    if cfg!(debug_assertions) {
+        // `npm run tauri:dev` is always launched from a terminal by a
+        // developer who wants to see the engine's output live -- keep the
+        // pre-existing inherit behavior there instead of sending it to a
+        // log file the developer would otherwise have to go find. Only
+        // release builds (the ones actually double-clicked as a `.app` or
+        // run headless) redirect to `raw-engine.log`.
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        match open_raw_engine_log(app_handle).and_then(|file| match file.try_clone() {
+            Ok(cloned) => Some((file, cloned)),
+            Err(err) => {
+                eprintln!("[raw-engine] failed to clone log file handle: {err}");
+                None
+            }
+        }) {
+            Some((stdout_file, stderr_file)) => {
+                command.stdout(Stdio::from(stdout_file)).stderr(Stdio::from(stderr_file));
+            }
+            None => {
+                command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            }
+        }
+    }
+
+    match command.spawn() {
         Ok(child) => {
             eprintln!("[raw-engine] started (pid {}) via {}", child.id(), python.display());
             Some(child)
@@ -493,7 +595,7 @@ fn run_setup_bootstrap(app_handle: AppHandle) {
 
     update_setup_state(&app_handle, SetupState::new("succeeded", "セットアップが完了しました。"));
 
-    let child = spawn_raw_engine();
+    let child = spawn_raw_engine(&app_handle);
     let state = app_handle.state::<RawEngineState>();
     let mut guard = match state.0.lock() {
         Ok(guard) => guard,
@@ -710,7 +812,7 @@ fn run_dependency_refresh(app_handle: AppHandle) {
         );
     }
 
-    let child = spawn_raw_engine();
+    let child = spawn_raw_engine(&app_handle);
     let state = app_handle.state::<RawEngineState>();
     let mut guard = match state.0.lock() {
         Ok(guard) => guard,
@@ -808,7 +910,7 @@ fn main() {
                         SetupState::new("ready", "セットアップは不要です。エンジンを起動しています…"),
                     );
 
-                    let child = spawn_raw_engine();
+                    let child = spawn_raw_engine(&app_handle);
                     let state = app.state::<RawEngineState>();
                     let mut guard = match state.0.lock() {
                         Ok(guard) => guard,
