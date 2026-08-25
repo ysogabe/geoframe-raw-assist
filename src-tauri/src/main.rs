@@ -207,6 +207,13 @@ fn open_raw_engine_log(app_handle: &AppHandle) -> Option<fs::File> {
     // 0666 & ~umask: engine output can carry request paths and, per
     // drive_upload.py's own HttpError handling notes, conceivably other
     // diagnostic detail, so it should not default to world-readable.
+    //
+    // `mode()` on `create(true)` (not `create_new`) is only honored by
+    // open(2) when the file doesn't already exist -- it's silently a
+    // no-op against a file some earlier run already created with looser
+    // permissions. `set_permissions` below covers that case explicitly
+    // instead of relying on every past run of this binary having gotten
+    // the mode right.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -214,6 +221,10 @@ fn open_raw_engine_log(app_handle: &AppHandle) -> Option<fs::File> {
     }
     match options.open(&log_path) {
         Ok(file) => {
+            #[cfg(unix)]
+            if let Err(err) = file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600)) {
+                eprintln!("[raw-engine] failed to set log file permissions on {}: {err}", log_path.display());
+            }
             eprintln!("[raw-engine] logging to {}", log_path.display());
             Some(file)
         }
@@ -254,20 +265,40 @@ fn spawn_raw_engine(app_handle: &AppHandle) -> Option<Child> {
     }
 
     let mut command = Command::new(&python);
-    command.args(["-m", "local_raw.server"]).current_dir(repo_root()).stdin(Stdio::null());
+    command
+        .args(["-m", "local_raw.server"])
+        .current_dir(repo_root())
+        .stdin(Stdio::null())
+        // stdout/stderr now land in a real file instead of a tty, which
+        // switches CPython from line-buffered to ~8KiB block-buffered.
+        // kill_raw_engine's Child::kill() is SIGKILL on Unix -- no atexit,
+        // no flush -- so without this, exactly the output most useful for
+        // diagnosing a bad shutdown (server.py's log_message/_fail, which
+        // print() without flush=True) is the output most likely to be lost.
+        .env("PYTHONUNBUFFERED", "1");
 
-    match open_raw_engine_log(app_handle).and_then(|file| match file.try_clone() {
-        Ok(cloned) => Some((file, cloned)),
-        Err(err) => {
-            eprintln!("[raw-engine] failed to clone log file handle: {err}");
-            None
-        }
-    }) {
-        Some((stdout_file, stderr_file)) => {
-            command.stdout(Stdio::from(stdout_file)).stderr(Stdio::from(stderr_file));
-        }
-        None => {
-            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    if cfg!(debug_assertions) {
+        // `npm run tauri:dev` is always launched from a terminal by a
+        // developer who wants to see the engine's output live -- keep the
+        // pre-existing inherit behavior there instead of sending it to a
+        // log file the developer would otherwise have to go find. Only
+        // release builds (the ones actually double-clicked as a `.app` or
+        // run headless) redirect to `raw-engine.log`.
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        match open_raw_engine_log(app_handle).and_then(|file| match file.try_clone() {
+            Ok(cloned) => Some((file, cloned)),
+            Err(err) => {
+                eprintln!("[raw-engine] failed to clone log file handle: {err}");
+                None
+            }
+        }) {
+            Some((stdout_file, stderr_file)) => {
+                command.stdout(Stdio::from(stdout_file)).stderr(Stdio::from(stderr_file));
+            }
+            None => {
+                command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            }
         }
     }
 

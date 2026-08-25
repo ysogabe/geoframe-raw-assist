@@ -693,11 +693,23 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 
 ### `src-tauri/src/main.rs`（2026-08-25 追補）
 
-RAW エンジン（Python サブプロセス）の stdout/stderr は `<paths.app_data_dir()>/logs/raw-engine.log`
-（Rust 側の `open_raw_engine_log` が起動毎に作成・truncate して書く。append し続けるログではない）
-へリダイレクトされる。app-data ディレクトリの解決・`logs/` の作成・ファイルオープンのいずれかに
+RAW エンジン（Python サブプロセス）の stdout/stderr は `<app_handle.path().app_data_dir()>/logs/raw-engine.log`
+（Rust 側の `open_raw_engine_log` が起動毎に作成・truncate して書く。append し続けるログではない。
+0600 で作成し、既存ファイルに対しても `set_permissions` で明示的に 0600 へ揃える）へ
+リダイレクトされる。app-data ディレクトリの解決・`logs/` の作成・ファイルオープンのいずれかに
 失敗した場合のみ、警告を stderr に出したうえで親プロセスの stdio へフォールバックする
 （`Stdio::inherit()`。起動自体は失敗させない）。
+
+> ⚠️ Rust 側の `app_handle.path().app_data_dir()`（Tauri 標準 API）と `local_raw/paths.py` の
+> `app_data_dir()` は**同じディレクトリを指すことを意図しているが、実装は別物**。
+> `paths.py` 側は `Path.home()` 解決失敗時に `Path.cwd()` へフォールバックする経路を持つが
+> （`paths.py` の `_home()` を参照）、Rust 側には対応するフォールバックが無い。両者が一致しない
+> 状況（`HOME` 未設定等、極めて稀）では RAW エンジンのログと Python 側の状態ファイル
+> （`config.json` 等）が別ディレクトリに出うる。
+>
+> Python サブプロセスは `PYTHONUNBUFFERED=1` で起動される（`spawn_raw_engine`）。ファイル
+> リダイレクト先ではブロックバッファになり、アプリ終了時の `Child::kill()`（Unix では
+> SIGKILL、flush の機会なし）でバッファ中の出力が失われるため。
 
 ### 並列作業の約束事
 
