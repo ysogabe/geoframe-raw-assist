@@ -514,6 +514,144 @@ class ThumbnailTest(unittest.TestCase):
             self.assertEqual((root / name).parent.resolve(), root.resolve())
 
 
+class ProcessPhotoUnreadablePhotoTest(unittest.TestCase):
+    """壊れた JPEG が混ざっても解析バッチ全体を落とさないこと（issue #29）。
+
+    ``_process_photo`` は「デコードできない」（``extract_exif``/``_decode_small``
+    が失敗する）場合だけ ``None`` を返してスキップする。デコード成功後の失敗
+    （``make_thumbnail`` の書き込みなど）はスキップ対象ではなく、そのまま
+    例外を伝播させる -- ディスクフル等の実害を「1枚読めなかった」として
+    握りつぶし、0枚の結果を「成功」と報告してしまわないため。
+    """
+
+    def _sample_jpeg_bytes(self):
+        import io
+
+        from PIL import Image
+
+        image = Image.new("RGB", (80, 60), (90, 110, 130))
+        buffer = io.BytesIO()
+        image.save(buffer, "JPEG")
+        return buffer.getvalue()
+
+    def test_returns_record_for_a_valid_jpeg(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00001.JPG"
+            path.write_bytes(self._sample_jpeg_bytes())
+            result = analysis._process_photo(path, root, "cafe1234")
+        assert result is not None
+        self.assertEqual(result["capture_id"], "DSC00001")
+        self.assertIn("sharpness_raw", result)
+
+    def test_returns_none_for_a_file_with_no_valid_jpeg_header(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00002.JPG"
+            path.write_bytes(b"not a jpeg")
+            result = analysis._process_photo(path, root, "cafe1234")
+        self.assertIsNone(result)
+
+    def test_returns_none_for_a_truncated_jpeg(self):
+        """カードコピー中断等で末尾が欠損したファイルを模す。"""
+        import tempfile
+        from pathlib import Path
+
+        data = self._sample_jpeg_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00003.JPG"
+            path.write_bytes(data[: len(data) // 2])
+            result = analysis._process_photo(path, root, "cafe1234")
+        self.assertIsNone(result)
+
+    def test_returns_none_when_the_decompression_bomb_guard_trips(self):
+        """巨大画像として弾かれるケース（``Image.open`` 自体が DecompressionBombError を投げる）。"""
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        data = self._sample_jpeg_bytes()  # 80x60 = 4800 pixels
+        original_max = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = 100
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "DSC00004.JPG"
+                path.write_bytes(data)
+                result = analysis._process_photo(path, root, "cafe1234")
+            self.assertIsNone(result)
+        finally:
+            Image.MAX_IMAGE_PIXELS = original_max
+
+    def test_returns_none_when_exif_extraction_raises_value_error(self):
+        """壊れた EXIF rational（ゼロ分母等）が extract_exif から ValueError として
+        抜けてくるケース。実機の壊れた IFDRational を JPEG に往復させるのは
+        Pillow の型システム上作れないため、extract_exif を直接落として確認する。
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00005.JPG"
+            path.write_bytes(self._sample_jpeg_bytes())
+            with mock.patch.object(
+                analysis, "extract_exif", side_effect=ValueError("cannot convert float NaN to integer")
+            ):
+                result = analysis._process_photo(path, root, "cafe1234")
+        self.assertIsNone(result)
+
+    def test_propagates_the_error_when_thumbnail_writing_fails_after_a_successful_decode(self):
+        """デコード成功後（サムネ書き込み等）の失敗はスキップせず伝播させる。"""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00006.JPG"
+            path.write_bytes(self._sample_jpeg_bytes())
+            with mock.patch.object(
+                analysis, "make_thumbnail", side_effect=OSError("No space left on device")
+            ):
+                with self.assertRaises(OSError):
+                    analysis._process_photo(path, root, "cafe1234")
+
+
+class BuildAnalysisSkipsUnreadablePhotosTest(unittest.TestCase):
+    """1枚の壊れた JPEG のせいで build_analysis 全体が落ちないこと（issue #29）。"""
+
+    def test_a_truncated_jpeg_is_skipped_and_the_rest_still_analyzes(self):
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            good = Image.new("RGB", (80, 60), (90, 110, 130))
+            good.save(root / "DSC00001.JPG", "JPEG")
+            (root / "DSC00001.ARW").write_bytes(b"")
+
+            good_data = (root / "DSC00001.JPG").read_bytes()
+            (root / "DSC00002.JPG").write_bytes(good_data[: len(good_data) // 2])
+            (root / "DSC00002.ARW").write_bytes(b"")
+
+            result = analysis.build_analysis(source_root=root, thumbs_root=root)
+
+        self.assertEqual(list(result["photos"].keys()), ["DSC00001"])
+
+
 class StartAnalysisThreadFailureTest(unittest.TestCase):
     """修正3: Thread.start() が失敗しても _RUNNING が True に固着しない。"""
 
