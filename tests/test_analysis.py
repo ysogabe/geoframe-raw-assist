@@ -514,6 +514,82 @@ class ThumbnailTest(unittest.TestCase):
             self.assertEqual((root / name).parent.resolve(), root.resolve())
 
 
+class ProcessPhotoTruncatedJpegTest(unittest.TestCase):
+    """壊れた JPEG が混ざっても解析バッチ全体を落とさないこと（issue #29）。"""
+
+    def _sample_jpeg_bytes(self):
+        import io
+
+        from PIL import Image
+
+        image = Image.new("RGB", (80, 60), (90, 110, 130))
+        buffer = io.BytesIO()
+        image.save(buffer, "JPEG")
+        return buffer.getvalue()
+
+    def test_returns_record_for_a_valid_jpeg(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00001.JPG"
+            path.write_bytes(self._sample_jpeg_bytes())
+            result = analysis._process_photo(path, root, "cafe1234")
+        assert result is not None
+        self.assertEqual(result["capture_id"], "DSC00001")
+        self.assertIn("sharpness_raw", result)
+
+    def test_returns_none_for_a_file_with_no_valid_jpeg_header(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00002.JPG"
+            path.write_bytes(b"not a jpeg")
+            result = analysis._process_photo(path, root, "cafe1234")
+        self.assertIsNone(result)
+
+    def test_returns_none_for_a_truncated_jpeg(self):
+        """カードコピー中断等で末尾が欠損したファイルを模す。"""
+        import tempfile
+        from pathlib import Path
+
+        data = self._sample_jpeg_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "DSC00003.JPG"
+            path.write_bytes(data[: len(data) // 2])
+            result = analysis._process_photo(path, root, "cafe1234")
+        self.assertIsNone(result)
+
+
+class BuildAnalysisSkipsUnreadablePhotosTest(unittest.TestCase):
+    """1枚の壊れた JPEG のせいで build_analysis 全体が落ちないこと（issue #29）。"""
+
+    def test_a_truncated_jpeg_is_skipped_and_the_rest_still_analyzes(self):
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            good = Image.new("RGB", (80, 60), (90, 110, 130))
+            good.save(root / "DSC00001.JPG", "JPEG")
+            (root / "DSC00001.ARW").write_bytes(b"")
+
+            good_data = (root / "DSC00001.JPG").read_bytes()
+            (root / "DSC00002.JPG").write_bytes(good_data[: len(good_data) // 2])
+            (root / "DSC00002.ARW").write_bytes(b"")
+
+            result = analysis.build_analysis(source_root=root, thumbs_root=root)
+
+        self.assertEqual(list(result["photos"].keys()), ["DSC00001"])
+
+
 class StartAnalysisThreadFailureTest(unittest.TestCase):
     """修正3: Thread.start() が失敗しても _RUNNING が True に固着しない。"""
 

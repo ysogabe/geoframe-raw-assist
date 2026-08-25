@@ -338,16 +338,27 @@ def make_thumbnail(
 
 def _process_photo(
     path: Path, thumbs_root: Path | None = None, root_key: str | None = None
-) -> dict[str, Any]:
-    """EXIF + metrics + thumbnail from a single decode."""
-    record = extract_exif(path)
-    rgb, upright = _decode_small(path)
+) -> dict[str, Any] | None:
+    """EXIF + metrics + thumbnail from a single decode.
+
+    Returns ``None`` (after logging to stderr) when the JPEG cannot be
+    decoded -- e.g. a truncated file from an interrupted card copy --
+    instead of raising, so one bad photo does not abort the whole
+    ``ThreadPoolExecutor.map()`` batch in ``build_analysis()``.
+    """
+    upright: Image.Image | None = None
     try:
+        record = extract_exif(path)
+        rgb, upright = _decode_small(path)
         record.update(score_array(rgb))
         record["thumb"] = make_thumbnail(upright, record["capture_id"], thumbs_root, root_key)
+        return record
+    except OSError as error:
+        print(f"[raw-analysis] JPEGを読み込めないためスキップします: {path.name} ({error})", flush=True)
+        return None
     finally:
-        upright.close()
-    return record
+        if upright is not None:
+            upright.close()
 
 
 # ---------------------------------------------------------------------------
@@ -610,10 +621,16 @@ def build_analysis(
 
     reporter.set_stage("scoring")
     records: list[dict[str, Any]] = []
+    skipped = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        for record in pool.map(lambda path: _process_photo(path, thumbs_root, root_key), jpg_paths):
-            records.append(record)
+        for result in pool.map(lambda path: _process_photo(path, thumbs_root, root_key), jpg_paths):
             reporter.advance()
+            if result is None:
+                skipped += 1
+                continue
+            records.append(result)
+    if skipped:
+        print(f"[raw-analysis] {skipped}枚のJPEGをデコードできずスキップしました（全{len(jpg_paths)}枚中）", flush=True)
 
     reporter.set_stage("grouping")
     groups = group_photos(records)
