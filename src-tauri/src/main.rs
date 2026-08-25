@@ -200,7 +200,19 @@ fn open_raw_engine_log(app_handle: &AppHandle) -> Option<fs::File> {
     }
 
     let log_path = log_dir.join("raw-engine.log");
-    match fs::OpenOptions::new().create(true).truncate(true).write(true).open(&log_path) {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    // Match drive_upload.py's 0600 convention for this same app-data
+    // directory (drive_auth.json) rather than the OpenOptions default of
+    // 0666 & ~umask: engine output can carry request paths and, per
+    // drive_upload.py's own HttpError handling notes, conceivably other
+    // diagnostic detail, so it should not default to world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&log_path) {
         Ok(file) => {
             eprintln!("[raw-engine] logging to {}", log_path.display());
             Some(file)
