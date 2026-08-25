@@ -341,24 +341,37 @@ def _process_photo(
 ) -> dict[str, Any] | None:
     """EXIF + metrics + thumbnail from a single decode.
 
-    Returns ``None`` (after logging to stderr) when the JPEG cannot be
-    decoded -- e.g. a truncated file from an interrupted card copy --
+    Returns ``None`` (after logging to stdout) when the JPEG cannot be
+    *decoded* -- e.g. a truncated file from an interrupted card copy, a
+    Pillow decompression-bomb guard trip, or a malformed EXIF rational --
     instead of raising, so one bad photo does not abort the whole
-    ``ThreadPoolExecutor.map()`` batch in ``build_analysis()``.
+    ``ThreadPoolExecutor.map()`` batch in ``build_analysis()``. The
+    exception classes here intentionally mirror ``read_capture_exif``'s.
+
+    Failures *after* a successful decode (thumbnail write, scoring) are
+    **not** swallowed: a full disk or an unwritable thumbnails directory is
+    a real failure, not a bad photo, and should not be reported as one
+    photo silently missing from an otherwise "successful" batch.
     """
-    upright: Image.Image | None = None
     try:
         record = extract_exif(path)
         rgb, upright = _decode_small(path)
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        # Single write (end="") so concurrent calls from other pool threads
+        # can't interleave mid-line -- print()'s default two-write form
+        # (message, then the newline) is not atomic across threads.
+        print(
+            f"[raw-analysis] JPEGを読み込めないためスキップします: {path.name} ({type(error).__name__})\n",
+            end="",
+            flush=True,
+        )
+        return None
+    try:
         record.update(score_array(rgb))
         record["thumb"] = make_thumbnail(upright, record["capture_id"], thumbs_root, root_key)
         return record
-    except OSError as error:
-        print(f"[raw-analysis] JPEGを読み込めないためスキップします: {path.name} ({error})", flush=True)
-        return None
     finally:
-        if upright is not None:
-            upright.close()
+        upright.close()
 
 
 # ---------------------------------------------------------------------------
