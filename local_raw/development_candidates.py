@@ -48,6 +48,7 @@ MIN_BUDGET = 32
 MAX_BUDGET = 512
 MAX_PROXY_EDGE = 640
 MAX_PROXY_PIXELS = 50_000_000
+MAX_STAR_BRIGHT_RATIO = 0.005
 
 NUMERIC_KEYS: tuple[str, ...] = tuple(ADJUSTMENT_RANGES)
 STYLE_IDS: tuple[str, ...] = ("natural", "stars", "foreground", "low_noise", "social")
@@ -170,6 +171,7 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
     # A high percentile avoids making a dim city skyline a collection of stars.
     threshold = max(0.58, float(np.percentile(gray, 99.35)))
     bright = gray >= threshold
+    bright_ratio = float(np.mean(bright))
     components = _connected_bright_components(bright)
     height, width = gray.shape
     max_point_area = max(12, int(height * width * 0.00045))
@@ -200,7 +202,10 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
     # a supporting signal, never a reason to force star optimization on a
     # regular daytime photo.  Very dark synthetic images are allowed without
     # EXIF, which makes proxy tests and exported JPEGs useful too.
-    visual_gate = dark_fraction >= 0.56 and point_count >= 3
+    # A sparse bright-point pattern is useful for stars, while a larger bright
+    # area usually describes lamps, buildings, or a city night scene.  Cap the
+    # total bright area so those light sources cannot enable star optimization.
+    visual_gate = dark_fraction >= 0.56 and point_count >= 3 and bright_ratio <= MAX_STAR_BRIGHT_RATIO
     is_star_scene = visual_gate and (exif_night or dark_fraction >= 0.72)
 
     halo = 0.0
@@ -232,7 +237,7 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
         "is_star_scene": bool(is_star_scene),
         "star_count": int(point_count),
         "dark_background_ratio": round(dark_fraction, 6),
-        "bright_point_ratio": round(float(np.mean(bright)), 6),
+        "bright_point_ratio": round(bright_ratio, 6),
         "exif_night": bool(exif_night),
         "star_halo": round(float(np.clip(halo, 0.0, 1.0)), 6),
         "star_color_saturation": round(float(np.clip(color_clip, 0.0, 1.0)), 6),
@@ -814,6 +819,7 @@ __all__ = [
     "DevelopmentCandidateNotFound",
     "MAX_BUDGET",
     "MIN_BUDGET",
+    "MAX_STAR_BRIGHT_RATIO",
     "STYLE_IDS",
     "clamp_adjustments",
     "detect_star_scene",

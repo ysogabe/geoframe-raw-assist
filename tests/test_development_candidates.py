@@ -74,6 +74,18 @@ class CandidateOptimizerTests(unittest.TestCase):
         self.assertTrue(result["star_scene"]["is_star_scene"])
         self.assertIn("stars", [item["id"] for item in result["candidates"]])
 
+    def test_large_bright_lamps_do_not_trigger_star_gate(self):
+        image = np.full((1600, 2400, 3), 12, dtype=np.uint8)
+        for y, x in ((180, 220), (180, 1700), (1160, 220), (1160, 1700)):
+            image[y : y + 100, x : x + 140] = (255, 245, 220)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "DSC00001.JPG"
+            Image.fromarray(image, mode="RGB").save(path, format="JPEG", quality=95)
+            proxy = candidates.load_proxy_image(path)
+        star_scene = candidates.detect_star_scene(proxy)
+        self.assertFalse(star_scene["is_star_scene"])
+        self.assertGreater(star_scene["bright_point_ratio"], candidates.MAX_STAR_BRIGHT_RATIO)
+
     def test_natural_is_present_and_other_styles_are_materially_different(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self.generate(Path(directory), stars=True)
