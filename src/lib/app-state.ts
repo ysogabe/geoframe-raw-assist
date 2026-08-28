@@ -721,7 +721,12 @@ export function reducer(state: State, action: Action): State {
 
     case "candidates/ok":
       // フォルダ切替後に届いた古い代理評価を新しい capture_id と混ぜない。
-      if (action.generation !== state.sourceFolderGeneration) return state;
+      // 同じ世代で将来リクエストを重複させても、後発写真の busy/error を先発写真の
+      // 応答で上書きしないよう、start 時点の capture_id も照合する。
+      if (
+        action.generation !== state.sourceFolderGeneration ||
+        action.captureId !== state.developmentCandidatesCaptureId
+      ) return state;
       return {
         ...state,
         developmentCandidates: action.response,
@@ -733,7 +738,10 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "candidates/fail":
-      if (action.generation !== state.sourceFolderGeneration) return state;
+      if (
+        action.generation !== state.sourceFolderGeneration ||
+        action.captureId !== state.developmentCandidatesCaptureId
+      ) return state;
       return {
         ...state,
         developmentCandidatesBusy: false,

@@ -343,7 +343,9 @@ export type DevelopmentCandidate = {
 export type DevelopmentCandidatesRequest = {
   capture_id: CaptureId;
   preset: PresetName;
+  /** 省略時は capture_id:preset の安定SHA-256由来。 */
   seed?: number;
+  /** 32〜512。省略時48。 */
   budget?: number;
 };
 

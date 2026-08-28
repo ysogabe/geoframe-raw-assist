@@ -43,11 +43,10 @@ except Exception:  # pragma: no cover - exercised only in minimal environments
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 
-DEFAULT_BUDGET = 64
+DEFAULT_BUDGET = 48
 MIN_BUDGET = 32
 MAX_BUDGET = 512
-DEFAULT_SEED = 0
-MAX_PROXY_EDGE = 720
+MAX_PROXY_EDGE = 640
 MAX_PROXY_PIXELS = 50_000_000
 
 NUMERIC_KEYS: tuple[str, ...] = tuple(ADJUSTMENT_RANGES)
@@ -116,9 +115,11 @@ def load_proxy_image(source_path: Path, max_edge: int = MAX_PROXY_EDGE) -> np.nd
             width, height = opened.size
             if width <= 0 or height <= 0 or width * height > MAX_PROXY_PIXELS:
                 raise DevelopmentCandidateError("元JPGの画像サイズが大きすぎます。")
-            image = ImageOps.exif_transpose(opened).convert("RGB")
+            oriented = ImageOps.exif_transpose(opened).convert("RGB")
+            image = oriented
             image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
-            return _normalise_rgb(image)
+            proxy = _normalise_rgb(image)
+            return proxy
     except DevelopmentCandidateError:
         raise
     except (OSError, ValueError, UnidentifiedImageError) as error:
@@ -615,13 +616,20 @@ def _seed_for_style(seed: int, style: str) -> int:
     return int.from_bytes(digest[:8], "little") % (2**32)
 
 
+def default_seed(capture_id: str, preset: str) -> int:
+    """Derive a stable per-photo seed when the caller does not provide one."""
+
+    digest = hashlib.sha256(f"{capture_id}:{preset}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
 def _validate_request(capture_id: str, preset: str, seed: int | None, budget: int | None) -> tuple[str, str, int, int]:
     if not isinstance(capture_id, str) or not CAPTURE_ID_PATTERN.fullmatch(capture_id):
         raise DevelopmentCandidateError("無効な撮影IDです。DSC00000形式で指定してください。")
     if not isinstance(preset, str) or preset not in PRESETS:
         raise DevelopmentCandidateError(f"未対応のプリセットです: {preset}")
     if seed is None:
-        seed = DEFAULT_SEED
+        seed = default_seed(capture_id, preset)
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 or seed >= 2**32:
         raise DevelopmentCandidateError("seed は0以上の32bit整数で指定してください。")
     if budget is None:
@@ -802,7 +810,6 @@ generate_candidates = generate_development_candidates
 __all__ = [
     "CAPTURE_ID_PATTERN",
     "DEFAULT_BUDGET",
-    "DEFAULT_SEED",
     "DevelopmentCandidateError",
     "DevelopmentCandidateNotFound",
     "MAX_BUDGET",
@@ -810,6 +817,7 @@ __all__ = [
     "STYLE_IDS",
     "clamp_adjustments",
     "detect_star_scene",
+    "default_seed",
     "evaluate_adjustments",
     "generate_candidates",
     "generate_development_candidates",

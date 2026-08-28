@@ -27,7 +27,7 @@ class CandidateOptimizerTests(unittest.TestCase):
             image = np.uint8(np.clip(rng.normal(145, 17, (180, 260, 3)), 0, 255))
         Image.fromarray(image, mode="RGB").save(root / "DSC00001.JPG", format="JPEG", quality=92)
 
-    def generate(self, root: Path, *, stars: bool, seed: int = 7, budget: int = 32) -> dict:
+    def generate(self, root: Path, *, stars: bool, seed: int | None = 7, budget: int = 32) -> dict:
         self.make_jpg(root, stars=stars)
         with mock.patch.object(config, "source_root", return_value=root):
             return candidates.generate_development_candidates(
@@ -40,6 +40,14 @@ class CandidateOptimizerTests(unittest.TestCase):
             first = self.generate(root, stars=False)
             second = self.generate(root, stars=False)
         self.assertEqual(first, second)
+
+    def test_omitted_seed_is_stable_but_separated_by_photo_and_preset(self):
+        expected = candidates.default_seed("DSC00001", "neutral_recovery")
+        self.assertNotEqual(expected, candidates.default_seed("DSC00002", "neutral_recovery"))
+        self.assertNotEqual(expected, candidates.default_seed("DSC00001", "nightscape"))
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.generate(Path(directory), stars=False, seed=None)
+        self.assertEqual(result["seed"], expected)
 
     def test_all_numeric_candidate_values_stay_inside_existing_contract(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -133,4 +141,3 @@ class CandidateServerHandlerTests(unittest.TestCase):
         self.assertEqual(request.status, 500)
         self.assertNotIn("/Users/private", request.body["error"])
         self.assertTrue(request.logs)
-
