@@ -290,6 +290,79 @@ export type DevelopedResult = {
 };
 
 // ---------------------------------------------------------------------------
+// POST /api/development-candidates — JPG代理評価による現像候補
+// ---------------------------------------------------------------------------
+
+export type DevelopmentCandidateStyle = "natural" | "stars" | "foreground" | "low_noise" | "social";
+
+/** 候補選択の比較に使う代理評価値（0..1、star_count は検出数）。 */
+export type DevelopmentCandidateMetrics = {
+  highlight_clip: number;
+  shadow_clip: number;
+  noise_flat: number;
+  source_noise_flat: number;
+  detail: number;
+  source_detail: number;
+  halo: number;
+  color_saturation_clip: number;
+  tonal_range: number;
+  source_deviation: number;
+  star_count: number;
+  star_halo: number;
+  star_color_saturation: number;
+  /** 互換・表示用の長い別名。サーバは同じ値を返す。 */
+  highlight_clipping: number;
+  shadow_crushing: number;
+  flat_region_noise: number;
+  detail_halo: number;
+  color_clip: number;
+  tone_range: number;
+  jpeg_deviation: number;
+};
+
+export type StarSceneInfo = {
+  is_star_scene: boolean;
+  star_count: number;
+  dark_background_ratio: number;
+  bright_point_ratio: number;
+  exif_night: boolean;
+  star_halo: number;
+  star_color_saturation: number;
+};
+
+export type DevelopmentCandidate = {
+  id: DevelopmentCandidateStyle;
+  label: string;
+  description: string;
+  adjustments: Adjustments;
+  metrics: DevelopmentCandidateMetrics;
+  score: number;
+  reasons: string[];
+};
+
+export type DevelopmentCandidatesRequest = {
+  capture_id: CaptureId;
+  preset: PresetName;
+  seed?: number;
+  budget?: number;
+};
+
+export type DevelopmentCandidatesResponse = {
+  capture_id: CaptureId;
+  preset: PresetName;
+  seed: number;
+  budget: number;
+  proxy: {
+    max_edge: number;
+    width: number;
+    height: number;
+    source: "jpeg";
+  };
+  star_scene: StarSceneInfo;
+  candidates: DevelopmentCandidate[];
+};
+
+// ---------------------------------------------------------------------------
 // POST /api/export
 // ---------------------------------------------------------------------------
 

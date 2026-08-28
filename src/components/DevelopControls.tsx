@@ -1,6 +1,8 @@
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
 import type { Adjustments, HealthResponse, NoiseReduction, PresetName } from "../lib/types";
+import type { DevelopmentCandidate } from "../lib/types";
+import { DevelopmentCandidates } from "./DevelopmentCandidates";
 
 type DevelopControlsProps = {
   engineStatus: EngineStatus;
@@ -25,6 +27,12 @@ type DevelopControlsProps = {
   hasFull: boolean;
   /** ブラケット合成の実行中。重いRAWデコードを同時に走らせないため現像側も止める。 */
   mergeBusy: boolean;
+  /** JPG代理評価による候補生成の状態。候補選択は現像を開始しない。 */
+  developmentCandidates: DevelopmentCandidate[];
+  developmentCandidatesBusy: boolean;
+  developmentCandidatesError: string;
+  onGenerateCandidates: () => void;
+  onApplyCandidate: (candidate: DevelopmentCandidate) => void;
 };
 
 export function DevelopControls({
@@ -45,10 +53,15 @@ export function DevelopControls({
   hasPreview,
   hasFull,
   mergeBusy,
+  developmentCandidates,
+  developmentCandidatesBusy,
+  developmentCandidatesError,
+  onGenerateCandidates,
+  onApplyCandidate,
 }: DevelopControlsProps) {
   const presets = health?.presets ?? [];
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
-  const busy = developMode !== null || mergeBusy;
+  const busy = developMode !== null || mergeBusy || developmentCandidatesBusy;
   const disabled = engineStatus !== "ready" || !adjustments;
 
   return (
@@ -130,6 +143,15 @@ export function DevelopControls({
             <p className="adjust-note">スライダーを動かしても自動では現像しません。下のボタンで実行します。</p>
           </div>
         )}
+
+        <DevelopmentCandidates
+          candidates={developmentCandidates}
+          busy={developmentCandidatesBusy}
+          error={developmentCandidatesError}
+          disabled={disabled || mergeBusy || developMode !== null}
+          onGenerate={onGenerateCandidates}
+          onApply={onApplyCandidate}
+        />
 
         <div className="develop-actions">
           <button className="secondary-action" onClick={() => onDevelop("preview")} disabled={disabled || busy}>

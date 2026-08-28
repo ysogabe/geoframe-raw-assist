@@ -5,6 +5,8 @@ import type {
   AnalysisProgress,
   AnalysisResponse,
   CaptureId,
+  DevelopmentCandidate,
+  DevelopmentCandidatesResponse,
   DevelopedResult,
   DriveUploadState,
   ExportResponse,
@@ -195,6 +197,12 @@ export type State = {
   developStartedAt: number;
   previewResults: Record<CaptureId, DevelopedResult>;
   fullResults: Record<CaptureId, DevelopedResult>;
+  /** JPG代理評価による候補。対象capture_idと世代を併記して古い結果を表示しない。 */
+  developmentCandidates: DevelopmentCandidatesResponse | null;
+  developmentCandidatesCaptureId: CaptureId | null;
+  developmentCandidatesBusy: boolean;
+  developmentCandidatesError: string;
+  developmentCandidatesGeneration: number;
   /**
    * ブラケット合成の状態は **グループ単位** で持つ（capture_id 単位ではない）。
    * 合成は複数フレームの産物であり、どの 1 枚にも属さないため。
@@ -247,6 +255,11 @@ export const initialState: State = {
   developStartedAt: 0,
   previewResults: {},
   fullResults: {},
+  developmentCandidates: null,
+  developmentCandidatesCaptureId: null,
+  developmentCandidatesBusy: false,
+  developmentCandidatesError: "",
+  developmentCandidatesGeneration: 0,
   mergeSelections: {},
   mergePreviewResults: {},
   mergeFullResults: {},
@@ -297,6 +310,10 @@ export type Action =
   | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number }
   /** 失敗には generation を持たせない（後述: 通知だけは必ず出す）。 */
   | { type: "develop/fail"; message: string }
+  | { type: "candidates/start"; captureId: CaptureId; generation: number }
+  | { type: "candidates/ok"; captureId: CaptureId; response: DevelopmentCandidatesResponse; generation: number }
+  | { type: "candidates/fail"; captureId: CaptureId; message: string; generation: number }
+  | { type: "candidates/apply"; candidate: DevelopmentCandidate }
   | { type: "merge/toggleFrame"; groupId: number; captureId: CaptureId }
   | { type: "merge/resetFrames"; groupId: number }
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
@@ -629,7 +646,14 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "preset/change":
-      return { ...state, presetName: action.presetName, overrides: {} };
+      return {
+        ...state,
+        presetName: action.presetName,
+        overrides: {},
+        developmentCandidates: null,
+        developmentCandidatesCaptureId: null,
+        developmentCandidatesError: "",
+      };
 
     case "adjust/change":
       return { ...state, overrides: { ...state.overrides, [action.key]: action.value } };
@@ -683,6 +707,55 @@ export function reducer(state: State, action: Action): State {
 
     case "develop/fail":
       return { ...state, developMode: null, developingCapture: null, notice: action.message, noticeTone: "error" };
+
+    case "candidates/start":
+      return {
+        ...state,
+        developmentCandidatesBusy: true,
+        developmentCandidatesCaptureId: action.captureId,
+        developmentCandidatesError: "",
+        developmentCandidatesGeneration: action.generation,
+        notice: `${action.captureId}.JPG を代理評価しています…`,
+        noticeTone: "info",
+      };
+
+    case "candidates/ok":
+      // フォルダ切替後に届いた古い代理評価を新しい capture_id と混ぜない。
+      if (action.generation !== state.sourceFolderGeneration) return state;
+      return {
+        ...state,
+        developmentCandidates: action.response,
+        developmentCandidatesCaptureId: action.captureId,
+        developmentCandidatesBusy: false,
+        developmentCandidatesError: "",
+        notice: `${action.captureId} の現像候補を作成しました。候補を選んでから現像してください。`,
+        noticeTone: "info",
+      };
+
+    case "candidates/fail":
+      if (action.generation !== state.sourceFolderGeneration) return state;
+      return {
+        ...state,
+        developmentCandidatesBusy: false,
+        developmentCandidatesError: action.message,
+        notice: action.message,
+        noticeTone: "error",
+      };
+
+    case "candidates/apply": {
+      const preset = activePreset(state);
+      const overrides: Partial<Adjustments> = {};
+      for (const key of Object.keys(action.candidate.adjustments) as (keyof Adjustments)[]) {
+        const value = action.candidate.adjustments[key];
+        if (!preset || value !== preset.adjustments[key]) Object.assign(overrides, { [key]: value });
+      }
+      return {
+        ...state,
+        overrides,
+        notice: `「${action.candidate.label}」の調整値をスライダーへ反映しました。現像はまだ実行していません。`,
+        noticeTone: "info",
+      };
+    }
 
     case "merge/toggleFrame": {
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);

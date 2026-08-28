@@ -283,6 +283,49 @@ rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの�
   上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
 - ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
+### `POST /api/development-candidates`
+
+```
+body { capture_id:string, preset:string, seed?:number, budget?:number }
+→ DevelopmentCandidatesResponse
+```
+
+`capture_id` は `DSC` + 5桁数字、`preset` は `GET /api/health` の既存プリセット名である。
+`seed` は 0 以上の32bit整数（省略時 0）、`budget` は 32〜512 の整数（省略時 64）に
+限定する。型違い、範囲外、未知キーは 400、選択中フォルダに元JPGが無い場合は 404、
+その他の予期しない失敗は 500（共通のエラー形式）とする。
+
+このエンドポイントは **ARWを粒子ごとに再デコードしない**。現像元フォルダのペアJPGを
+EXIF向きに補正して安全に長辺720pxへ縮小した代理画像を一度だけ読み、8個の数値調整
+（`Adjustments` の `noise_reduction` 以外）を決定的な多目的PSOで探索する。各評価は
+白飛び・黒つぶれ・平坦部ノイズ・細部/ハロー・色飽和・階調・元JPEGとの差分を使い、
+非劣解（Pareto front）を明示的に求める。極端な組合せはスライダー範囲内でも候補から
+除外する。`noise_reduction` はISO/平坦部ノイズと候補スタイルから安全側に決める。
+
+星空ゲートはEXIF（ISO・露光時間・撮影時刻）を補助信号にし、暗い背景の小さな高輝度点が
+複数ある場合だけ `star_scene.is_star_scene=true` になる。星候補はこの場合だけ返し、
+通常写真へ星最適化を強制しない。返却順は `natural` を先頭に、`stars`、`foreground`、
+`low_noise`、`social` の順で最大5件（画像特性に合わないスタイルは省略）とする。
+
+```
+DevelopmentCandidatesResponse = {
+  capture_id, preset, seed, budget,
+  proxy: { max_edge:number, width:number, height:number, source:"jpeg" },
+  star_scene: { is_star_scene:boolean, star_count:number,
+                dark_background_ratio:number, bright_point_ratio:number,
+                exif_night:boolean, star_halo:number,
+                star_color_saturation:number },
+  candidates: DevelopmentCandidate[]
+}
+DevelopmentCandidate = {
+  id:"natural"|"stars"|"foreground"|"low_noise"|"social",
+  label:string, description:string, adjustments:Adjustments,
+  metrics:object, score:number, reasons:string[]
+}
+```
+
+候補は調整値だけを返す。候補の選択は人が行い、選択しただけではRAW現像を実行しない。
+
 ### `POST /api/export`
 
 ```

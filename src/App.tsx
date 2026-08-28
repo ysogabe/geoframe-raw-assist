@@ -32,6 +32,7 @@ import {
   getDriveUploadState,
   getHealth,
   getSourceFolder,
+  generateDevelopmentCandidates,
   importToPhotos,
   isEndpointUnavailable,
   isSourceFolderApiError,
@@ -45,7 +46,7 @@ import {
   SOURCE_FOLDER_UNAVAILABLE,
   sourceFolderErrorMessage,
 } from "./lib/format";
-import type { Adjustments, ExportItem } from "./lib/types";
+import type { Adjustments, DevelopmentCandidate, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
@@ -427,6 +428,39 @@ export default function Home() {
     }
   }
 
+  async function runDevelopmentCandidates() {
+    if (!group || !captureId) return;
+    if (state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。", tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) {
+      dispatch({ type: "notice/set", message: "プリセットを取得できていません。", tone: "error" });
+      return;
+    }
+    const generation = state.sourceFolderGeneration;
+    dispatch({ type: "candidates/start", captureId, generation });
+    try {
+      const response = await generateDevelopmentCandidates(captureId, preset.name);
+      dispatch({ type: "candidates/ok", captureId, response, generation });
+    } catch (error) {
+      dispatch({
+        type: "candidates/fail",
+        captureId,
+        generation,
+        message: isEndpointUnavailable(error)
+          ? "現像候補機能を準備中です。しばらくしてからお試しください。"
+          : messageOf(error, "現像候補の生成に失敗しました。"),
+      });
+    }
+  }
+
+  function applyDevelopmentCandidate(candidate: DevelopmentCandidate) {
+    dispatch({ type: "candidates/apply", candidate });
+  }
+
   async function runMerge(mode: DevelopMode) {
     if (!group || !isBracketGroup(group)) return;
     // 合成はフレーム数ぶんのRAWデコードで数十秒かかる。ボタンは実行中に無効化しているが、
@@ -712,6 +746,18 @@ export default function Home() {
               mergeBlockReason={mergeBlock}
               mergePreviewResult={mergePreviewResult}
               mergeFullResult={mergeFullResult}
+              developmentCandidates={
+                state.developmentCandidatesCaptureId === captureId &&
+                state.developmentCandidatesGeneration === state.sourceFolderGeneration
+                  ? (state.developmentCandidates?.candidates ?? [])
+                  : []
+              }
+              developmentCandidatesBusy={state.developmentCandidatesBusy}
+              developmentCandidatesError={
+                state.developmentCandidatesCaptureId === captureId ? state.developmentCandidatesError : ""
+              }
+              onGenerateCandidates={() => void runDevelopmentCandidates()}
+              onApplyCandidate={applyDevelopmentCandidate}
               viewing={viewing}
               onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
               onOpenViewer={(gallery) => dispatch({ type: "viewer/open", gallery })}
