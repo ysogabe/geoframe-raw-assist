@@ -70,52 +70,53 @@ PRESETS: dict[str, dict[str, Any]] = {
     "landscape_clear": {
         "label": "風景クリア",
         "description": "遠景の輪郭と色をくっきりさせる",
-        "adjustments": _adjustments(0.0, 0, 10, 55, 1.0, 1.10, 1.08, 1.08, "light"),
+        # カメラ内JPEGの輪郭感に合わせた軽い輝度シャープ。色差は増幅しない。
+        "adjustments": _adjustments(0.0, 0, 10, 55, 1.0, 1.10, 1.08, 1.15, "light"),
     },
     "nightscape": {
         "label": "夜景ノイズ低減",
         "description": "高ISO夜景のノイズを抑え暗部を持ち上げる",
-        "adjustments": _adjustments(0.2, -5, 25, 50, 1.05, 1.07, 1.04, 1.03, "full"),
+        "adjustments": _adjustments(0.0, -3, 15, 55, 1.0, 1.04, 1.0, 1.02, "full"),
     },
     "sunset_glow": {
         "label": "夕景・マジックアワー",
         "description": "夕焼けの暖色を強め空の階調を守る",
-        "adjustments": _adjustments(-0.1, 25, 15, 80, 1.0, 1.08, 1.12, 1.05, "light"),
+        "adjustments": _adjustments(-0.1, 12, 8, 70, 1.0, 1.05, 1.07, 1.03, "light"),
     },
     "indoor_warm": {
         "label": "室内・料理",
         "description": "室内照明の暖かさを残し料理を明るく見せる",
-        "adjustments": _adjustments(0.3, 10, 30, 45, 1.05, 1.02, 1.05, 1.04, "light"),
+        "adjustments": _adjustments(0.1, 5, 18, 55, 1.0, 1.02, 1.03, 1.02, "light"),
     },
     "portrait_soft": {
         "label": "人物・柔らか",
         "description": "肌を滑らかに見せる柔らかいコントラスト",
-        "adjustments": _adjustments(0.1, 5, 20, 55, 1.02, 0.96, 1.03, 0.95, "light"),
+        "adjustments": _adjustments(0.0, 3, 12, 60, 1.0, 0.98, 1.0, 0.96, "light"),
     },
     "monochrome_street": {
         "label": "モノクロ",
         "description": "彩度を落としコントラストで見せる白黒仕上げ",
-        "adjustments": _adjustments(0.0, 0, 10, 60, 1.0, 1.15, 0.0, 1.10, "light"),
+        "adjustments": _adjustments(0.0, 0, 10, 60, 1.0, 1.08, 0.0, 1.04, "light"),
     },
     "highlight_rescue": {
         "label": "白飛び救済",
         "description": "飛びかけた空や光源の階調を最大限引き戻す",
-        "adjustments": _adjustments(-0.5, 0, 40, 100, 1.05, 1.0, 1.0, 1.02, "light"),
+        "adjustments": _adjustments(-0.3, 0, 15, 90, 1.0, 1.0, 1.0, 1.02, "light"),
     },
     "shadow_rescue": {
         "label": "黒つぶれ救済",
         "description": "つぶれた暗部を大きく持ち上げ、増えるノイズを抑える",
-        "adjustments": _adjustments(0.3, 0, 80, 65, 1.05, 0.98, 1.06, 1.02, "full"),
+        "adjustments": _adjustments(0.0, 0, 45, 65, 1.0, 1.0, 1.0, 1.01, "full"),
     },
     "backlit_rescue": {
         "label": "逆光",
         "description": "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
-        "adjustments": _adjustments(0.35, 5, 80, 90, 1.04, 0.96, 1.08, 1.05, "light"),
+        "adjustments": _adjustments(0.0, 0, 50, 80, 1.0, 1.0, 1.02, 1.02, "light"),
     },
     "vivid_travel": {
         "label": "ビビッド",
         "description": "旅の記録向けに色を鮮やかに強調する",
-        "adjustments": _adjustments(0.0, 5, 10, 55, 1.0, 1.12, 1.18, 1.10, "light"),
+        "adjustments": _adjustments(0.0, 0, 10, 55, 1.0, 1.07, 1.10, 1.05, "light"),
     },
 }
 

@@ -65,6 +65,8 @@ def apply_preset_tone(rgb: np.ndarray, preset_name: str = DEFAULT_PRESET) -> np.
 
 def clip_metrics(rgb: np.ndarray) -> dict[str, float]:
     """`analysis.score_array` と同じ定義の白飛び率・黒つぶれ率・平均輝度。"""
+    if np.issubdtype(rgb.dtype, np.floating):
+        rgb = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
     return {
         "highlight": float((rgb >= HIGHLIGHT_LEVEL).any(axis=2).mean()),
         "shadow": float((rgb <= SHADOW_LEVEL).all(axis=2).mean()),
@@ -260,12 +262,12 @@ class FusionContentTests(BracketTestCase):
         self.assertGreater(fused["mean"], dark["mean"])
         self.assertLess(fused["mean"], bright["mean"])
 
-    def test_merge_returns_uint8_within_range(self):
+    def test_merge_returns_float32_within_range(self):
         fused = _merge_frames([self.dark, self.bright])
-        self.assertEqual(fused.dtype, np.uint8)
+        self.assertEqual(fused.dtype, np.float32)
         self.assertEqual(fused.shape, self.dark.shape)
-        self.assertGreaterEqual(int(fused.min()), 0)
-        self.assertLessEqual(int(fused.max()), 255)
+        self.assertGreaterEqual(float(fused.min()), 0.0)
+        self.assertLessEqual(float(fused.max()), 1.0)
 
     def test_out_of_range_merge_output_is_clipped_not_wrapped(self):
         """Mertens はピラミッド再構成で 0..1 を外すことがある。
@@ -279,7 +281,7 @@ class FusionContentTests(BracketTestCase):
             factory.return_value.process.return_value = overshoot
             fused = _merge_frames([self.dark, self.bright])
         self.assertEqual(int(fused[0, 0, 0]), 0)
-        self.assertEqual(int(fused[4, 4, 0]), 255)
+        self.assertEqual(float(fused[4, 4, 0]), 1.0)
 
     def test_non_finite_merge_output_is_rejected(self):
         """`np.clip` は NaN を素通しするので、クリップ前に有限性を確かめること。"""

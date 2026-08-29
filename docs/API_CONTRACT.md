@@ -159,7 +159,9 @@ DevelopedResult = {
   params_hash:string,
   adjustments:Adjustments,  // 解決後の全量（Partial ではない）
   width, height, elapsed_seconds, cached:boolean, preview:boolean,
-  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  lens_correction:{applied:boolean, reason?:string, lens?:string,
+                    flags?:string[], skipped?:string[],
+                    focal_length?:number, aperture?:number},
   exif_inherited:boolean,
   output_url:string
 }
@@ -204,7 +206,9 @@ MergedResult = {
   adjustments:Adjustments,  // 解決後の全量（Partial ではない）
   width, height, elapsed_seconds, cached:boolean, preview:boolean,
   aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
-  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  lens_correction:{applied:boolean, reason?:string, lens?:string,
+                    flags?:string[], skipped?:string[],
+                    focal_length?:number, aperture?:number},
   exif_inherited:boolean,
   output_url:string         // 本合成 /merged/<file>?v=<st_mtime_ns>
                             // プレビュー /merged-preview/<file>?v=<st_mtime_ns>
@@ -373,10 +377,10 @@ Drive 上のファイル名（**プレフィックス込み**）が既に存在�
 
 ```
 Adjustments = {
-  exposure: number,           // EV -2.0..+2.0 → rawpy exp_shift = clamp(2**ev, 0.25, 8)
+  exposure: number,           // EV -2.0..+2.0 → rawpy bright = 2**ev（exp_shift は1.0）
   wb_temp: number,            // -100..100。camera_whitebalance の R/B ゲインをスケールし user_wb へ
   shadow_lift: number,        // 0..100。256エントリLUT（下半分中心の持ち上げ）
-  highlight_recovery: number, // 0..100 → exp_preserve_highlights 0.4..1.0、>=75 で HighlightMode.Reconstruct
+  highlight_recovery: number, // 0..100 → exp_preserve_highlights 0.4..1.0（Blendで連続適用）
   brightness: number,         // 0.7..1.4  (ImageEnhance.Brightness)
   contrast: number,           // 0.8..1.4
   saturation: number,         // 0.0..1.5  (0 = モノクロ)
@@ -390,13 +394,13 @@ Adjustments = {
 
 ### 実装マッピング（プラン §f 後半）
 
-- `exposure` → `exp_shift = clamp(2**ev, 0.25, 8)`
+- `exposure` → `exp_shift = 1.0`、`bright = 2**ev`（自動明るさ補正との二重適用を避ける）
 - `wb_temp` → `raw.camera_whitebalance` を基準に R×(1+0.003·t)、B×(1−0.003·t) で `user_wb`
   （t=0 のときは従来どおり `use_camera_wb=True`）
-- `highlight_recovery` → `exp_preserve_highlights = 0.4 + 0.006·hr`、hr≥75 で `HighlightMode.Reconstruct`
-- `shadow_lift` → 256エントリLUT `y = x + (lift/100)·0.5·255·(x/255)·(1−x/255)²·4`（係数は Wave 3 で目視調整）
-- `saturation == 0` → `convert("L").convert("RGB")`
-- **処理順序（固定）**: rawpy → lensfun補正 → shadow_lift LUT → resize → Brightness → Contrast → Color → Sharpness → save(exif, icc)
+- `highlight_recovery` → `exp_preserve_highlights = 0.4 + 0.006·hr`、`HighlightMode.Blend`（モード切替なし）
+- `shadow_lift` → 8bit LUTと同じ式をfloat32 (0..1)へ連続適用（JPEG化前）
+- `saturation == 0` → Rec.709 luma のRGB複製
+- **処理順序（固定）**: rawpy (16bit) → lensfun補正 → shadow_lift (float32) → resize → Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
 
 ---
 
@@ -489,7 +493,7 @@ outputs/
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `neutral_recovery` | 階調回復 | 0.0 | 0 | 15 | 60 | 1.0 | 1.03 | 1.02 | 1.04 | light |
-| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 55 | 1.0 | 1.10 | 1.08 | 1.08 | light |
+| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 55 | 1.0 | 1.10 | 1.08 | 1.15 | light |
 | `nightscape` | 夜景ノイズ低減 | +0.2 | -5 | 25 | 50 | 1.05 | 1.07 | 1.04 | 1.03 | full |
 | `sunset_glow` | 夕景・マジックアワー | -0.1 | +25 | 15 | 80 | 1.0 | 1.08 | 1.12 | 1.05 | light |
 | `indoor_warm` | 室内・料理 | +0.3 | +10 | 30 | 45 | 1.05 | 1.02 | 1.05 | 1.04 | light |
@@ -545,6 +549,9 @@ outputs/
 4. `db_version` は `lensfunpy.lensfun_version` タプルを整形した文字列。DBスナップショット固有の版番号は存在しない。
 5. lensfun が使えない／レンズが見つからない場合も **現像は必ず成功させる**。
    `lens_correction` に `{applied:false, reason:"lens_not_in_db"|"camera_not_found"|"lensfunpy_unavailable"|"error:<msg>"}` を記録する。
+   適用時は `flags` に `vignetting` / `distortion` / `tca` の実適用分を記録する。安全弁で
+   ビネットだけを止めた場合は `skipped` に理由を記録する。幾何補正は `INTER_LINEAR`、
+   TCA較正がある場合はRGB別マップで歪曲補正と一度に適用する。
 
 ### EXIF 継承（契約に影響する確定事項）
 
@@ -649,7 +656,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   書き出せてしまう
 - 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
   `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。LUT とトーンは
-  `engine._shadow_lift_table()` / `engine._apply_tone()` を再利用する
+  `engine._apply_shadow_lift_array()` / `engine._apply_tone_array()` を再利用する。RAWは16bitで受け、合成結果の8bit化は最後に行う
 - `cv2.createAlignMTB().process(src, dst)` は **src と同じリストを渡して in-place で受ける**。
   空リストは何も書かれず、事前確保したリストは**1枚が全面0になる**（実測 OpenCV 5.0.0）
 

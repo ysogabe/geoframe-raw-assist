@@ -111,6 +111,11 @@ class ProbeFallbackTests(unittest.TestCase):
 
 
 class ApplyLensCorrectionTests(unittest.TestCase):
+    @unittest.skipUnless(cv2_available, "OpenCV 未導入")
+    def test_full_size_uses_cubic_and_small_images_use_linear(self):
+        self.assertEqual(lens._remap_interpolation(4024, 6024), lens.cv2.INTER_CUBIC)
+        self.assertEqual(lens._remap_interpolation(2012, 3012), lens.cv2.INTER_LINEAR)
+
     def test_returns_input_unchanged_when_not_applicable(self):
         rgb = np.zeros((8, 12, 3), dtype=np.uint8)
         result, correction = apply_lens_correction(rgb, LensResolution(reason="lens_not_in_db"))
@@ -208,6 +213,7 @@ class _FakeModifyFlags:
     VIGNETTING = 1
     DISTORTION = 2
     SCALE = 4
+    TCA = 8
 
 
 class _NonFiniteModifier:
@@ -339,7 +345,7 @@ class DistortionBlackBorderTests(unittest.TestCase):
       最大 65.8px のはみ出し・画素の約 2% が黒縁。本テストの @55mm でも四隅 gain が
       0.0 に落ちる）。
     - remap の BORDER_CONSTANT: autoscale 済みでもマップ端は実質ソース境界上に乗る
-      ため、Lanczos カーネルの足がフレーム外の黒を跨ぎ、縁数 px に明縁/暗帯が残る
+      ため、補間カーネルがフレーム外の黒を跨ぎ、縁数 px に明縁/暗帯が残る
       （実測: 55-210mm で四隅 +24%、Sigma 10-18mm で 0.952〜1.126）。
       BORDER_REPLICATE で消える（local_raw/lens.py の remap 呼び出しのコメント参照）。
     """
@@ -377,6 +383,38 @@ class DistortionBlackBorderTests(unittest.TestCase):
         self.assertLessEqual(
             float(gain.max()), 1.001, f"最明画素 {hi} = {float(gain.max()):.4f}"
         )
+
+    def test_fractional_high_contrast_edge_has_no_remap_overshoot(self):
+        """高コントラスト境界で再標本化のリンギングを発生させない。"""
+
+        class _FractionalModifier:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                return False
+
+            def apply_geometry_distortion(self):
+                height, width = 32, 48
+                coordinates = _identity_map(height, width)
+                # 画素境界を半画素ずらし、Lanczosならオーバーシュートする位置を作る。
+                coordinates[..., 0] -= 0.5
+                return coordinates
+
+        rgb = np.zeros((32, 48, 3), dtype=np.float32)
+        rgb[:, 24:, :] = 1.0
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_FractionalModifier)):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution()
+            )
+
+        self.assertEqual(correction["flags"], ["distortion"])
+        self.assertTrue(np.isfinite(corrected).all())
+        self.assertGreaterEqual(float(corrected.min()), 0.0)
+        self.assertLessEqual(float(corrected.max()), 1.0)
 
 
 class UncalibratedDistortionGuardTests(unittest.TestCase):
@@ -453,6 +491,69 @@ class NonFiniteVignettingTests(unittest.TestCase):
         self.assertEqual(correction["flags"], ["distortion"])
         self.assertNotIn("vignetting", correction["flags"])
         self.assertTrue(np.isfinite(corrected.astype(np.float64)).all())
+
+    def test_profile_guard_skips_vignetting_but_keeps_distortion(self):
+        """Sony E PZ 16-50mmの広角端では色収差/歪曲だけを残す。"""
+        instances = []
+
+        class _ProfileGuardModifier:
+            def __init__(self, *args, **kwargs):
+                instances.append(self)
+                self.flags = None
+
+            def initialize(self, *args, **kwargs):
+                self.flags = kwargs["flags"]
+
+            def apply_color_modification(self, working):
+                raise AssertionError("プロファイルガード時はビネット補正を呼ばない")
+
+            def apply_geometry_distortion(self):
+                return _identity_map(32, 48)
+
+        lens_obj = types.SimpleNamespace(
+            maker="Sony",
+            model="E PZ 16-50mm f/3.5-5.6 OSS",
+            calib_distortion=[object()],
+            calib_tca=[],
+        )
+        resolution = _applicable_stub_resolution(lens_obj=lens_obj)
+        resolution.focal_length = 16.0
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_ProfileGuardModifier)):
+            corrected, correction = apply_lens_correction(rgb, resolution)
+
+        self.assertTrue(correction["applied"], correction)
+        self.assertEqual(correction["flags"], ["distortion"])
+        self.assertEqual(correction["skipped"], ["vignetting_profile_focal_guard"])
+        self.assertEqual(instances[0].flags, _FakeModifyFlags.DISTORTION | _FakeModifyFlags.SCALE)
+        self.assertTrue(np.array_equal(corrected, rgb))
+
+    def test_highlight_safety_skips_only_vignetting(self):
+        """画像単位でビネット補正が白飛びを増やす場合は元画像へ戻す。"""
+
+        class _OverrangeModifier:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                working[:, :24] *= 3.0
+                return True
+
+            def apply_geometry_distortion(self):
+                return None
+
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_OverrangeModifier)):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution()
+            )
+
+        self.assertIs(corrected, rgb)
+        self.assertFalse(correction["applied"])
+        self.assertEqual(correction["reason"], "vignetting_highlight_headroom")
 
 
 if __name__ == "__main__":
