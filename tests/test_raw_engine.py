@@ -9,12 +9,12 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
-import rawpy
 from PIL import Image
 
 from local_raw import engine
 from local_raw.engine import (
     RawDevelopmentError,
+    _apply_highlight_recovery_array,
     _apply_shadow_lift_array,
     _apply_tone_array,
     _params_hash,
@@ -312,7 +312,26 @@ class FloatPipelineTests(unittest.TestCase):
         self.assertEqual(params["output_bps"], 16)
         self.assertEqual(params["exp_shift"], 1.0)
         self.assertEqual(params["bright"], 2.0)
-        self.assertIs(params["highlight_mode"], rawpy.HighlightMode.Blend)
+        self.assertNotIn("exp_preserve_highlights", params)
+        self.assertNotIn("highlight_mode", params)
+
+    def test_highlight_recovery_changes_near_white_and_overrange_values(self):
+        """rawpy の露出段ではなくfloat32段で白飛び付近を圧縮する。"""
+        source = np.full((8, 8, 3), 0.45, dtype=np.float32)
+        source[2:6, 2:6] = [0.96, 1.0, 1.2]
+
+        without_recovery = _apply_highlight_recovery_array(source, 0)
+        with_recovery = _apply_highlight_recovery_array(source, 100)
+
+        self.assertEqual(with_recovery.dtype, np.float32)
+        np.testing.assert_array_equal(without_recovery, source)
+        self.assertGreater(
+            float(np.max(np.abs(with_recovery - without_recovery))),
+            0.02,
+        )
+        self.assertLess(float(with_recovery[3, 3, 0]), float(without_recovery[3, 3, 0]))
+        self.assertLess(float(with_recovery[3, 3, 2]), 1.0)
+        np.testing.assert_array_equal(with_recovery[:2, :2], source[:2, :2])
 
     def test_preview_keeps_full_demosaic_resolution(self):
         """プレビューでも先にhalf_sizeへ落とさず、最後に1600pxへ縮小する。"""
@@ -325,6 +344,26 @@ class FloatPipelineTests(unittest.TestCase):
         result = _resize_array(source, 100)
         self.assertEqual(result.shape, (98, 100, 3))
         np.testing.assert_array_equal(result, source[1:99, 1:101])
+
+    def test_preview_and_full_resize_share_the_same_source_frame(self):
+        """6024→6000の微小クロップをプレビューでも先に共有する。"""
+        height, width = 4000, 6024
+        source = np.empty((height, width, 3), dtype=np.float32)
+        source[..., 0] = np.arange(width, dtype=np.float32)[None, :]
+        source[..., 1] = np.arange(height, dtype=np.float32)[:, None]
+        source[..., 2] = 1.0
+
+        full = _resize_array(source, 6000)
+        preview = _resize_array(source, 1600)
+
+        self.assertEqual(full.shape, (3984, 6000, 3))
+        self.assertEqual(float(full[0, 0, 0]), 12.0)
+        self.assertEqual(float(full[-1, -1, 0]), 6011.0)
+
+        # プレビューを元画像から直接縮小した結果ではなく、同じ先行クロップ済み
+        # フレームを縮小した結果と一致することを確認する。
+        expected_preview = _resize_array(full, 1600)
+        np.testing.assert_allclose(preview, expected_preview, rtol=0.0, atol=1e-6)
 
 
 class TempPathTests(unittest.TestCase):

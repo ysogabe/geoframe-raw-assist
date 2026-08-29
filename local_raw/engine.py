@@ -3,12 +3,12 @@
 契約: docs/API_CONTRACT.md §2（Adjustments）・§4（命名）・§9（module 契約）
 
 処理順序は契約 §2 で固定:
-    rawpy postprocess → lensfun 補正 → shadow_lift → resize
+    rawpy postprocess → lensfun 補正 → highlight_recovery → shadow_lift → resize
     → Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
 
-RAWからJPEGへ落とすまでの中間画像は float32 (0..1) で保持する。暗部補正や
-トーン調整を8bitの途中で行うと、わずかな調整でも階調が段階化し、クリップした
-画素を後から戻せないためである。
+RAWからJPEGへ落とすまでの中間画像は float32 で保持し、必要な1.0超の値も最終
+クリップ直前まで残す。暗部補正やトーン調整を8bitの途中で行うと、わずかな調整でも
+階調が段階化し、クリップした画素を後から戻せないためである。
 """
 
 from __future__ import annotations
@@ -84,7 +84,10 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: ENGINE_VERSION 11: 6024→6000のような2%未満の微小縮小はINTER_AREAではなく中央クロップ
 #: にし、大きなレンズ補正の再標本化はINTER_CUBICへ変更した。full-sizeのDSC04440では
 #: レンズ補正後の細部低下が大きく、微小AREA縮小を重ねるとさらに軟化するためである。
-ENGINE_VERSION = 11
+#:
+#: ENGINE_VERSION 12: ハイライト救済をrawpyの露出補正からfloat32のソフトニーへ移し、
+#: プレビューでも本現像と同じ微小クロップを先に適用するようにした。
+ENGINE_VERSION = 12
 RECIPE_VERSION = 9
 
 DEFAULT_MAX_EDGE = 6000
@@ -117,6 +120,10 @@ MINOR_RESIZE_CROP_SCALE = 0.98
 
 #: shadow_lift LUT の強さ係数（契約 §2 の式の定数部）。Wave 3 で目視調整可。
 SHADOW_LIFT_GAIN = 0.5 * 255.0 * 4.0
+
+#: highlight_recovery のソフトニー開始点。中間調を変えず、白飛びに近い領域だけを
+#: なだらかに圧縮する。
+HIGHLIGHT_RECOVERY_KNEE = 0.8
 
 __all__ = [
     "CAPTURE_ID_PATTERN",
@@ -272,6 +279,28 @@ def _apply_shadow_lift_array(rgb: np.ndarray, lift: float) -> np.ndarray:
     return lifted.astype(np.float32, copy=False)
 
 
+def _apply_highlight_recovery_array(rgb: np.ndarray, recovery: float) -> np.ndarray:
+    """ハイライトを float32 (0..1) の前段でソフトニー圧縮する。
+
+    rawpy の `exp_preserve_highlights` は `exp_shift` と組み合わせた露出変更向け
+    なので、`exp_shift=1.0` 固定の現像では使わない。代わりに、ニーより上の各RGB
+    チャンネルを有理関数で連続的に圧縮する。recovery=0 では入力を変更せず、100
+    では1.0超の値も最終クリップ前に1.0未満へ収束させるため、白飛び付近の階調が
+    スライダーに応じて変化する。
+    """
+    working = np.asarray(rgb, dtype=np.float32).copy()
+    strength = min(1.0, max(0.0, float(recovery) / 100.0))
+    if strength <= 0.0:
+        return working
+
+    knee = HIGHLIGHT_RECOVERY_KNEE
+    high = working > knee
+    excess = working[high] - knee
+    compressed = excess / (1.0 + strength * excess / (1.0 - knee))
+    working[high] = knee + compressed
+    return working.astype(np.float32, copy=False)
+
+
 def _postprocess_params(
     raw: Any,
     adjustments: dict[str, Any],
@@ -279,7 +308,6 @@ def _postprocess_params(
 ) -> dict[str, Any]:
     exposure = float(adjustments["exposure"])
     exposure_gain = 2.0**exposure
-    highlight_recovery = float(adjustments["highlight_recovery"])
     noise_reduction = adjustments["noise_reduction"]
 
     if noise_reduction == "full":
@@ -303,10 +331,6 @@ def _postprocess_params(
         # まま、露出スライダーは bright に一度だけ渡す（AUTO_BRIGHT_THR のコメント参照）。
         "exp_shift": 1.0,
         "bright": exposure_gain,
-        "exp_preserve_highlights": 0.4 + 0.006 * highlight_recovery,
-        # 75を境に処理が急変すると、隣接するプリセットやスライダー値で色と階調が
-        # 不連続になる。復元量は exp_preserve_highlights で連続的に変える。
-        "highlight_mode": rawpy.HighlightMode.Blend,
         "fbdd_noise_reduction": fbdd_mode,
         "median_filter_passes": median_passes,
         "use_auto_wb": False,
@@ -329,20 +353,50 @@ def _postprocess_params(
 def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
     """float32 RGB画像を最大辺まで縮小する。
 
-    大幅な縮小はINTER_AREA、2%未満の微小縮小は中央クロップを使う。full-size現像の
-    6024→6000のようなケースをAREAに通すと、ほぼ同じ解像度なのに細部だけが平均化される。
+    元画像が標準本現像サイズ（6000px）を2%未満だけ上回る場合は、呼び出し側の
+    `max_edge` に関係なく中央クロップを先に行う。その後の縮小は常にINTER_AREAなので、
+    full-size現像の6024→6000の画角を1600pxプレビューでも共有できる。
     """
     height, width = rgb.shape[:2]
     current_max = max(height, width)
-    if current_max <= max_edge:
-        return rgb
-    scale = float(max_edge) / float(current_max)
-    target_size = (max(1, round(width * scale)), max(1, round(height * scale)))
-    if scale >= MINOR_RESIZE_CROP_SCALE:
+
+    # 公開APIの最小出力サイズ未満は現像経路には入らないため、既存の小配列向け
+    # ユーティリティ挙動（呼び出し時のmax_edgeに対する微小クロップ）を維持する。
+    if current_max < MIN_MAX_EDGE:
+        if current_max <= max_edge:
+            return rgb
+        scale = float(max_edge) / float(current_max)
+        target_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        if scale >= MINOR_RESIZE_CROP_SCALE:
+            target_width, target_height = target_size
+            left = max(0, (width - target_width) // 2)
+            top = max(0, (height - target_height) // 2)
+            return rgb[top : top + target_height, left : left + target_width].copy()
+        return cv2.resize(rgb, target_size, interpolation=cv2.INTER_AREA).astype(
+            np.float32, copy=False
+        )
+
+    # DEFAULT_MAX_EDGEを基準にすることで、プレビューと本現像でクロップ判定が変わらない。
+    crop_max = min(DEFAULT_MAX_EDGE, current_max)
+    crop_scale = float(crop_max) / float(current_max)
+    if crop_scale < 1.0 and crop_scale >= MINOR_RESIZE_CROP_SCALE:
+        target_size = (
+            max(1, round(width * crop_scale)),
+            max(1, round(height * crop_scale)),
+        )
         target_width, target_height = target_size
         left = max(0, (width - target_width) // 2)
         top = max(0, (height - target_height) // 2)
-        return rgb[top : top + target_height, left : left + target_width].copy()
+        rgb = rgb[top : top + target_height, left : left + target_width].copy()
+
+    if max(rgb.shape[:2]) <= max_edge:
+        return rgb
+
+    scale = float(max_edge) / float(max(rgb.shape[:2]))
+    target_size = (
+        max(1, round(rgb.shape[1] * scale)),
+        max(1, round(rgb.shape[0] * scale)),
+    )
     # Lanczos は細線・高コントラスト境界の前後に明暗の振動を作りやすい。
     # 現像のプレビューは常に縮小方向なので、画素面積平均のAREAを使って輪郭を
     # 保ちつつ、レンズ補正で生じた微小な色ずれをハローへ変換しない。
@@ -589,14 +643,15 @@ def develop_raw(
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
 
-    # rawpy は16bitでデコードし、JPEG化までfloat32 (0..1) を維持する。
+    # rawpy は16bitでデコードし、JPEG化までfloat32を維持する。
+    # レンズ補正やハイライト救済で参照できるよう、最終クリップ前の1.0超を保持する。
     rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
-    np.clip(rgb, 0.0, 1.0, out=rgb)
 
     # --- レンズ補正（リサイズ前） ---
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
 
-    # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
+    # --- highlight_recovery → shadow_lift（ともにリサイズ前） → リサイズ → トーン ---
+    rgb = _apply_highlight_recovery_array(rgb, float(resolved["highlight_recovery"]))
     rgb = _apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
     rgb = _resize_array(rgb, effective_max_edge)
     rgb = _apply_tone_array(rgb, resolved)
