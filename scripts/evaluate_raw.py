@@ -37,6 +37,9 @@ from local_raw.presets import PRESETS
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 
+# Rec.709 輝度係数（ITU-R BT.709）。出力画像と参照JPEGの両方の luma 導出で共有する。
+REC709_LUMA = (0.2126, 0.7152, 0.0722)
+
 
 def _paired_ids(source_root: Path) -> list[str]:
     jpg_ids = {
@@ -61,7 +64,8 @@ def _select_ids(available: list[str], requested: list[str] | None, limit: int) -
     if limit <= 0 or limit >= len(available):
         return available
     # 先頭・中間・末尾を均等に拾い、連番の一部だけへ過学習しないようにする。
-    positions = np.linspace(0, len(available) - 1, num=limit, dtype=int)
+    # dtype=int は切り捨て(floor)で前方へ偏るため、理想位置を四捨五入して使う。
+    positions = np.rint(np.linspace(0, len(available) - 1, num=limit)).astype(int)
     return list(dict.fromkeys(available[int(position)] for position in positions))
 
 
@@ -72,7 +76,8 @@ def _read_rgb(path: Path) -> np.ndarray:
 
 def _metrics(output: np.ndarray, camera_jpg: np.ndarray) -> dict[str, float]:
     rgb = output.astype(np.float32) / 255.0
-    luma = 0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2]
+    kr, kg, kb = REC709_LUMA
+    luma = kr * rgb[:, :, 0] + kg * rgb[:, :, 1] + kb * rgb[:, :, 2]
     gray = cv2.cvtColor(output, cv2.COLOR_RGB2GRAY).astype(np.float32)
     blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
     highpass = gray - blurred
@@ -83,9 +88,9 @@ def _metrics(output: np.ndarray, camera_jpg: np.ndarray) -> dict[str, float]:
         interpolation=cv2.INTER_AREA,
     ).astype(np.float32) / 255.0
     reference_luma = (
-        0.2126 * reference[:, :, 0]
-        + 0.7152 * reference[:, :, 1]
-        + 0.0722 * reference[:, :, 2]
+        kr * reference[:, :, 0]
+        + kg * reference[:, :, 1]
+        + kb * reference[:, :, 2]
     )
 
     # レンズ補正の失敗で数十pxの黒帯が出るケースを、内容依存の全体平均とは別に
@@ -129,11 +134,15 @@ def _summarize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             continue
         by_preset.setdefault(str(row["preset"]), []).append(row)
 
-    numeric_keys = [
+    # 集計対象はエラーでない全行のキーの和集合から決める。先頭行だけを見ると、
+    # 先頭行がエラー行の場合に他の正常行の数値列が summary から消えてしまう。
+    numeric_keys = sorted({
         key
-        for key, value in rows[0].items()
+        for row in rows
+        if not row.get("error")
+        for key, value in row.items()
         if isinstance(value, (int, float)) and key not in {"elapsed_seconds"}
-    ] if rows else []
+    })
     summary: list[dict[str, object]] = []
     for preset, preset_rows in by_preset.items():
         item: dict[str, object] = {"preset": preset, "images": len(preset_rows)}
