@@ -237,9 +237,18 @@ def _vignetting_profile_guard(resolution: LensResolution) -> str | None:
     return None
 
 
+class _GeometryCorrectionGuardError(Exception):
+    """歪曲/TCAの出力を破棄して部分適用を続けるための内部例外。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def apply_lens_correction(
     rgb: np.ndarray,
     resolution: LensResolution,
+    force_skip_vignetting: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """rawpy 出力 (H, W, 3) にビネット・歪曲・TCA補正を適用する。
 
@@ -249,6 +258,10 @@ def apply_lens_correction(
 
     返り値は `(補正後配列, lens_correction dict)`。失敗時は入力配列をそのまま返す。
     寸法は EXIF ではなく **実際の配列** から取る（preview の half_size で半分になるため）。
+
+    `force_skip_vignetting=True` ではビネット補正だけを強制的にスキップする。
+    ブラケットのように、呼び出し元がグループ全体でビネット補正の適用可否を
+    揃えたい場合に使う。既定値では従来どおりフレーム単位の安全弁を適用する。
     """
     if not resolution.applicable:
         return rgb, resolution.unapplied()
@@ -283,7 +296,11 @@ def apply_lens_correction(
         # 不変（自前のクロップ・リサイズは不要）。
         has_distortion = bool(getattr(resolution.lens, "calib_distortion", None))
         has_tca = bool(getattr(resolution.lens, "calib_tca", None))
-        vignetting_guard_reason = _vignetting_profile_guard(resolution)
+        vignetting_guard_reason = (
+            "forced_skip"
+            if force_skip_vignetting
+            else _vignetting_profile_guard(resolution)
+        )
 
         # TCAがあるレンズだけTCAフラグを立てる。テスト用の軽量な偽lensfun実装など、
         # 古いModifyFlagsにTCAが無い環境でも既存の歪曲補正は継続できるようにする。
@@ -358,51 +375,62 @@ def apply_lens_correction(
         # getattr なのは、属性が無い/None の異常系でここが AttributeError になると
         # 外側の catch-all が成功済みのビネット補正まで道連れに破棄するため
         # （その場合は歪曲だけを黙って諦め、部分適用のまま返すのが正しい）。
-        tca_coordinates = False
-        coordinates = None
-        if has_tca:
-            coordinates = (
-                modifier.apply_subpixel_geometry_distortion()
-                if has_distortion
-                else modifier.apply_subpixel_distortion()
-            )
-            tca_coordinates = coordinates is not None
-        if coordinates is None and has_distortion:
-            coordinates = modifier.apply_geometry_distortion()
-        if coordinates is not None:
-            # autoscale 済みでもマップ端は実質ソース境界上に乗るため、画像外を黒で埋める
-            # BORDER_CONSTANTではなくBORDER_REPLICATEを使う。大きな本現像はCubic、
-            # 半解像度以下はLinearで再標本化し、TCAはRGB別の統合マップを一度だけ適用する。
-            coordinates = np.asarray(coordinates, dtype=np.float32)
-            interpolation = _remap_interpolation(height, width)
-            if tca_coordinates:
-                if coordinates.shape != (height, width, 3, 2):
-                    raise ValueError("lensfun TCA map has an unexpected shape")
-                remapped = np.empty_like(corrected)
-                for channel in range(3):
-                    remapped[..., channel] = cv2.remap(
-                        corrected[..., channel],
-                        coordinates[..., channel, :],
+        # 歪曲/TCAは、ビネット補正が成功した配列を退避してから適用する。マップの
+        # 形状不一致やremap後の非有限値は幾何補正だけを諦め、ビネットの部分成功を守る。
+        corrected_before_geometry = corrected
+        try:
+            tca_coordinates = False
+            coordinates = None
+            if has_tca:
+                coordinates = (
+                    modifier.apply_subpixel_geometry_distortion()
+                    if has_distortion
+                    else modifier.apply_subpixel_distortion()
+                )
+                tca_coordinates = coordinates is not None
+            if coordinates is None and has_distortion:
+                coordinates = modifier.apply_geometry_distortion()
+            if coordinates is not None:
+                # autoscale 済みでもマップ端は実質ソース境界上に乗るため、画像外を黒で埋める
+                # BORDER_CONSTANTではなくBORDER_REPLICATEを使う。大きな本現像はCubic、
+                # 半解像度以下はLinearで再標本化し、TCAはRGB別の統合マップを一度だけ適用する。
+                coordinates = np.asarray(coordinates, dtype=np.float32)
+                interpolation = _remap_interpolation(height, width)
+                if tca_coordinates:
+                    if coordinates.shape != (height, width, 3, 2):
+                        raise _GeometryCorrectionGuardError("tca_map_unexpected_shape")
+                    remapped = np.empty_like(corrected)
+                    for channel in range(3):
+                        remapped[..., channel] = cv2.remap(
+                            corrected[..., channel],
+                            coordinates[..., channel, :],
+                            None,
+                            interpolation,
+                            borderMode=cv2.BORDER_REPLICATE,
+                        )
+                    if not _all_finite(np.asarray(remapped, dtype=np.float32)):
+                        raise _GeometryCorrectionGuardError("geometry_non_finite")
+                    corrected = remapped
+                    if has_distortion:
+                        applied_flags.append("distortion")
+                    applied_flags.append("tca")
+                else:
+                    corrected = cv2.remap(
+                        corrected,
+                        coordinates,
                         None,
                         interpolation,
                         borderMode=cv2.BORDER_REPLICATE,
                     )
-                corrected = remapped
-                if has_distortion:
+                    if not _all_finite(np.asarray(corrected, dtype=np.float32)):
+                        raise _GeometryCorrectionGuardError("geometry_non_finite")
                     applied_flags.append("distortion")
-                applied_flags.append("tca")
-            else:
-                corrected = cv2.remap(
-                    corrected,
-                    coordinates,
-                    None,
-                    interpolation,
-                    borderMode=cv2.BORDER_REPLICATE,
-                )
-                applied_flags.append("distortion")
 
-        if not _all_finite(np.asarray(corrected, dtype=np.float32)):
-            raise ValueError("lens correction generated non-finite pixels")
+            if not _all_finite(np.asarray(corrected, dtype=np.float32)):
+                raise _GeometryCorrectionGuardError("geometry_non_finite")
+        except _GeometryCorrectionGuardError as error:
+            corrected = corrected_before_geometry
+            skipped_flags.append(error.reason)
 
         if not applied_flags:
             reason = skipped_flags[0] if skipped_flags else "lens_not_calibrated"

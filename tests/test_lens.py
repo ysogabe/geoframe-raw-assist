@@ -556,5 +556,104 @@ class NonFiniteVignettingTests(unittest.TestCase):
         self.assertEqual(correction["reason"], "vignetting_highlight_headroom")
 
 
+@unittest.skipUnless(cv2_available, "OpenCV 未導入")
+class PartialLensCorrectionTests(unittest.TestCase):
+    """歪曲/TCAの異常時にも成功済みのビネット補正を保持する回帰。"""
+
+    def test_unexpected_tca_shape_keeps_vignetting(self):
+        class _BadTcaShapeModifier:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                working *= 2.0
+                return True
+
+            def apply_subpixel_geometry_distortion(self):
+                # TCAマップに必要な channel 軸を欠落させる。
+                return np.zeros((32, 48, 2), dtype=np.float32)
+
+        lens_obj = types.SimpleNamespace(
+            calib_distortion=[object()],
+            calib_tca=[object()],
+        )
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_BadTcaShapeModifier)):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution(lens_obj=lens_obj)
+            )
+
+        self.assertTrue(correction["applied"], correction)
+        self.assertEqual(correction["flags"], ["vignetting"])
+        self.assertIn("tca_map_unexpected_shape", correction["skipped"])
+        self.assertIsNot(corrected, rgb)
+        np.testing.assert_array_equal(corrected, np.full_like(rgb, 200))
+
+    def test_non_finite_remap_keeps_vignetting(self):
+        class _NonFiniteRemapModifier:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                working *= 2.0
+                return True
+
+            def apply_geometry_distortion(self):
+                return _identity_map(32, 48)
+
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        non_finite = np.full((32, 48, 3), np.nan, dtype=np.float32)
+        with (
+            mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_NonFiniteRemapModifier)),
+            mock.patch.object(lens.cv2, "remap", return_value=non_finite),
+        ):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution()
+            )
+
+        self.assertTrue(correction["applied"], correction)
+        self.assertEqual(correction["flags"], ["vignetting"])
+        self.assertIn("geometry_non_finite", correction["skipped"])
+        self.assertIsNot(corrected, rgb)
+        np.testing.assert_array_equal(corrected, np.full_like(rgb, 200))
+
+    def test_force_skip_vignetting_does_not_run_highlight_guard(self):
+        instances = []
+
+        class _ForceSkipModifier:
+            def __init__(self, *args, **kwargs):
+                instances.append(self)
+                self.flags = None
+
+            def initialize(self, *args, **kwargs):
+                self.flags = kwargs["flags"]
+
+            def apply_color_modification(self, working):
+                raise AssertionError("強制スキップ時はビネット補正を呼ばない")
+
+            def apply_geometry_distortion(self):
+                return None
+
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_ForceSkipModifier)):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution(), force_skip_vignetting=True
+            )
+
+        self.assertFalse(correction["applied"], correction)
+        self.assertEqual(correction["reason"], "vignetting_forced_skip")
+        self.assertIs(corrected, rgb)
+        self.assertEqual(
+            instances[0].flags,
+            _FakeModifyFlags.DISTORTION | _FakeModifyFlags.SCALE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
