@@ -431,6 +431,16 @@ def apply_lens_correction(
         except _GeometryCorrectionGuardError as error:
             corrected = corrected_before_geometry
             skipped_flags.append(error.reason)
+        except Exception as error:
+            # lensfun/OpenCVの想定外エラーでも、成功済みのビネット補正は保持して
+            # 歪曲/TCAだけをスキップする。理由は安定したフラグに正規化し、詳細はログへ残す。
+            corrected = corrected_before_geometry
+            skipped_flags.append("geometry_correction_failed")
+            LOGGER.warning(
+                "歪曲/TCA補正をスキップします (%s): %s",
+                type(error).__name__,
+                error,
+            )
 
         if not applied_flags:
             reason = skipped_flags[0] if skipped_flags else "lens_not_calibrated"

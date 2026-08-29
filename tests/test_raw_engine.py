@@ -13,6 +13,7 @@ from PIL import Image
 
 from local_raw import engine
 from local_raw.engine import (
+    DEFAULT_MAX_EDGE,
     RawDevelopmentError,
     _apply_highlight_recovery_array,
     _apply_shadow_lift_array,
@@ -364,6 +365,29 @@ class FloatPipelineTests(unittest.TestCase):
         # フレームを縮小した結果と一致することを確認する。
         expected_preview = _resize_array(full, 1600)
         np.testing.assert_allclose(preview, expected_preview, rtol=0.0, atol=1e-6)
+
+    def test_resize_boundary_preserves_input_only_for_requested_max_edge(self):
+        """6000基準の先行クロップがmax_edge=6048へ漏れない。"""
+        for source_edge in (6000, 6001, 6024, 6048):
+            source = np.empty((1, source_edge, 3), dtype=np.float32)
+            source[..., 0] = np.arange(source_edge, dtype=np.float32)
+            source[..., 1:] = 0.0
+
+            for max_edge in (6000, 6048):
+                with self.subTest(source_edge=source_edge, max_edge=max_edge):
+                    result = _resize_array(source, max_edge)
+                    should_crop = (
+                        max_edge <= DEFAULT_MAX_EDGE and source_edge > max_edge
+                    )
+                    if should_crop:
+                        crop_left = (source_edge - max_edge) // 2
+                        self.assertEqual(result.shape, (1, max_edge, 3))
+                        self.assertIsNot(result, source)
+                        self.assertEqual(float(result[0, 0, 0]), crop_left)
+                        self.assertEqual(float(result[0, -1, 0]), crop_left + max_edge - 1)
+                    else:
+                        self.assertIs(result, source)
+                        self.assertEqual(result.shape, source.shape)
 
 
 class TempPathTests(unittest.TestCase):

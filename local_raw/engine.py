@@ -6,9 +6,10 @@
     rawpy postprocess → lensfun 補正 → highlight_recovery → shadow_lift → resize
     → Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
 
-RAWからJPEGへ落とすまでの中間画像は float32 で保持し、必要な1.0超の値も最終
-クリップ直前まで残す。暗部補正やトーン調整を8bitの途中で行うと、わずかな調整でも
-階調が段階化し、クリップした画素を後から戻せないためである。
+RAWからJPEGへ落とすまでの中間画像は float32 で保持する。rawpyの16bit出力は
+65535で割ると常に[0,1]に収まるため、入力段階での明示的なクリップは不要である。
+暗部補正やトーン調整を8bitの途中で行うと、わずかな調整でも階調が段階化し、
+クリップした画素を後から戻せないためである。
 """
 
 from __future__ import annotations
@@ -87,7 +88,10 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #:
 #: ENGINE_VERSION 12: ハイライト救済をrawpyの露出補正からfloat32のソフトニーへ移し、
 #: プレビューでも本現像と同じ微小クロップを先に適用するようにした。
-ENGINE_VERSION = 12
+#:
+#: ENGINE_VERSION 13: 明示されたmax_edgeがDEFAULT_MAX_EDGEを超える場合は、標準サイズ
+#: 基準の先行クロップを行わず、入力が指定上限以下なら元画像をそのまま返すようにした。
+ENGINE_VERSION = 13
 RECIPE_VERSION = 9
 
 DEFAULT_MAX_EDGE = 6000
@@ -353,9 +357,10 @@ def _postprocess_params(
 def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
     """float32 RGB画像を最大辺まで縮小する。
 
-    元画像が標準本現像サイズ（6000px）を2%未満だけ上回る場合は、呼び出し側の
-    `max_edge` に関係なく中央クロップを先に行う。その後の縮小は常にINTER_AREAなので、
-    full-size現像の6024→6000の画角を1600pxプレビューでも共有できる。
+    `max_edge` が標準本現像サイズ（6000px）以下の場合、元画像が6000pxを2%未満
+    だけ上回れば中央クロップを先に行う。その後の縮小は常にINTER_AREAなので、
+    full-size現像の6024→6000の画角を1600pxプレビューでも共有できる。6000pxを
+    超える `max_edge` ではこの先行クロップを行わず、入力が上限以下なら変更しない。
     """
     height, width = rgb.shape[:2]
     current_max = max(height, width)
@@ -376,18 +381,19 @@ def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
             np.float32, copy=False
         )
 
-    # DEFAULT_MAX_EDGEを基準にすることで、プレビューと本現像でクロップ判定が変わらない。
-    crop_max = min(DEFAULT_MAX_EDGE, current_max)
-    crop_scale = float(crop_max) / float(current_max)
-    if crop_scale < 1.0 and crop_scale >= MINOR_RESIZE_CROP_SCALE:
-        target_size = (
-            max(1, round(width * crop_scale)),
-            max(1, round(height * crop_scale)),
-        )
-        target_width, target_height = target_size
-        left = max(0, (width - target_width) // 2)
-        top = max(0, (height - target_height) // 2)
-        rgb = rgb[top : top + target_height, left : left + target_width].copy()
+    if max_edge <= DEFAULT_MAX_EDGE:
+        # DEFAULT_MAX_EDGEを基準にすることで、プレビューと本現像でクロップ判定が変わらない。
+        crop_max = min(DEFAULT_MAX_EDGE, current_max)
+        crop_scale = float(crop_max) / float(current_max)
+        if crop_scale < 1.0 and crop_scale >= MINOR_RESIZE_CROP_SCALE:
+            target_size = (
+                max(1, round(width * crop_scale)),
+                max(1, round(height * crop_scale)),
+            )
+            target_width, target_height = target_size
+            left = max(0, (width - target_width) // 2)
+            top = max(0, (height - target_height) // 2)
+            rgb = rgb[top : top + target_height, left : left + target_width].copy()
 
     if max(rgb.shape[:2]) <= max_edge:
         return rgb
@@ -643,8 +649,8 @@ def develop_raw(
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
 
-    # rawpy は16bitでデコードし、JPEG化までfloat32を維持する。
-    # レンズ補正やハイライト救済で参照できるよう、最終クリップ前の1.0超を保持する。
+    # rawpyの16bit出力は65535で割ると常に[0,1]に収まるため、ここでの明示的な
+    # クリップは不要。
     rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
 
     # --- レンズ補正（リサイズ前） ---

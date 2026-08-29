@@ -560,6 +560,51 @@ class NonFiniteVignettingTests(unittest.TestCase):
 class PartialLensCorrectionTests(unittest.TestCase):
     """歪曲/TCAの異常時にも成功済みのビネット補正を保持する回帰。"""
 
+    def _assert_geometry_failure_keeps_vignetting(self, error):
+        class _GeometryModifier:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def initialize(self, *args, **kwargs):
+                pass
+
+            def apply_color_modification(self, working):
+                working *= 2.0
+                return True
+
+            def apply_geometry_distortion(self):
+                return _identity_map(32, 48)
+
+        rgb = np.full((32, 48, 3), 100, dtype=np.uint8)
+        with (
+            mock.patch.object(lens, "lensfunpy", _fake_lensfunpy(_GeometryModifier)),
+            mock.patch.object(
+                _GeometryModifier,
+                "apply_geometry_distortion",
+                side_effect=error,
+            ) as geometry_mock,
+        ):
+            corrected, correction = apply_lens_correction(
+                rgb, _applicable_stub_resolution()
+            )
+
+        geometry_mock.assert_called_once_with()
+        self.assertTrue(correction["applied"], correction)
+        self.assertEqual(correction["flags"], ["vignetting"])
+        self.assertEqual(correction["skipped"], ["geometry_correction_failed"])
+        self.assertIsNot(corrected, rgb)
+        np.testing.assert_array_equal(corrected, np.full_like(rgb, 200))
+
+    def test_cv2_geometry_error_keeps_vignetting(self):
+        self._assert_geometry_failure_keeps_vignetting(
+            lens.cv2.error("simulated geometry failure")
+        )
+
+    def test_attribute_error_during_geometry_keeps_vignetting(self):
+        self._assert_geometry_failure_keeps_vignetting(
+            AttributeError("simulated missing geometry attribute")
+        )
+
     def test_unexpected_tca_shape_keeps_vignetting(self):
         class _BadTcaShapeModifier:
             def __init__(self, *args, **kwargs):
