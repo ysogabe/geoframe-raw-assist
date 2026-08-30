@@ -825,6 +825,115 @@ class MergedRecipeTests(BracketTestCase):
             },
         )
 
+    def test_vignetting_non_finite_skip_is_applied_to_the_whole_group(self):
+        """非有限値破棄（マーカーなしの経路）もグループ判定のトリガーになること。
+
+        `vignetting_highlight_headroom` だけをトリガーにすると、フレームBが
+        非有限値でビネットを破棄した場合に見逃され、ビネット適用済みのフレームA
+        と未補正のフレームBが混ざったまま合成されてしまう（過去のMedium指摘）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            # フレームBはビネット補正が非有限値を生成して破棄された経路
+            # （skipped/reasonともにマーカーなしで返ってきていた過去の実装）。
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_non_finite"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # フレームAはビネット適用済み（flags に "vignetting"）だったので、
+        # グループ判定により force_skip_vignetting=True で再実行される。
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        np.testing.assert_array_equal(calls[0][0], calls[2][0])
+        self.assertEqual(
+            result["lens_correction"],
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+                "skipped": ["vignetting_non_finite"],
+            },
+        )
+
+    def test_vignetting_color_modification_failure_does_not_trigger_group_skip(self):
+        """apply_color_modification失敗はフレーム間で決定論的なので単体では揃えない。
+
+        同一レンズ・同一dtype・同一寸法なら apply_color_modification の成否は
+        フレーム間で一致するはずの理由。グループ判定のトリガーには含めない
+        （含めると、このマーカー単体を持つフレームだけの偽陽性グループ化になる）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+
+        def both_fail(rgb, current_resolution, force_skip_vignetting=False):
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_color_modification_failed"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=both_fail
+        ):
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # force_skip_vignetting=True での再実行（3回目の呼び出し）が発生しないこと。
+        self.assertEqual([force for _, force in calls], [False, False])
+
     def test_lens_summary_preserves_shared_metadata(self):
         per_frame = [
             {

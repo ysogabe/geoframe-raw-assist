@@ -112,7 +112,7 @@ MAX_FRAMES = 9
 
 #: 合成パイプラインの版。`params_hash` に含むので、ここを上げると既存キャッシュは
 #: 自動的に無効になる。
-BRACKET_VERSION = 3
+BRACKET_VERSION = 4
 MERGE_RECIPE_VERSION = 1
 
 #: 位置合わせの版。`params_hash` には**試行したか**（= この版）だけを含め、
@@ -410,6 +410,15 @@ def _summarize_lens_corrections(
     return {"applied": False, "reason": "inconsistent_across_frames"}
 
 
+# ブラケット内のフレーム間で実際に食い違いうる、ビネット非適用の理由だけを
+# グループ判定のトリガーにする。他の非適用理由（レンズ/焦点距離のプロパティ、
+# force_skip_vignetting自身が付けるマーカー、apply_color_modification失敗）は
+# 全フレームで一致するか、こちらが制御しているため対象外。
+_GROUP_SKIP_TRIGGER_REASONS = frozenset(
+    {"vignetting_highlight_headroom", "vignetting_non_finite"}
+)
+
+
 def _apply_group_lens_corrections(
     frames: list[np.ndarray],
     lens_resolutions: list[LensResolution],
@@ -417,9 +426,15 @@ def _apply_group_lens_corrections(
     """全フレームのレンズ補正を実行し、ビネット安全弁をグループで揃える。
 
     1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
-    `vignetting_highlight_headroom` が返った場合は、1パス目でビネットを適用できた
-    フレームだけを、デコード済みの元配列から `force_skip_vignetting=True` で再実行する。
-    これにより歪曲/TCAの処理は維持しつつ、ビネットだけが混在しない。
+    `_GROUP_SKIP_TRIGGER_REASONS` のいずれかが返った場合は、1パス目でビネットを
+    適用できたフレームだけを、デコード済みの元配列から `force_skip_vignetting=True`
+    で再実行する。これにより歪曲/TCAの処理は維持しつつ、ビネットだけが混在しない。
+
+    トリガーに含めるのは画素内容に依存し、ブラケット内のフレーム間で実際に
+    食い違いうる理由（ハイライト余地不足・非有限値破棄）だけ。
+    `vignetting_profile_focal_guard`（レンズ/焦点距離のプロパティで全フレーム共通）と
+    `vignetting_forced_skip`（この関数自身の2パス目が付与するマーカー）は
+    フレーム間で揃っている、またはこちらが制御しているためトリガーにしない。
     """
     corrected_frames: list[np.ndarray] = []
     corrections: list[dict[str, Any]] = []
@@ -428,21 +443,21 @@ def _apply_group_lens_corrections(
         corrected_frames.append(np.ascontiguousarray(corrected))
         corrections.append(correction)
 
-    group_skip_reason = "vignetting_highlight_headroom"
+    def group_skip_trigger_reason(correction: dict[str, Any]) -> str | None:
+        for reason in correction.get("skipped", []):
+            if reason in _GROUP_SKIP_TRIGGER_REASONS:
+                return reason
+        reason = correction.get("reason")
+        if reason in _GROUP_SKIP_TRIGGER_REASONS:
+            return reason
+        return None
 
-    def has_group_skip_reason(correction: dict[str, Any]) -> bool:
-        # レンズ補正に幾何補正まで残った場合は `skipped`、ビネットだけで補正全体が
-        # 不適用になった場合は lens.py が `reason` に同じ値を返す。
-        return group_skip_reason in correction.get("skipped", []) or (
-            correction.get("reason") == group_skip_reason
-        )
-
-    group_skip = any(
-        has_group_skip_reason(correction)
-        for correction in corrections
-    )
-    if not group_skip:
+    trigger_reasons = [group_skip_trigger_reason(correction) for correction in corrections]
+    if not any(reason is not None for reason in trigger_reasons):
         return corrected_frames, corrections
+
+    # グループ全体に記録する理由は、実際に発火した理由のうち最初のもの。
+    group_skip_reason = next(reason for reason in trigger_reasons if reason is not None)
 
     for index, (frame, resolution, correction) in enumerate(
         zip(frames, lens_resolutions, corrections)

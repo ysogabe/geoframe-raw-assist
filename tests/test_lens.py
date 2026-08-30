@@ -455,7 +455,10 @@ class UncalibratedDistortionGuardTests(unittest.TestCase):
 
         self.assertIs(corrected, rgb)
         self.assertFalse(correction["applied"])
-        self.assertEqual(correction["reason"], "lens_not_calibrated")
+        # apply_color_modification が False を返した経路にも M-1 対応でマーカーが
+        # 付くようになったため、"lens_not_calibrated" フォールバックより先にこちらが
+        # reason として採用される（skipped_flags[0] を優先する既存ロジックのまま）。
+        self.assertEqual(correction["reason"], "vignetting_color_modification_failed")
 
 
 class NonFiniteVignettingTests(unittest.TestCase):
@@ -473,7 +476,10 @@ class NonFiniteVignettingTests(unittest.TestCase):
         # 歪曲補正も無いので適用フラグが空になり、無補正として返る。
         self.assertIs(corrected, rgb)
         self.assertFalse(correction["applied"])
-        self.assertEqual(correction["reason"], "lens_not_calibrated")
+        # 非有限値破棄の経路にも M-1 対応でマーカーが付くようになったため、
+        # "lens_not_calibrated" フォールバックより先にこちらが reason として
+        # 採用される（skipped_flags[0] を優先する既存ロジックのまま）。
+        self.assertEqual(correction["reason"], "vignetting_non_finite")
 
     @unittest.skipUnless(cv2_available, "OpenCV 未導入")
     def test_nan_vignetting_does_not_block_distortion(self):

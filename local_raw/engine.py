@@ -94,7 +94,12 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #:
 #: ENGINE_VERSION 14: highlight_recoveryをrawpyのHighlightModeへ離散マッピングし、
 #: float32側のソフトニー処理を削除した。exp_shift=1.0固定は維持する。
-ENGINE_VERSION = 14
+#:
+#: ENGINE_VERSION 15: ビネット補正が非有限値/apply_color_modification失敗で破棄された
+#: 経路にも skipped/reason のマーカーを追加した（lens.py）。画素出力は変わらないが、
+#: レシピJSONの lens_correction.reason の値が変わりうるため、古いキャッシュのレシピを
+#: 引き継がないようにする。
+ENGINE_VERSION = 15
 RECIPE_VERSION = 9
 
 DEFAULT_MAX_EDGE = 6000

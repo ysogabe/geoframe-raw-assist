@@ -363,8 +363,10 @@ def apply_lens_correction(
                     "ビネット補正が非有限値を生成したため破棄します: %s", resolution.lens_name
                 )
                 corrected = rgb
+                skipped_flags.append("vignetting_non_finite")
         else:
             corrected = rgb
+            skipped_flags.append("vignetting_color_modification_failed")
 
         # --- 歪曲 / TCA補正 ---
         # 歪曲較正の無いレンズでは幾何マップを要求しない。SCALE（autoscale）は幾何補正が
