@@ -758,6 +758,79 @@ class MergedRecipeTests(BracketTestCase):
                     frame["lens_correction"]["reason"], "inconsistent_across_frames"
                 )
 
+    def test_a_focal_length_inconsistent_bracket_gets_no_lens_correction_at_all(self):
+        """全フレーム解決できても焦点距離が食い違えば、どのフレームにも補正を掛けない。
+
+        Opusレビュー指摘(M-A): `apply_lens_correction` は
+        `modifier.initialize(resolution.focal_length, resolution.aperture, ...)` を
+        フレーム個別の resolution で呼ぶため、焦点距離が割れると歪曲/TCA の幾何ワープ
+        自体がフレームごとに変わってしまう。これは `_apply_group_lens_corrections`
+        （ビネットのグループ判定）より上流の問題なので、トリガー集合をいくら広げても
+        直らない。`merge_bracket` 側で焦点距離・絞りの一致を検証し、
+        `lens_applicable` を全フレーム無補正へ倒す必要がある。
+
+        Sony E PZ 16-50mm（パワーズーム）で 18.0mm/19.0mm のように、
+        `_vignetting_profile_guard` の閾値をまたぐズーム位置のブレを想定。
+        """
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sony / E PZ 16-50mm"}
+
+        resolutions = [
+            LensResolution(
+                applicable=True, lens_name="Sony / E PZ 16-50mm", focal_length=18.0, aperture=4.0
+            ),
+            LensResolution(
+                applicable=True, lens_name="Sony / E PZ 16-50mm", focal_length=19.0, aperture=4.0
+            ),
+        ]
+        with mock.patch.object(
+            bracket_module, "probe_lens", side_effect=resolutions
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "焦点距離が食い違うなら1枚も補正しないこと")
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "lens_params_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "lens_params_inconsistent_across_frames",
+                )
+
+    def test_an_aperture_inconsistent_bracket_gets_no_lens_correction_at_all(self):
+        """焦点距離が一致していても絞りが食い違えば同様に全フレーム無補正にする。"""
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
+
+        resolutions = [
+            LensResolution(
+                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=2.8
+            ),
+            LensResolution(
+                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=4.0
+            ),
+        ]
+        with mock.patch.object(
+            bracket_module, "probe_lens", side_effect=resolutions
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "絞りが食い違うなら1枚も補正しないこと")
+        self.assertEqual(
+            result["lens_correction"]["reason"], "lens_params_inconsistent_across_frames"
+        )
+
     def test_a_fully_resolvable_bracket_still_gets_lens_correction(self):
         """全フレーム解決できるときは従来どおり全フレームに補正が掛かること。"""
         applied_to: list[object] = []
@@ -836,6 +909,64 @@ class MergedRecipeTests(BracketTestCase):
             },
         )
 
+    def test_vignetting_profile_focal_guard_skip_is_applied_to_the_whole_group(self):
+        """vignetting_profile_focal_guardも多層防御としてグループトリガーになること。
+
+        本来 merge_bracket の焦点距離一致ガードにより、この関数に到達する時点で
+        全フレームの焦点距離は揃っているはず。それでも lens.py が返す
+        vignetting_profile_focal_guard 自体はレンズ側の理由なので、安価な
+        多層防御としてトリガー集合に含めている（Opusレビュー指摘M-A）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sony / E PZ 16-50mm",
+            focal_length=16.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_profile_focal_guard"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        self.assertEqual(
+            result["lens_correction"]["skipped"], ["vignetting_profile_focal_guard"]
+        )
+
     def test_vignetting_non_finite_skip_is_applied_to_the_whole_group(self):
         """非有限値破棄（マーカーなしの経路）もグループ判定のトリガーになること。
 
@@ -912,6 +1043,12 @@ class MergedRecipeTests(BracketTestCase):
         同一レンズ・同一dtype・同一寸法なら apply_color_modification の成否は
         フレーム間で一致するはずの理由。グループ判定のトリガーには含めない
         （含めると、このマーカー単体を持つフレームだけの偽陽性グループ化になる）。
+
+        フレームA=ビネット適用済み・フレームB=apply_color_modification失敗、という
+        異種構成にすること自体が検証の要。両フレームに同じ correction を返すと、
+        どちらの flags にも "vignetting" が無いため 2 パス目のループが最初から
+        全件スキップし、トリガー集合に含めても含めなくても結果が変わらない
+        （＝テストに判別力が無い。Opusレビューで指摘された空振りの修正）。
         """
         resolution = LensResolution(
             applicable=True,
@@ -920,14 +1057,32 @@ class MergedRecipeTests(BracketTestCase):
             aperture=4.0,
         )
         calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
 
-        def both_fail(rgb, current_resolution, force_skip_vignetting=False):
+        def mixed(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
             calls.append((rgb.copy(), force_skip_vignetting))
             metadata = {
                 "lens": current_resolution.lens_name,
                 "focal_length": current_resolution.focal_length,
                 "aperture": current_resolution.aperture,
             }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                # フレームA: ビネット適用済み。
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            # フレームB: apply_color_modification失敗でビネットのみ非適用。
             return rgb, {
                 "applied": True,
                 **metadata,
@@ -938,11 +1093,13 @@ class MergedRecipeTests(BracketTestCase):
         with mock.patch.object(
             bracket_module, "probe_lens", return_value=resolution
         ), mock.patch.object(
-            bracket_module, "apply_lens_correction", side_effect=both_fail
+            bracket_module, "apply_lens_correction", side_effect=mixed
         ):
             merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
 
         # force_skip_vignetting=True での再実行（3回目の呼び出し）が発生しないこと。
+        # フレームAが "vignetting" フラグを持つにも関わらず再実行されないのは、
+        # vignetting_color_modification_failed がトリガー集合に含まれないから。
         self.assertEqual([force for _, force in calls], [False, False])
 
     def test_lens_summary_preserves_shared_metadata(self):

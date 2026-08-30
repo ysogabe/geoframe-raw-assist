@@ -112,7 +112,7 @@ MAX_FRAMES = 9
 
 #: 合成パイプラインの版。`params_hash` に含むので、ここを上げると既存キャッシュは
 #: 自動的に無効になる。
-BRACKET_VERSION = 4
+BRACKET_VERSION = 5
 MERGE_RECIPE_VERSION = 1
 
 #: 位置合わせの版。`params_hash` には**試行したか**（= この版）だけを含め、
@@ -411,11 +411,21 @@ def _summarize_lens_corrections(
 
 
 # ブラケット内のフレーム間で実際に食い違いうる、ビネット非適用の理由だけを
-# グループ判定のトリガーにする。他の非適用理由（レンズ/焦点距離のプロパティ、
-# force_skip_vignetting自身が付けるマーカー、apply_color_modification失敗）は
-# 全フレームで一致するか、こちらが制御しているため対象外。
+# グループ判定のトリガーにする。他の非適用理由（force_skip_vignetting自身が
+# 付けるマーカー、apply_color_modification失敗）は全フレームで一致するか、
+# こちらが制御しているため対象外。
+#
+# vignetting_profile_focal_guard（焦点距離依存）は、本来 merge_bracket 側の
+# lens_params_inconsistent ガードで焦点距離の不一致自体を検出し、この関数に
+# 到達する時点では全フレーム一致しているはず。それでも安価な多層防御として
+# トリガーに含める：一致していれば発火せず no-op、万一上流のガードを素通り
+# しても被害をビネットだけに閉じ込められる。
 _GROUP_SKIP_TRIGGER_REASONS = frozenset(
-    {"vignetting_highlight_headroom", "vignetting_non_finite"}
+    {
+        "vignetting_highlight_headroom",
+        "vignetting_non_finite",
+        "vignetting_profile_focal_guard",
+    }
 )
 
 
@@ -623,6 +633,20 @@ def merge_bracket(
     lens_resolutions = [probe_lens(exif) for exif in capture_exifs]
     lens_applicable = all(resolution.applicable for resolution in lens_resolutions)
 
+    # 全フレームでレンズDBの解決自体は成功しても、焦点距離・絞りが食い違えば
+    # modifier.initialize(resolution.focal_length, resolution.aperture, ...) への
+    # 入力がフレームごとに変わり、歪曲/TCAの幾何ワープ自体が揃わなくなる（パワーズーム
+    # レンズでズーム位置がわずかにずれる等）。ビネットの安全弁と違い、この不一致は
+    # _apply_group_lens_corrections より上流（幾何補正そのもの）で発生するため、
+    # グループ判定のトリガーを増やしても直らない。ここで検出し、全フレーム無補正に
+    # フォールバックする既存の「全か無か」の設計に合流させる。
+    lens_params_inconsistent = lens_applicable and (
+        len({resolution.focal_length for resolution in lens_resolutions}) > 1
+        or len({resolution.aperture for resolution in lens_resolutions}) > 1
+    )
+    if lens_params_inconsistent:
+        lens_applicable = False
+
     params_hash = _merge_params_hash(
         normalized_ids,
         resolved,
@@ -701,9 +725,14 @@ def merge_bracket(
         )
     else:
         frames = decoded_frames
+        if lens_params_inconsistent:
+            unapplied_reason = "lens_params_inconsistent_across_frames"
+        elif lens_inconsistent:
+            unapplied_reason = "inconsistent_across_frames"
+        else:
+            unapplied_reason = None
         lens_corrections = [
-            resolution.unapplied("inconsistent_across_frames" if lens_inconsistent else None)
-            for resolution in lens_resolutions
+            resolution.unapplied(unapplied_reason) for resolution in lens_resolutions
         ]
     for record, lens_correction in zip(frame_records, lens_corrections):
         record["lens_correction"] = lens_correction
