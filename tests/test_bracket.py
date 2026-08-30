@@ -1000,7 +1000,8 @@ class ToneAfterMergeTests(BracketTestCase):
         )
         self.assertGreater(self.merged_array(high).mean(), self.merged_array(low).mean())
 
-    def test_highlight_recovery_changes_bright_areas_after_bracket_merge(self):
+    def test_highlight_recovery_is_noop_after_bracket_merge(self):
+        """Mertensが複数露出からハイライト情報を統合するため追加処理はしない。"""
         without_recovery = merge_bracket(
             CAPTURES[:2],
             DEFAULT_PRESET,
@@ -1016,12 +1017,7 @@ class ToneAfterMergeTests(BracketTestCase):
         low = self.merged_array(without_recovery)
         high = self.merged_array(with_recovery)
 
-        self.assertFalse(np.array_equal(low, high))
-        self.assertGreater(
-            int((low >= 250).any(axis=2).sum()),
-            int((high >= 250).any(axis=2).sum()),
-            "合成後の白飛び付近が highlight_recovery で変化すること",
-        )
+        np.testing.assert_array_equal(low, high)
 
     def test_adjustments_are_returned_resolved_in_full(self):
         result = merge_bracket(

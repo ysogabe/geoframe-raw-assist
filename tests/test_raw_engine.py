@@ -9,13 +9,13 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import rawpy
 from PIL import Image
 
 from local_raw import engine
 from local_raw.engine import (
     DEFAULT_MAX_EDGE,
     RawDevelopmentError,
-    _apply_highlight_recovery_array,
     _apply_shadow_lift_array,
     _apply_tone_array,
     _params_hash,
@@ -313,26 +313,25 @@ class FloatPipelineTests(unittest.TestCase):
         self.assertEqual(params["output_bps"], 16)
         self.assertEqual(params["exp_shift"], 1.0)
         self.assertEqual(params["bright"], 2.0)
+        self.assertEqual(params["highlight_mode"], rawpy.HighlightMode.ReconstructDefault)
         self.assertNotIn("exp_preserve_highlights", params)
-        self.assertNotIn("highlight_mode", params)
 
-    def test_highlight_recovery_changes_near_white_and_overrange_values(self):
-        """rawpy の露出段ではなくfloat32段で白飛び付近を圧縮する。"""
-        source = np.full((8, 8, 3), 0.45, dtype=np.float32)
-        source[2:6, 2:6] = [0.96, 1.0, 1.2]
-
-        without_recovery = _apply_highlight_recovery_array(source, 0)
-        with_recovery = _apply_highlight_recovery_array(source, 100)
-
-        self.assertEqual(with_recovery.dtype, np.float32)
-        np.testing.assert_array_equal(without_recovery, source)
-        self.assertGreater(
-            float(np.max(np.abs(with_recovery - without_recovery))),
-            0.02,
-        )
-        self.assertLess(float(with_recovery[3, 3, 0]), float(without_recovery[3, 3, 0]))
-        self.assertLess(float(with_recovery[3, 3, 2]), 1.0)
-        np.testing.assert_array_equal(with_recovery[:2, :2], source[:2, :2])
+    def test_highlight_recovery_selects_discrete_rawpy_modes(self):
+        """highlight_recoveryはClip/Blend/ReconstructDefaultの3段階で選択する。"""
+        expected_modes = {
+            0.0: rawpy.HighlightMode.Clip,
+            50.0: rawpy.HighlightMode.Blend,
+            75.0: rawpy.HighlightMode.ReconstructDefault,
+            90.0: rawpy.HighlightMode.ReconstructDefault,
+        }
+        for recovery, expected in expected_modes.items():
+            with self.subTest(highlight_recovery=recovery):
+                adjustments = resolve_adjustments(
+                    DEFAULT_PRESET, {"highlight_recovery": recovery}
+                )
+                params = engine._postprocess_params(self.FakeRaw(), adjustments, False)
+                self.assertEqual(params["highlight_mode"], expected)
+                self.assertNotIn("exp_preserve_highlights", params)
 
     def test_preview_keeps_full_demosaic_resolution(self):
         """プレビューでも先にhalf_sizeへ落とさず、最後に1600pxへ縮小する。"""

@@ -3,7 +3,7 @@
 契約: docs/API_CONTRACT.md §2（Adjustments）・§4（命名）・§9（module 契約）
 
 処理順序は契約 §2 で固定:
-    rawpy postprocess → lensfun 補正 → highlight_recovery → shadow_lift → resize
+    rawpy postprocess（highlight_recovery込み） → lensfun 補正 → shadow_lift → resize
     → Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
 
 RAWからJPEGへ落とすまでの中間画像は float32 で保持する。rawpyの16bit出力は
@@ -91,7 +91,10 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #:
 #: ENGINE_VERSION 13: 明示されたmax_edgeがDEFAULT_MAX_EDGEを超える場合は、標準サイズ
 #: 基準の先行クロップを行わず、入力が指定上限以下なら元画像をそのまま返すようにした。
-ENGINE_VERSION = 13
+#:
+#: ENGINE_VERSION 14: highlight_recoveryをrawpyのHighlightModeへ離散マッピングし、
+#: float32側のソフトニー処理を削除した。exp_shift=1.0固定は維持する。
+ENGINE_VERSION = 14
 RECIPE_VERSION = 9
 
 DEFAULT_MAX_EDGE = 6000
@@ -124,10 +127,6 @@ MINOR_RESIZE_CROP_SCALE = 0.98
 
 #: shadow_lift LUT の強さ係数（契約 §2 の式の定数部）。Wave 3 で目視調整可。
 SHADOW_LIFT_GAIN = 0.5 * 255.0 * 4.0
-
-#: highlight_recovery のソフトニー開始点。中間調を変えず、白飛びに近い領域だけを
-#: なだらかに圧縮する。
-HIGHLIGHT_RECOVERY_KNEE = 0.8
 
 __all__ = [
     "CAPTURE_ID_PATTERN",
@@ -283,28 +282,6 @@ def _apply_shadow_lift_array(rgb: np.ndarray, lift: float) -> np.ndarray:
     return lifted.astype(np.float32, copy=False)
 
 
-def _apply_highlight_recovery_array(rgb: np.ndarray, recovery: float) -> np.ndarray:
-    """ハイライトを float32 (0..1) の前段でソフトニー圧縮する。
-
-    rawpy の `exp_preserve_highlights` は `exp_shift` と組み合わせた露出変更向け
-    なので、`exp_shift=1.0` 固定の現像では使わない。代わりに、ニーより上の各RGB
-    チャンネルを有理関数で連続的に圧縮する。recovery=0 では入力を変更せず、100
-    では1.0超の値も最終クリップ前に1.0未満へ収束させるため、白飛び付近の階調が
-    スライダーに応じて変化する。
-    """
-    working = np.asarray(rgb, dtype=np.float32).copy()
-    strength = min(1.0, max(0.0, float(recovery) / 100.0))
-    if strength <= 0.0:
-        return working
-
-    knee = HIGHLIGHT_RECOVERY_KNEE
-    high = working > knee
-    excess = working[high] - knee
-    compressed = excess / (1.0 + strength * excess / (1.0 - knee))
-    working[high] = knee + compressed
-    return working.astype(np.float32, copy=False)
-
-
 def _postprocess_params(
     raw: Any,
     adjustments: dict[str, Any],
@@ -312,7 +289,17 @@ def _postprocess_params(
 ) -> dict[str, Any]:
     exposure = float(adjustments["exposure"])
     exposure_gain = 2.0**exposure
+    highlight_recovery = float(adjustments["highlight_recovery"])
     noise_reduction = adjustments["noise_reduction"]
+
+    # rawpyのReconstruct(3..9)は復元の強さではなく、白寄り/色寄りの選択なので、
+    # highlight_recoveryは既存の75境界を維持した3段階のモードへ割り当てる。
+    if highlight_recovery <= 0.0:
+        highlight_mode = rawpy.HighlightMode.Clip
+    elif highlight_recovery < 75.0:
+        highlight_mode = rawpy.HighlightMode.Blend
+    else:
+        highlight_mode = rawpy.HighlightMode.ReconstructDefault
 
     if noise_reduction == "full":
         fbdd_mode = rawpy.FBDDNoiseReductionMode.Full
@@ -335,6 +322,7 @@ def _postprocess_params(
         # まま、露出スライダーは bright に一度だけ渡す（AUTO_BRIGHT_THR のコメント参照）。
         "exp_shift": 1.0,
         "bright": exposure_gain,
+        "highlight_mode": highlight_mode,
         "fbdd_noise_reduction": fbdd_mode,
         "median_filter_passes": median_passes,
         "use_auto_wb": False,
@@ -653,11 +641,10 @@ def develop_raw(
     # クリップは不要。
     rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
 
-    # --- レンズ補正（リサイズ前） ---
+    # --- rawpy postprocess（highlight_recovery込み） → レンズ補正（リサイズ前） ---
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
 
-    # --- highlight_recovery → shadow_lift（ともにリサイズ前） → リサイズ → トーン ---
-    rgb = _apply_highlight_recovery_array(rgb, float(resolved["highlight_recovery"]))
+    # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
     rgb = _apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
     rgb = _resize_array(rgb, effective_max_edge)
     rgb = _apply_tone_array(rgb, resolved)

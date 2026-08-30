@@ -29,8 +29,9 @@
 - `exposure` / `highlight_recovery` は **使わない**。どちらも rawpy 段
   （`exp_shift` / `bright` / `exp_preserve_highlights` / `highlight_mode`）の
   パラメータで、フレームごとの露出やハイライト処理を動かすと「露出差そのものが入力」
-  という合成の前提を壊すため。明るさを変えたい場合は合成後に効く
-  `brightness` / `shadow_lift` を使う。
+  という合成の前提を壊すため。`highlight_recovery` はブラケット合成では no-op とし、
+  複数露出からハイライト情報を統合するMertens自体の処理に任せる。明るさを変えたい
+  場合は合成後に効く `brightness` / `shadow_lift` を使う。
 - `wb_temp` / `noise_reduction` も rawpy 段だが、**全フレームに同一に効く**ので
   フレーム間の露出差には影響しない。単独現像と色・ノイズの傾向を揃えるため反映する。
 - トーン調整（`shadow_lift` / `brightness` / `contrast` / `saturation` / `sharpness`）は
@@ -65,7 +66,6 @@ from .engine import (
     PREVIEW_HALF_SIZE,
     PREVIEW_MAX_EDGE,
     PROJECT_ROOT,
-    _apply_highlight_recovery_array,
     _apply_shadow_lift_array,
     _apply_tone_array,
     _array_to_image,
@@ -112,7 +112,7 @@ MAX_FRAMES = 9
 
 #: 合成パイプラインの版。`params_hash` に含むので、ここを上げると既存キャッシュは
 #: 自動的に無効になる。
-BRACKET_VERSION = 2
+BRACKET_VERSION = 3
 MERGE_RECIPE_VERSION = 1
 
 #: 位置合わせの版。`params_hash` には**試行したか**（= この版）だけを含め、
@@ -564,7 +564,9 @@ def merge_bracket(
     （`output_url` はサーバ側が `?v=<mtime_ns>` 付きで付与する）。
 
     フレーム数は2〜9枚（`MIN_FRAMES`〜`MAX_FRAMES`）。`capture_ids` は現像元フォルダ
-    直下に限定し、重複は拒否する。処理順序とパラメータの意図はモジュール docstring を参照。
+    直下に限定し、重複は拒否する。`highlight_recovery` は no-op とする。Mertens が
+    複数露出からハイライト情報を統合するため、合成後に追加の復元処理は行わない。
+    その他の処理順序とパラメータの意図はモジュール docstring を参照。
     """
     if cv2 is None:
         # import 失敗の中身（dlopen が返すライブラリの絶対パス等）もレスポンスには載せない（契約 §0）。
@@ -695,11 +697,8 @@ def merge_bracket(
     frames, aligned = _align_frames(frames)
     merged = _merge_frames(frames)
 
-    # --- 5. リサイズ → 6. highlight_recovery → shadow_lift → トーン調整（各1回だけ） ---
+    # --- 5. リサイズ → 6. shadow_lift → トーン調整（各1回だけ） ---
     merged = _resize_array(merged, effective_max_edge)
-    merged = _apply_highlight_recovery_array(
-        merged, float(resolved["highlight_recovery"])
-    )
     merged = _apply_shadow_lift_array(merged, float(resolved["shadow_lift"]))
     merged = _apply_tone_array(merged, resolved)
     image = _array_to_image(merged)
