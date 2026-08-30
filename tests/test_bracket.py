@@ -967,6 +967,75 @@ class MergedRecipeTests(BracketTestCase):
             result["lens_correction"]["skipped"], ["vignetting_profile_focal_guard"]
         )
 
+    def test_geometry_correction_failure_disables_lens_correction_for_the_whole_group(self):
+        """幾何補正(歪曲/TCA)の部分失敗もグループ全体を無補正へフォールバックすること。
+
+        lens.py の apply_lens_correction は、歪曲/TCAが失敗しても成功済みの
+        ビネット補正だけは保持する設計（_GeometryCorrectionGuardError /
+        Exception の局所捕捉）。そのため1フレームだけ
+        「ビネット適用済み・幾何未適用」という applied:True の部分適用状態を
+        返すことがある。この状態は _GROUP_SKIP_TRIGGER_REASONS（ビネット用）の
+        対象外なので見逃され、歪曲補正済みのフレームと未適用のフレームが
+        混在したまま合成されてしまっていた（review skill指摘、位置合わせでは
+        除去できない放射状ゴーストが残る）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def mixed_geometry(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            normal_calls += 1
+            if normal_calls == 1:
+                # フレームA: 歪曲/TCAとも適用成功。
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["vignetting", "distortion", "tca"],
+                }
+            # フレームB: ビネットは成功したが、幾何補正だけが想定外の例外で
+            # 失敗した経路（成功済みのビネットは保持される）。
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["vignetting"],
+                "skipped": ["geometry_correction_failed"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=mixed_geometry
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # force_skip_vignetting=True の再実行（ビネット用の2パス目）は起きない。
+        # 幾何不一致はそれとは別の経路で、全フレーム無補正へフォールバックする。
+        self.assertEqual([force for _, force in calls], [False, False])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
+
     def test_vignetting_non_finite_skip_is_applied_to_the_whole_group(self):
         """非有限値破棄（マーカーなしの経路）もグループ判定のトリガーになること。
 

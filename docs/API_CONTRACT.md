@@ -262,6 +262,13 @@ MergedResult = {
   `lens_params_inconsistent_across_frames` であり、一部フレームのレンズ解決失敗を表す
   `inconsistent_across_frames` とは別物である（Sony E PZ 16-50mm のパワーズーム等での
   ズーム位置の微小なずれを検出するため）。
+- 事前の焦点距離・絞り一致検証を通過しても、実行時に一部フレームだけ歪曲/TCA（幾何補正）
+  が失敗することがある（`tca_map_unexpected_shape` / `geometry_non_finite` /
+  `geometry_correction_failed`）。この場合 `apply_lens_correction` は成功済みのビネット
+  補正だけを保持した部分適用状態（`applied:true`）を返すため、ビネット用のグループ判定
+  （`skipped` の `vignetting_*` 系）では検出できない。歪曲補正は放射状のワープで位置合わせ
+  では混在を除去できないため、これを検出したら全フレーム無補正へフォールバックし、reason
+  は `geometry_inconsistent_across_frames` になる。
 
 #### キャッシュキー
 

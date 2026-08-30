@@ -112,7 +112,7 @@ MAX_FRAMES = 9
 
 #: 合成パイプラインの版。`params_hash` に含むので、ここを上げると既存キャッシュは
 #: 自動的に無効になる。
-BRACKET_VERSION = 5
+BRACKET_VERSION = 6
 MERGE_RECIPE_VERSION = 1
 
 #: 位置合わせの版。`params_hash` には**試行したか**（= この版）だけを含め、
@@ -433,6 +433,23 @@ _GROUP_SKIP_TRIGGER_REASONS = frozenset(
     }
 )
 
+# 歪曲/TCA（幾何補正）が1枚でも失敗すると、_GeometryCorrectionGuardError または
+# 想定外の例外を局所的に捕捉してビネットの部分成功だけを保持する経路
+# （lens.py の apply_lens_correction 参照）を通るため、そのフレームだけ
+# 「ビネット適用済み・幾何未適用」という部分適用状態で `applied: True` が返る。
+# これはビネットのグループ判定（_GROUP_SKIP_TRIGGER_REASONS）の対象外なので、
+# 別途ここで検出する。force_skip_vignetting の2パス目機構はビネットだけを
+# 抑制するものであり幾何補正の不一致には効かないため、ビネットの安全弁とは
+# 別に、全フレームを無補正の元配列へフォールバックする（歪曲補正は放射状の
+# ワープなので、位置合わせでは補正済み/未補正の混在を除去できないため）。
+_GEOMETRY_SKIP_REASONS = frozenset(
+    {"tca_map_unexpected_shape", "geometry_non_finite", "geometry_correction_failed"}
+)
+
+
+def _has_geometry_skip(correction: dict[str, Any]) -> bool:
+    return any(reason in _GEOMETRY_SKIP_REASONS for reason in correction.get("skipped", []))
+
 
 def _apply_group_lens_corrections(
     frames: list[np.ndarray],
@@ -441,9 +458,14 @@ def _apply_group_lens_corrections(
     """全フレームのレンズ補正を実行し、ビネット安全弁をグループで揃える。
 
     1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
-    `_GROUP_SKIP_TRIGGER_REASONS` のいずれかが返った場合は、1パス目でビネットを
-    適用できたフレームだけを、デコード済みの元配列から `force_skip_vignetting=True`
-    で再実行する。これにより歪曲/TCAの処理は維持しつつ、ビネットだけが混在しない。
+    `_GEOMETRY_SKIP_REASONS` のいずれかが返った場合は、幾何補正（歪曲/TCA）が
+    フレーム間で揃わないため、force_skip_vignetting の2パス目には進まず、
+    全フレームを無補正の元配列へフォールバックする。
+
+    それ以外で1枚でも `_GROUP_SKIP_TRIGGER_REASONS` のいずれかが返った場合は、
+    1パス目でビネットを適用できたフレームだけを、デコード済みの元配列から
+    `force_skip_vignetting=True` で再実行する。これにより歪曲/TCAの処理は
+    維持しつつ、ビネットだけが混在しない。
 
     トリガーに含めるのは画素内容に依存し、ブラケット内のフレーム間で実際に
     食い違いうる理由（ハイライト余地不足・非有限値破棄）と、上流のガードが
@@ -460,6 +482,12 @@ def _apply_group_lens_corrections(
         corrected, correction = apply_lens_correction(frame, resolution)
         corrected_frames.append(np.ascontiguousarray(corrected))
         corrections.append(correction)
+
+    if any(_has_geometry_skip(correction) for correction in corrections):
+        return list(frames), [
+            resolution.unapplied("geometry_inconsistent_across_frames")
+            for resolution in lens_resolutions
+        ]
 
     def group_skip_trigger_reason(correction: dict[str, Any]) -> str | None:
         for reason in correction.get("skipped", []):
