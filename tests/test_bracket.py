@@ -618,6 +618,17 @@ class DecodeErrorMessageTests(unittest.TestCase):
         self.assertNotIn(dlopen_error, str(raised.exception))
 
     def test_decode_keeps_values_above_one_until_later_processing(self):
+        """デコード処理は入力をクリップせずに素通しすること（契約防御テスト）。
+
+        `_merge_postprocess_params` は `output_bps=16` を指定するため、rawpy の
+        `postprocess` は常に uint16（0〜65535）を返す。つまり 70000.0 や -10.0 の
+        ような範囲外の値は**実運用では発生しない**。ここで使う異常値は現実の
+        rawpy 出力の代わりではなく、`_decode_frame` → `_decode_16bit_to_float01`
+        が「入力値を勝手にクリップせず、65535 で割る変換だけを行って通す」ことを
+        直接確かめるためのもので、この関数は単独現像とブラケット合成の両方が
+        共有する。ここがクリップする実装に変わると、ハイライトのヘッドルームや
+        露出差が後段の処理に届かず壊れるため、この防御テストを維持する。
+        """
         class FakeRaw:
             def __enter__(self):
                 return self

@@ -347,7 +347,11 @@ class FloatPipelineTests(unittest.TestCase):
 
     def test_preview_and_full_resize_share_the_same_source_frame(self):
         """6024→6000の微小クロップをプレビューでも先に共有する。"""
-        height, width = 4000, 6024
+        # height は 400 まで縮小する（width=6024 が current_max を決めるので
+        # MIN_MAX_EDGE=1200 を下回らず、_resize_array の小配列分岐に入らない）。
+        # 検証するのは width 方向の先行クロップ（6024→6000, left=12）の共有なので、
+        # 検証内容は 4000 の頃と同一のまま配列確保だけを軽量化している。
+        height, width = 400, 6024
         source = np.empty((height, width, 3), dtype=np.float32)
         source[..., 0] = np.arange(width, dtype=np.float32)[None, :]
         source[..., 1] = np.arange(height, dtype=np.float32)[:, None]
@@ -356,7 +360,7 @@ class FloatPipelineTests(unittest.TestCase):
         full = _resize_array(source, 6000)
         preview = _resize_array(source, 1600)
 
-        self.assertEqual(full.shape, (3984, 6000, 3))
+        self.assertEqual(full.shape, (398, 6000, 3))
         self.assertEqual(float(full[0, 0, 0]), 12.0)
         self.assertEqual(float(full[-1, -1, 0]), 6011.0)
 
