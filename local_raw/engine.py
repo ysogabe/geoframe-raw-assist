@@ -33,7 +33,7 @@ from PIL import Image
 
 from . import config
 from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
-from .lens import apply_lens_correction, probe_lens
+from .lens import _all_finite, apply_lens_correction, probe_lens
 from .presets import (
     DEFAULT_PRESET,
     PRESETS,
@@ -118,7 +118,11 @@ AUTO_BRIGHT_THR = 0.01
 
 # プレビューを先に半分へデモザイクすると、後段の1600px縮小で細部が二重に失われる。
 # full-sizeでデモザイクしてからリサイズする。`preview=False`も元々full-sizeなので、
-# この定数はプレビュー経路の意図を明示するためのもの。
+# プレビューは half_size にしない。
+#
+# この定数はその設計方針を明示するための**ドキュメント用**定数で、コードからは参照しない。
+# rawpy の postprocess 引数は `"half_size": False` と直書きする
+# （engine / bracket の両デコード経路とも、preview の有無にかかわらず常に False）。
 PREVIEW_HALF_SIZE = False
 
 # 2%未満の縮小は再標本化より中央クロップの方が細部を保持する。レンズ補正の端部を
@@ -315,7 +319,8 @@ def _postprocess_params(
         "output_color": rawpy.ColorSpace.sRGB,
         "output_bps": 16,
         "demosaic_algorithm": rawpy.DemosaicAlgorithm.AHD,
-        "half_size": PREVIEW_HALF_SIZE if preview else False,
+        # プレビューも本現像と同じ full-size でデモザイクする（PREVIEW_HALF_SIZE 参照）。
+        "half_size": False,
         "no_auto_bright": False,
         "auto_bright_thr": AUTO_BRIGHT_THR,
         # auto bright の前段と後段で同じEVを二重適用しない。自動明るさ補正は有効の
@@ -400,9 +405,14 @@ def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
 
 
 def _apply_tone_array(rgb: np.ndarray, adjustments: dict[str, Any]) -> np.ndarray:
-    """float32 RGBへ Brightness → Contrast → Color → Sharpness を適用する。"""
+    """float32 RGBへ Brightness → Contrast → Color → Sharpness を適用する。
+
+    入力は [0,1] にクリップ済みであることを前提とする（前段の
+    `_apply_shadow_lift_array` が [0,1] に揃えた float32 を `_resize_array` が
+    縮小するだけなので、現像・合成いずれの経路でも範囲内から外れない）。
+    出力側の最終クリップだけをここで行う。
+    """
     image = np.asarray(rgb, dtype=np.float32).copy()
-    np.clip(image, 0.0, 1.0, out=image)
 
     brightness = float(adjustments["brightness"])
     image *= brightness
@@ -455,10 +465,21 @@ def _apply_tone(image: Image.Image, adjustments: dict[str, Any]) -> Image.Image:
     return Image.fromarray(np.rint(toned * 255.0).astype(np.uint8), mode="RGB")
 
 
+def _decode_16bit_to_float01(rgb: np.ndarray) -> np.ndarray:
+    """rawpy の16bit整数出力を float32 0..1 へ変換する。
+
+    `output_bps=16` の postprocess 出力は 0..65535 の整数で、65535 で割ると
+    常に [0,1] に収まるため、ここでの明示的なクリップは不要。単独現像
+    （`develop_raw`）とブラケット合成（`bracket._decode_frame`）が同じ変換を
+    共有するための共通ヘルパー。
+    """
+    return np.asarray(rgb, dtype=np.float32) / 65535.0
+
+
 def _array_to_image(rgb: np.ndarray) -> Image.Image:
     """float32 RGB (0..1) を最終JPEG用の8bit PIL画像へ変換する。"""
     working = np.asarray(rgb, dtype=np.float32).copy()
-    if not np.isfinite(working).all():
+    if not _all_finite(working):
         raise RawDevelopmentError("現像結果が不正な値になりました。")
     np.clip(working, 0.0, 1.0, out=working)
     return Image.fromarray(np.rint(working * 255.0).astype(np.uint8), mode="RGB")
@@ -637,9 +658,7 @@ def develop_raw(
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
 
-    # rawpyの16bit出力は65535で割ると常に[0,1]に収まるため、ここでの明示的な
-    # クリップは不要。
-    rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
+    rgb = _decode_16bit_to_float01(rgb)
 
     # --- rawpy postprocess（highlight_recovery込み） → レンズ補正（リサイズ前） ---
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)

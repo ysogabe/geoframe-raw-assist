@@ -408,7 +408,7 @@ def apply_lens_correction(
                             interpolation,
                             borderMode=cv2.BORDER_REPLICATE,
                         )
-                    if not _all_finite(np.asarray(remapped, dtype=np.float32)):
+                    if not _all_finite(remapped):
                         raise _GeometryCorrectionGuardError("geometry_non_finite")
                     corrected = remapped
                     if has_distortion:
@@ -422,11 +422,11 @@ def apply_lens_correction(
                         interpolation,
                         borderMode=cv2.BORDER_REPLICATE,
                     )
-                    if not _all_finite(np.asarray(corrected, dtype=np.float32)):
+                    if not _all_finite(corrected):
                         raise _GeometryCorrectionGuardError("geometry_non_finite")
                     applied_flags.append("distortion")
 
-            if not _all_finite(np.asarray(corrected, dtype=np.float32)):
+            if not _all_finite(corrected):
                 raise _GeometryCorrectionGuardError("geometry_non_finite")
         except _GeometryCorrectionGuardError as error:
             corrected = corrected_before_geometry
