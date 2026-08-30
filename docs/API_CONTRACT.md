@@ -423,9 +423,10 @@ Adjustments = {
   Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
 
 - `highlight_recovery` の旧来の連続ソフトニーは、rawpy の16bit出力を65535で正規化した値が常に
-  `<=1.0` で実質何もしていなかったため廃止した。現在の離散3段階・75境界・低コストの方式は、
-  `ENGINE_VERSION` 5 のコメントが警告していた不連続を、トレードオフを承知のうえでユーザー判断により
-  意図的に再導入したものであり、見落としではない。
+  `<=1.0` で実質何もしていなかったため廃止した。現在の離散3段階・75境界の方式は、閾値の前後で
+  rawpy の `HighlightMode` が切り替わる不連続を新たに生む（隣接するプリセットやスライダー値で
+  階調が急変しうる）。これはトレードオフを承知のうえで、低コストな方式としてユーザー判断により
+  意図的に採用されたものであり、見落としではない。
 - **入力範囲の不変条件**: `_apply_tone_array` は入力が `[0,1]` にプリクリップ済みであることを
   前提とする。`develop_raw` 経路ではレンズ補正（最大4.0までのヘッドルームを許容しうる）の後に
   `_apply_shadow_lift_array` が、`merge-bracket` 経路では同じくレンズ補正の後に `_merge_frames` が
@@ -556,7 +557,8 @@ outputs/
 
 > **Wave 0 時点の実装は旧3種**（`neutral_recovery` / `landscape_clear` / `nightscape`、旧キー体系
 > `exp_shift` / `auto_bright_thr` / `contrast` / `color` / `sharpness`）が `local_raw/presets.py` に
-> 値を変えずに移設された状態。9種化と `Adjustments` キー体系への移行は **Wave 1-A** の担当。
+> 値を変えずに移設された状態。9種化と `Adjustments` キー体系への移行は **Wave 1-A** の担当
+> （その後 2026-08-19 追補でさらに2種追加され、現在は §5 のとおり11種）。
 
 ---
 
@@ -636,7 +638,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 
 ### `local_raw/presets.py`（所有: Wave 1-A）
 
-- `PRESETS: dict[str, dict]` — key = preset name（9種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
+- `PRESETS: dict[str, dict]` — key = preset name（§5のとおり11種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
 - `preset_infos() -> list[dict]` — 契約 `PresetInfo[]` そのもの（`/api/health` 用。Wave 1-B はこれを呼ぶだけ）
 - `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
 - `DEFAULT_PRESET = "neutral_recovery"`

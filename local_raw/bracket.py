@@ -420,8 +420,11 @@ def _summarize_lens_corrections(
 # vignetting_profile_focal_guard（焦点距離依存）は、本来 merge_bracket 側の
 # lens_params_inconsistent ガードで焦点距離の不一致自体を検出し、この関数に
 # 到達する時点では全フレーム一致しているはず。それでも安価な多層防御として
-# トリガーに含める：一致していれば発火せず no-op、万一上流のガードを素通り
-# しても被害をビネットだけに閉じ込められる。
+# トリガーに含める：一致しているケースでは、どのフレームも flags に
+# "vignetting" を持たない（＝全フレームが同じ理由でビネット非適用）ため
+# 後続の再実行ループが全件 continue し、結果的に no-op になる（トリガー判定
+# 自体は any(...) が True になり発火する）。万一上流のガードを素通りしても
+# 被害をビネットだけに閉じ込められる。
 _GROUP_SKIP_TRIGGER_REASONS = frozenset(
     {
         "vignetting_highlight_headroom",
@@ -443,10 +446,13 @@ def _apply_group_lens_corrections(
     で再実行する。これにより歪曲/TCAの処理は維持しつつ、ビネットだけが混在しない。
 
     トリガーに含めるのは画素内容に依存し、ブラケット内のフレーム間で実際に
-    食い違いうる理由（ハイライト余地不足・非有限値破棄）だけ。
-    `vignetting_profile_focal_guard`（レンズ/焦点距離のプロパティで全フレーム共通）と
-    `vignetting_forced_skip`（この関数自身の2パス目が付与するマーカー）は
-    フレーム間で揃っている、またはこちらが制御しているためトリガーにしない。
+    食い違いうる理由（ハイライト余地不足・非有限値破棄）と、上流のガードが
+    素通りした場合の多層防御として `vignetting_profile_focal_guard`
+    （本来 merge_bracket 側で焦点距離の不一致自体を検出済みのはず）。
+    `vignetting_forced_skip`（この関数自身の2パス目が付与するマーカー）と
+    `apply_color_modification` 失敗は、こちらが制御しているか同一
+    resolution なら決定論的なためトリガーにしない（詳細は
+    `_GROUP_SKIP_TRIGGER_REASONS` 直上のコメントを参照）。
     """
     corrected_frames: list[np.ndarray] = []
     corrections: list[dict[str, Any]] = []
