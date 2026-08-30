@@ -63,12 +63,12 @@ from .engine import (
     JPEG_QUALITY,
     MAX_MAX_EDGE,
     MIN_MAX_EDGE,
-    PREVIEW_HALF_SIZE,
     PREVIEW_MAX_EDGE,
     PROJECT_ROOT,
     _apply_shadow_lift_array,
     _apply_tone_array,
     _array_to_image,
+    _decode_16bit_to_float01,
     _resize_array,
     _relative_path,
     _resolve_save_kwargs,
@@ -206,7 +206,8 @@ def _merge_postprocess_params(
         "output_color": rawpy.ColorSpace.sRGB,
         "output_bps": 16,
         "demosaic_algorithm": rawpy.DemosaicAlgorithm.AHD,
-        "half_size": PREVIEW_HALF_SIZE if preview else False,
+        # プレビューも本現像と同じ full-size でデモザイクする（engine.PREVIEW_HALF_SIZE 参照）。
+        "half_size": False,
         "no_auto_bright": True,
         "fbdd_noise_reduction": fbdd_mode,
         "median_filter_passes": median_passes,
@@ -249,8 +250,7 @@ def _decode_frame(
         raise RawDevelopmentError(
             f"RAWデコードに失敗しました: {source_path.name}"
         ) from error
-    rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
-    return rgb
+    return _decode_16bit_to_float01(rgb)
 
 
 def _require_uniform_shapes(frames: list[np.ndarray]) -> None:
