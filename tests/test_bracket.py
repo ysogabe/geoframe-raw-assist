@@ -17,7 +17,14 @@ from PIL import Image
 from local_raw import bracket as bracket_module
 from local_raw import config as config_module
 from local_raw import engine
-from local_raw.bracket import MAX_FRAMES, MIN_FRAMES, _merge_frames, _merge_params_hash, merge_bracket
+from local_raw.bracket import (
+    MAX_FRAMES,
+    MIN_FRAMES,
+    _merge_frames,
+    _merge_params_hash,
+    _summarize_lens_corrections,
+    merge_bracket,
+)
 from local_raw.lens import LensResolution
 from local_raw.presets import DEFAULT_PRESET, RawDevelopmentError, resolve_adjustments
 
@@ -43,10 +50,9 @@ def scene_radiance(width: int = 128, height: int = 96) -> np.ndarray:
 
 
 def expose(radiance: np.ndarray, gain: float) -> np.ndarray:
-    """露出（ゲイン）を掛けて 8bit sRGB 相当へ焼き込む。1.0 を超える分は白飛びする。"""
+    """露出（ゲイン）を掛けた float32 sRGB 相当を返す。1.0 を超える分は白飛びする。"""
     exposed = np.clip(radiance * gain, 0.0, 1.0) ** (1.0 / 2.2)
-    gray = (exposed * 255.0 + 0.5).astype(np.uint8)
-    return np.repeat(gray[:, :, None], 3, axis=2)
+    return np.repeat(exposed[:, :, None], 3, axis=2).astype(np.float32)
 
 
 def apply_preset_tone(rgb: np.ndarray, preset_name: str = DEFAULT_PRESET) -> np.ndarray:
@@ -56,10 +62,8 @@ def apply_preset_tone(rgb: np.ndarray, preset_name: str = DEFAULT_PRESET) -> np.
     実装と同じ `engine` の関数を呼ぶので、トーン段の定義が変わってもテストは追随する。
     """
     resolved = resolve_adjustments(preset_name)
-    image = Image.fromarray(rgb, mode="RGB")
-    table = engine._shadow_lift_table(float(resolved["shadow_lift"]))
-    if table is not None:
-        image = image.point(table * 3)
+    rgb = engine._apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
+    image = engine._array_to_image(rgb)
     return np.asarray(engine._apply_tone(image, resolved), dtype=np.uint8)
 
 
@@ -268,6 +272,13 @@ class FusionContentTests(BracketTestCase):
         self.assertEqual(fused.shape, self.dark.shape)
         self.assertGreaterEqual(float(fused.min()), 0.0)
         self.assertLessEqual(float(fused.max()), 1.0)
+
+    def test_mertens_contract_preserves_float01_brightness_scale(self):
+        """実際の Mertens が float32[0,1] を黒潰れさせず、同じスケールで返す。"""
+        input_mean = float(np.mean([frame.mean() for frame in (self.dark, self.bright)]))
+        fused_mean = float(_merge_frames([self.dark, self.bright]).mean())
+        self.assertGreaterEqual(fused_mean, input_mean * 0.3)
+        self.assertLessEqual(fused_mean, input_mean * 3.0)
 
     def test_out_of_range_merge_output_is_clipped_not_wrapped(self):
         """Mertens はピラミッド再構成で 0..1 を外すことがある。
@@ -590,6 +601,27 @@ class DecodeErrorMessageTests(unittest.TestCase):
         self.assertNotIn("/", str(raised.exception))
         self.assertNotIn(dlopen_error, str(raised.exception))
 
+    def test_decode_keeps_values_above_one_until_later_processing(self):
+        class FakeRaw:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def postprocess(self, **kwargs):
+                return np.array([[[65535.0, 70000.0, -10.0]]], dtype=np.float32)
+
+        with mock.patch.object(bracket_module.rawpy, "imread", return_value=FakeRaw()):
+            rgb = bracket_module._decode_frame(
+                Path("DSC00001.ARW"), resolve_adjustments(DEFAULT_PRESET), True
+            )
+
+        self.assertEqual(rgb.dtype, np.float32)
+        self.assertAlmostEqual(float(rgb[0, 0, 0]), 1.0)
+        self.assertGreater(float(rgb[0, 0, 1]), 1.0)
+        self.assertLess(float(rgb[0, 0, 2]), 0.0)
+
 
 class MergedRecipeTests(BracketTestCase):
     def test_recipe_records_every_frame_with_its_hash(self):
@@ -715,6 +747,99 @@ class MergedRecipeTests(BracketTestCase):
         self.assertEqual(len(applied_to), 2, "全フレームに補正が掛かること")
         self.assertTrue(result["lens_correction"]["applied"])
 
+    def test_vignetting_headroom_skip_is_applied_to_the_whole_group(self):
+        """1枚の安全弁発火後、ビネット適用済みフレームだけ元配列から再実行する。"""
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        # 2パス目はデコードし直さず、1パス目と同じ元フレームを使う。
+        np.testing.assert_array_equal(calls[0][0], calls[2][0])
+        self.assertEqual(
+            result["lens_correction"],
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+                "skipped": ["vignetting_highlight_headroom"],
+            },
+        )
+
+    def test_lens_summary_preserves_shared_metadata(self):
+        per_frame = [
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+        ]
+        self.assertEqual(
+            _summarize_lens_corrections(per_frame),
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+        )
+
 
 class AlignmentTests(BracketTestCase):
     def test_alignment_failure_does_not_stop_the_merge(self):
@@ -756,6 +881,26 @@ class AlignmentTests(BracketTestCase):
         self.assertFalse(ok, "真っ黒なフレームが出たら位置合わせは失敗扱いにする")
         for result, source in zip(aligned, sources):
             self.assertTrue(np.array_equal(result, source), "元のフレームがそのまま返ること")
+
+    def test_alignment_black_guard_works_on_float01_frames(self):
+        sources = [
+            np.full((16, 16, 3), 0.25, dtype=np.float32),
+            np.full((16, 16, 3), 0.5, dtype=np.float32),
+        ]
+        observed_maxima: list[float] = []
+
+        def zero_one(src, dst):
+            observed_maxima.extend(float(frame.max()) for frame in src)
+            dst[1][:] = 0
+
+        with mock.patch.object(bracket_module.cv2, "createAlignMTB") as factory:
+            factory.return_value.process = zero_one
+            aligned, ok = bracket_module._align_frames(sources)
+
+        self.assertFalse(ok)
+        self.assertEqual(observed_maxima, [0.25 * 255.0, 0.5 * 255.0])
+        for result, source in zip(aligned, sources):
+            np.testing.assert_array_equal(result, source)
 
     def test_alignment_does_not_mutate_the_input_frames(self):
         """OpenCV には in-place で渡すが、呼び出し元のフレームは壊さないこと。"""
@@ -826,7 +971,10 @@ class MergePostprocessParamsTests(unittest.TestCase):
     def test_half_size_follows_preview(self):
         adjustments = resolve_adjustments(DEFAULT_PRESET)
         raw = self.FakeRaw()
-        self.assertTrue(bracket_module._merge_postprocess_params(raw, adjustments, True)["half_size"])
+        self.assertEqual(
+            bracket_module._merge_postprocess_params(raw, adjustments, True)["half_size"],
+            engine.PREVIEW_HALF_SIZE,
+        )
         self.assertFalse(
             bracket_module._merge_postprocess_params(raw, adjustments, False)["half_size"]
         )
@@ -851,6 +999,29 @@ class ToneAfterMergeTests(BracketTestCase):
             CAPTURES[:2], DEFAULT_PRESET, preview=True, adjustments={"shadow_lift": 100.0}
         )
         self.assertGreater(self.merged_array(high).mean(), self.merged_array(low).mean())
+
+    def test_highlight_recovery_changes_bright_areas_after_bracket_merge(self):
+        without_recovery = merge_bracket(
+            CAPTURES[:2],
+            DEFAULT_PRESET,
+            preview=True,
+            adjustments={"highlight_recovery": 0.0},
+        )
+        with_recovery = merge_bracket(
+            CAPTURES[:2],
+            DEFAULT_PRESET,
+            preview=True,
+            adjustments={"highlight_recovery": 100.0},
+        )
+        low = self.merged_array(without_recovery)
+        high = self.merged_array(with_recovery)
+
+        self.assertFalse(np.array_equal(low, high))
+        self.assertGreater(
+            int((low >= 250).any(axis=2).sum()),
+            int((high >= 250).any(axis=2).sum()),
+            "合成後の白飛び付近が highlight_recovery で変化すること",
+        )
 
     def test_adjustments_are_returned_resolved_in_full(self):
         result = merge_bracket(

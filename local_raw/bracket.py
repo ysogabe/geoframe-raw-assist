@@ -62,8 +62,10 @@ from .engine import (
     JPEG_QUALITY,
     MAX_MAX_EDGE,
     MIN_MAX_EDGE,
+    PREVIEW_HALF_SIZE,
     PREVIEW_MAX_EDGE,
     PROJECT_ROOT,
+    _apply_highlight_recovery_array,
     _apply_shadow_lift_array,
     _apply_tone_array,
     _array_to_image,
@@ -76,7 +78,7 @@ from .engine import (
     _validate_capture_id,
 )
 from .exif import read_capture_exif
-from .lens import _all_finite, apply_lens_correction, probe_lens
+from .lens import LensResolution, _all_finite, apply_lens_correction, probe_lens
 from .presets import DEFAULT_PRESET, PRESETS, RawDevelopmentError, resolve_adjustments
 
 try:
@@ -110,7 +112,7 @@ MAX_FRAMES = 9
 
 #: 合成パイプラインの版。`params_hash` に含むので、ここを上げると既存キャッシュは
 #: 自動的に無効になる。
-BRACKET_VERSION = 1
+BRACKET_VERSION = 2
 MERGE_RECIPE_VERSION = 1
 
 #: 位置合わせの版。`params_hash` には**試行したか**（= この版）だけを含め、
@@ -204,7 +206,7 @@ def _merge_postprocess_params(
         "output_color": rawpy.ColorSpace.sRGB,
         "output_bps": 16,
         "demosaic_algorithm": rawpy.DemosaicAlgorithm.AHD,
-        "half_size": preview,
+        "half_size": PREVIEW_HALF_SIZE if preview else False,
         "no_auto_bright": True,
         "fbdd_noise_reduction": fbdd_mode,
         "median_filter_passes": median_passes,
@@ -248,7 +250,6 @@ def _decode_frame(
             f"RAWデコードに失敗しました: {source_path.name}"
         ) from error
     rgb = np.asarray(rgb, dtype=np.float32) / 65535.0
-    np.clip(rgb, 0.0, 1.0, out=rgb)
     return rgb
 
 
@@ -295,8 +296,20 @@ def _align_frames(frames: list[np.ndarray]) -> tuple[list[np.ndarray], bool]:
         #   - `np.zeros_like` で事前確保したリストを渡す → **1枚が全面0になる**
         #     （実測 OpenCV 5.0.0 / 2〜5枚のいずれでも 1 枚が真っ黒。位置は枚数で変わる）
         # 入力を壊さないようコピーに対して行い、検証に落ちたら元のフレームへ戻す。
-        aligned = [np.ascontiguousarray(frame).copy() for frame in frames]
-        cv2.createAlignMTB(_align_max_bits(frames[0].shape)).process(aligned, aligned)
+        # AlignMTB は 8bit 相当の明るさを前提に閾値ピラミッドを作るため、RAW の
+        # float32 0..1 をそのまま渡さない。位置合わせの対象だけ 0..255 に拡大し、
+        # 呼び出し元へ返すときに元の float32 契約へ戻す。1.0 超のヘッドルームも
+        # 保つ必要があるので、uint8 へ丸めたりクリップしたりはしない。
+        aligned_scaled = [
+            np.ascontiguousarray(np.asarray(frame, dtype=np.float32) * 255.0).copy()
+            for frame in frames
+        ]
+        cv2.createAlignMTB(_align_max_bits(frames[0].shape)).process(
+            aligned_scaled, aligned_scaled
+        )
+        aligned = [
+            np.asarray(frame, dtype=np.float32) / 255.0 for frame in aligned_scaled
+        ]
     except Exception as error:
         LOGGER.warning("位置合わせに失敗しました。ズレ補正なしで続行します: %s", error)
         return frames, False
@@ -310,7 +323,7 @@ def _align_frames(frames: list[np.ndarray]) -> tuple[list[np.ndarray], bool]:
     # 上記の「1枚だけ全面0」を取りこぼさないための最終確認。真っ黒なフレームを
     # 合成に混ぜると、その領域の重みが狂って合成結果が破綻する。
     if any(
-        int(result.max()) == 0 and int(frame.max()) > 0
+        float(np.max(result)) <= 1e-6 and float(np.max(frame)) > 1e-6
         for result, frame in zip(aligned, frames)
     ):
         LOGGER.warning("位置合わせ結果に真っ黒なフレームがあるため、ズレ補正なしで続行します。")
@@ -330,9 +343,22 @@ def _merge_frames(frames: list[np.ndarray]) -> np.ndarray:
     OpenCV の Mertens / AlignMTB はどちらも内部で `COLOR_RGB2GRAY` を使うので、
     rawpy 出力（RGB）をそのまま渡してよい（BGR への変換は不要かつ有害）。
     """
-    merged = np.asarray(cv2.createMergeMertens().process(frames), dtype=np.float32)
+    mertens_frames = [
+        np.ascontiguousarray(np.asarray(frame, dtype=np.float32) * 255.0)
+        for frame in frames
+    ]
+    merged = np.asarray(
+        cv2.createMergeMertens().process(mertens_frames), dtype=np.float32
+    )
     if not _all_finite(merged):
         raise RawDevelopmentError("合成結果が不正な値になりました。フレームを見直してください。")
+
+    # OpenCV 5 の MergeMertens は、入力を 0..255 にしても戻り値を正規化済みの
+    # float32 0..1 で返す。一方、ビルドによっては入力スケールの戻り値になるため、
+    # その場合だけ 255 で戻す。どちらの実装でも、ここから先は float32 0..1 契約に
+    # 統一する（1.0 超の小さなオーバーシュートは下の clip まで保持する）。
+    if merged.size and float(np.max(np.abs(merged))) > 2.0:
+        merged = merged / 255.0
     np.clip(merged, 0.0, 1.0, out=merged)
     return merged
 
@@ -348,19 +374,103 @@ def _summarize_lens_corrections(
     取り除けないゴーストになる。食い違いの中身はレシピJSONの `frames[]` に残す。
     """
     applied_flags = {bool(entry.get("applied")) for entry in per_frame}
+
+    def shared_value(key: str) -> Any:
+        """全フレームに同じ値があるフィールドだけを転記する。"""
+        if not per_frame or any(key not in entry for entry in per_frame):
+            return None
+        values = [entry[key] for entry in per_frame]
+        first = values[0]
+        if all(value == first for value in values[1:]):
+            return first
+        return None
+
+    def add_shared_fields(summary: dict[str, Any], keys: tuple[str, ...]) -> None:
+        for key in keys:
+            value = shared_value(key)
+            if value is not None:
+                summary[key] = value
+
     if applied_flags == {True}:
         first = per_frame[0]
         summary: dict[str, Any] = {"applied": True}
         if first.get("lens"):
             summary["lens"] = first["lens"]
+        add_shared_fields(summary, ("flags", "focal_length", "aperture", "skipped"))
         return summary
     if applied_flags == {False}:
         first = per_frame[0]
         summary = {"applied": False, "reason": first.get("reason") or "unknown"}
         if first.get("lens_model"):
             summary["lens_model"] = first["lens_model"]
+        add_shared_fields(summary, ("flags", "skipped", "focal_length", "aperture"))
         return summary
     return {"applied": False, "reason": "inconsistent_across_frames"}
+
+
+def _apply_group_lens_corrections(
+    frames: list[np.ndarray],
+    lens_resolutions: list[LensResolution],
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
+    """全フレームのレンズ補正を実行し、ビネット安全弁をグループで揃える。
+
+    1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
+    `vignetting_highlight_headroom` が返った場合は、1パス目でビネットを適用できた
+    フレームだけを、デコード済みの元配列から `force_skip_vignetting=True` で再実行する。
+    これにより歪曲/TCAの処理は維持しつつ、ビネットだけが混在しない。
+    """
+    corrected_frames: list[np.ndarray] = []
+    corrections: list[dict[str, Any]] = []
+    for frame, resolution in zip(frames, lens_resolutions):
+        corrected, correction = apply_lens_correction(frame, resolution)
+        corrected_frames.append(np.ascontiguousarray(corrected))
+        corrections.append(correction)
+
+    group_skip_reason = "vignetting_highlight_headroom"
+
+    def has_group_skip_reason(correction: dict[str, Any]) -> bool:
+        # レンズ補正に幾何補正まで残った場合は `skipped`、ビネットだけで補正全体が
+        # 不適用になった場合は lens.py が `reason` に同じ値を返す。
+        return group_skip_reason in correction.get("skipped", []) or (
+            correction.get("reason") == group_skip_reason
+        )
+
+    group_skip = any(
+        has_group_skip_reason(correction)
+        for correction in corrections
+    )
+    if not group_skip:
+        return corrected_frames, corrections
+
+    for index, (frame, resolution, correction) in enumerate(
+        zip(frames, lens_resolutions, corrections)
+    ):
+        if "vignetting" not in correction.get("flags", []):
+            continue
+        corrected, forced_correction = apply_lens_correction(
+            frame, resolution, force_skip_vignetting=True
+        )
+        corrected_frames[index] = np.ascontiguousarray(corrected)
+        corrections[index] = forced_correction
+
+    # `force_skip_vignetting` は lens.py 内部の理由として
+    # `vignetting_forced_skip` を返すが、レシピにはグループ判定の原因を共通して記録
+    # する。フレーム単位の skipped が揃うため、全体 summary でも情報を落とさない。
+    for index, correction in enumerate(corrections):
+        normalized = dict(correction)
+        skipped = [
+            reason
+            for reason in normalized.get("skipped", [])
+            if reason != "vignetting_forced_skip"
+        ]
+        if group_skip_reason not in skipped:
+            skipped.append(group_skip_reason)
+        normalized["skipped"] = skipped
+        if not normalized.get("applied"):
+            normalized["reason"] = group_skip_reason
+        corrections[index] = normalized
+
+    return corrected_frames, corrections
 
 
 def _merge_params_hash(
@@ -546,33 +656,38 @@ def merge_bracket(
     lens_inconsistent = not lens_applicable and any(
         resolution.applicable for resolution in lens_resolutions
     )
-    frames: list[np.ndarray] = []
+    decoded_frames: list[np.ndarray] = []
     frame_records: list[dict[str, Any]] = []
     for capture_id, source_path, lens_resolution in zip(
         normalized_ids, source_paths, lens_resolutions
     ):
         rgb = _decode_frame(source_path, resolved, preview)
-        if lens_applicable:
-            rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
-        else:
-            # ピクセルには触らず、`apply_lens_correction` が不適用時に返すのと**同じ形**の
-            # dict を同じ生成元（`LensResolution.unapplied()`）から作る。
-            # 解決できたフレームまで巻き添えで無補正にする場合は、理由を
-            # `_summarize_lens_corrections` と同じ語彙に揃える（畳んだ結果が
-            # これまでどおり `inconsistent_across_frames` になるようにするため）。
-            lens_correction = lens_resolution.unapplied(
-                "inconsistent_across_frames" if lens_inconsistent else None
-            )
-        frames.append(np.ascontiguousarray(rgb))
+        decoded_frames.append(np.ascontiguousarray(rgb))
         frame_records.append(
             {
                 "capture_id": capture_id,
                 "path": _relative_path(source_path),
                 "sha256": _sha256(source_path),
                 "size_bytes": source_path.stat().st_size,
-                "lens_correction": lens_correction,
             }
         )
+
+    # デコード済みの元配列を保持したまま、レンズ補正をグループ単位で決める。全フレーム
+    # 解決済みなら、ビネット安全弁が1枚でも発火したときだけ該当フレームを元配列から
+    # 再実行する（デコードをやり直さない）。レンズ解決自体が不揃いな場合は従来どおり
+    # 全フレームを無補正にして、補正済み/未補正の幾何を混ぜない。
+    if lens_applicable:
+        frames, lens_corrections = _apply_group_lens_corrections(
+            decoded_frames, lens_resolutions
+        )
+    else:
+        frames = decoded_frames
+        lens_corrections = [
+            resolution.unapplied("inconsistent_across_frames" if lens_inconsistent else None)
+            for resolution in lens_resolutions
+        ]
+    for record, lens_correction in zip(frame_records, lens_corrections):
+        record["lens_correction"] = lens_correction
 
     _require_uniform_shapes(frames)
 
@@ -580,8 +695,11 @@ def merge_bracket(
     frames, aligned = _align_frames(frames)
     merged = _merge_frames(frames)
 
-    # --- 5. リサイズ → 6. トーン調整（合成結果に1回だけ） ---
+    # --- 5. リサイズ → 6. highlight_recovery → shadow_lift → トーン調整（各1回だけ） ---
     merged = _resize_array(merged, effective_max_edge)
+    merged = _apply_highlight_recovery_array(
+        merged, float(resolved["highlight_recovery"])
+    )
     merged = _apply_shadow_lift_array(merged, float(resolved["shadow_lift"]))
     merged = _apply_tone_array(merged, resolved)
     image = _array_to_image(merged)
