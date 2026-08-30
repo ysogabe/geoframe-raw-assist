@@ -294,6 +294,22 @@ class FusionContentTests(BracketTestCase):
         self.assertEqual(int(fused[0, 0, 0]), 0)
         self.assertEqual(float(fused[4, 4, 0]), 1.0)
 
+    def test_high_headroom_merge_output_is_not_mistakenly_rescaled(self):
+        """1.0を大きく超える合成結果を、入力スケールのままと誤判定して255で割らないこと。
+
+        lens.py のビネット補正は最大4.0までのヘッドルームを許容する設計で、
+        ハイライト安全弁は1.0超の画素の「割合」しか制限しない（大きさは
+        制限しない）。そのため広角レンズの周辺減光補正次第でMertensの生出力が
+        2.0を超えることは異常ではない。かつて「2.0を超えたら入力スケールの
+        まま返るビルドの兆候」とみなして255で割る防御コードがあり、
+        こうした正当な合成結果を実質真っ黒（4/255程度）にする回帰があった。
+        """
+        overshoot = np.full((8, 8, 3), 2.5, dtype=np.float32)
+        with mock.patch.object(bracket_module.cv2, "createMergeMertens") as factory:
+            factory.return_value.process.return_value = overshoot
+            fused = _merge_frames([self.dark, self.bright])
+        self.assertEqual(float(fused[4, 4, 0]), 1.0)
+
     def test_non_finite_merge_output_is_rejected(self):
         """`np.clip` は NaN を素通しするので、クリップ前に有限性を確かめること。"""
         broken = np.full((8, 8, 3), 0.5, dtype=np.float32)
