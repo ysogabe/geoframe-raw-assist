@@ -17,7 +17,14 @@ from PIL import Image
 from local_raw import bracket as bracket_module
 from local_raw import config as config_module
 from local_raw import engine
-from local_raw.bracket import MAX_FRAMES, MIN_FRAMES, _merge_frames, _merge_params_hash, merge_bracket
+from local_raw.bracket import (
+    MAX_FRAMES,
+    MIN_FRAMES,
+    _merge_frames,
+    _merge_params_hash,
+    _summarize_lens_corrections,
+    merge_bracket,
+)
 from local_raw.lens import LensResolution
 from local_raw.presets import DEFAULT_PRESET, RawDevelopmentError, resolve_adjustments
 
@@ -43,10 +50,9 @@ def scene_radiance(width: int = 128, height: int = 96) -> np.ndarray:
 
 
 def expose(radiance: np.ndarray, gain: float) -> np.ndarray:
-    """露出（ゲイン）を掛けて 8bit sRGB 相当へ焼き込む。1.0 を超える分は白飛びする。"""
+    """露出（ゲイン）を掛けた float32 sRGB 相当を返す。1.0 を超える分は白飛びする。"""
     exposed = np.clip(radiance * gain, 0.0, 1.0) ** (1.0 / 2.2)
-    gray = (exposed * 255.0 + 0.5).astype(np.uint8)
-    return np.repeat(gray[:, :, None], 3, axis=2)
+    return np.repeat(exposed[:, :, None], 3, axis=2).astype(np.float32)
 
 
 def apply_preset_tone(rgb: np.ndarray, preset_name: str = DEFAULT_PRESET) -> np.ndarray:
@@ -56,15 +62,15 @@ def apply_preset_tone(rgb: np.ndarray, preset_name: str = DEFAULT_PRESET) -> np.
     実装と同じ `engine` の関数を呼ぶので、トーン段の定義が変わってもテストは追随する。
     """
     resolved = resolve_adjustments(preset_name)
-    image = Image.fromarray(rgb, mode="RGB")
-    table = engine._shadow_lift_table(float(resolved["shadow_lift"]))
-    if table is not None:
-        image = image.point(table * 3)
+    rgb = engine._apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
+    image = engine._array_to_image(rgb)
     return np.asarray(engine._apply_tone(image, resolved), dtype=np.uint8)
 
 
 def clip_metrics(rgb: np.ndarray) -> dict[str, float]:
     """`analysis.score_array` と同じ定義の白飛び率・黒つぶれ率・平均輝度。"""
+    if np.issubdtype(rgb.dtype, np.floating):
+        rgb = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
     return {
         "highlight": float((rgb >= HIGHLIGHT_LEVEL).any(axis=2).mean()),
         "shadow": float((rgb <= SHADOW_LEVEL).all(axis=2).mean()),
@@ -260,12 +266,19 @@ class FusionContentTests(BracketTestCase):
         self.assertGreater(fused["mean"], dark["mean"])
         self.assertLess(fused["mean"], bright["mean"])
 
-    def test_merge_returns_uint8_within_range(self):
+    def test_merge_returns_float32_within_range(self):
         fused = _merge_frames([self.dark, self.bright])
-        self.assertEqual(fused.dtype, np.uint8)
+        self.assertEqual(fused.dtype, np.float32)
         self.assertEqual(fused.shape, self.dark.shape)
-        self.assertGreaterEqual(int(fused.min()), 0)
-        self.assertLessEqual(int(fused.max()), 255)
+        self.assertGreaterEqual(float(fused.min()), 0.0)
+        self.assertLessEqual(float(fused.max()), 1.0)
+
+    def test_mertens_contract_preserves_float01_brightness_scale(self):
+        """実際の Mertens が float32[0,1] を黒潰れさせず、同じスケールで返す。"""
+        input_mean = float(np.mean([frame.mean() for frame in (self.dark, self.bright)]))
+        fused_mean = float(_merge_frames([self.dark, self.bright]).mean())
+        self.assertGreaterEqual(fused_mean, input_mean * 0.3)
+        self.assertLessEqual(fused_mean, input_mean * 3.0)
 
     def test_out_of_range_merge_output_is_clipped_not_wrapped(self):
         """Mertens はピラミッド再構成で 0..1 を外すことがある。
@@ -279,7 +292,23 @@ class FusionContentTests(BracketTestCase):
             factory.return_value.process.return_value = overshoot
             fused = _merge_frames([self.dark, self.bright])
         self.assertEqual(int(fused[0, 0, 0]), 0)
-        self.assertEqual(int(fused[4, 4, 0]), 255)
+        self.assertEqual(float(fused[4, 4, 0]), 1.0)
+
+    def test_high_headroom_merge_output_is_not_mistakenly_rescaled(self):
+        """1.0を大きく超える合成結果を、入力スケールのままと誤判定して255で割らないこと。
+
+        lens.py のビネット補正は最大4.0までのヘッドルームを許容する設計で、
+        ハイライト安全弁は1.0超の画素の「割合」しか制限しない（大きさは
+        制限しない）。そのため広角レンズの周辺減光補正次第でMertensの生出力が
+        2.0を超えることは異常ではない。かつて「2.0を超えたら入力スケールの
+        まま返るビルドの兆候」とみなして255で割る防御コードがあり、
+        こうした正当な合成結果を実質真っ黒（4/255程度）にする回帰があった。
+        """
+        overshoot = np.full((8, 8, 3), 2.5, dtype=np.float32)
+        with mock.patch.object(bracket_module.cv2, "createMergeMertens") as factory:
+            factory.return_value.process.return_value = overshoot
+            fused = _merge_frames([self.dark, self.bright])
+        self.assertEqual(float(fused[4, 4, 0]), 1.0)
 
     def test_non_finite_merge_output_is_rejected(self):
         """`np.clip` は NaN を素通しするので、クリップ前に有限性を確かめること。"""
@@ -588,6 +617,38 @@ class DecodeErrorMessageTests(unittest.TestCase):
         self.assertNotIn("/", str(raised.exception))
         self.assertNotIn(dlopen_error, str(raised.exception))
 
+    def test_decode_keeps_values_above_one_until_later_processing(self):
+        """デコード処理は入力をクリップせずに素通しすること（契約防御テスト）。
+
+        `_merge_postprocess_params` は `output_bps=16` を指定するため、rawpy の
+        `postprocess` は常に uint16（0〜65535）を返す。つまり 70000.0 や -10.0 の
+        ような範囲外の値は**実運用では発生しない**。ここで使う異常値は現実の
+        rawpy 出力の代わりではなく、`_decode_frame` → `_decode_16bit_to_float01`
+        が「入力値を勝手にクリップせず、65535 で割る変換だけを行って通す」ことを
+        直接確かめるためのもので、この関数は単独現像とブラケット合成の両方が
+        共有する。ここがクリップする実装に変わると、ハイライトのヘッドルームや
+        露出差が後段の処理に届かず壊れるため、この防御テストを維持する。
+        """
+        class FakeRaw:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def postprocess(self, **kwargs):
+                return np.array([[[65535.0, 70000.0, -10.0]]], dtype=np.float32)
+
+        with mock.patch.object(bracket_module.rawpy, "imread", return_value=FakeRaw()):
+            rgb = bracket_module._decode_frame(
+                Path("DSC00001.ARW"), resolve_adjustments(DEFAULT_PRESET), True
+            )
+
+        self.assertEqual(rgb.dtype, np.float32)
+        self.assertAlmostEqual(float(rgb[0, 0, 0]), 1.0)
+        self.assertGreater(float(rgb[0, 0, 1]), 1.0)
+        self.assertLess(float(rgb[0, 0, 2]), 0.0)
+
 
 class MergedRecipeTests(BracketTestCase):
     def test_recipe_records_every_frame_with_its_hash(self):
@@ -697,6 +758,79 @@ class MergedRecipeTests(BracketTestCase):
                     frame["lens_correction"]["reason"], "inconsistent_across_frames"
                 )
 
+    def test_a_focal_length_inconsistent_bracket_gets_no_lens_correction_at_all(self):
+        """全フレーム解決できても焦点距離が食い違えば、どのフレームにも補正を掛けない。
+
+        Opusレビュー指摘(M-A): `apply_lens_correction` は
+        `modifier.initialize(resolution.focal_length, resolution.aperture, ...)` を
+        フレーム個別の resolution で呼ぶため、焦点距離が割れると歪曲/TCA の幾何ワープ
+        自体がフレームごとに変わってしまう。これは `_apply_group_lens_corrections`
+        （ビネットのグループ判定）より上流の問題なので、トリガー集合をいくら広げても
+        直らない。`merge_bracket` 側で焦点距離・絞りの一致を検証し、
+        `lens_applicable` を全フレーム無補正へ倒す必要がある。
+
+        Sony E PZ 16-50mm（パワーズーム）で 18.0mm/19.0mm のように、
+        `_vignetting_profile_guard` の閾値をまたぐズーム位置のブレを想定。
+        """
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sony / E PZ 16-50mm"}
+
+        resolutions = [
+            LensResolution(
+                applicable=True, lens_name="Sony / E PZ 16-50mm", focal_length=18.0, aperture=4.0
+            ),
+            LensResolution(
+                applicable=True, lens_name="Sony / E PZ 16-50mm", focal_length=19.0, aperture=4.0
+            ),
+        ]
+        with mock.patch.object(
+            bracket_module, "probe_lens", side_effect=resolutions
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "焦点距離が食い違うなら1枚も補正しないこと")
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "lens_params_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "lens_params_inconsistent_across_frames",
+                )
+
+    def test_an_aperture_inconsistent_bracket_gets_no_lens_correction_at_all(self):
+        """焦点距離が一致していても絞りが食い違えば同様に全フレーム無補正にする。"""
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
+
+        resolutions = [
+            LensResolution(
+                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=2.8
+            ),
+            LensResolution(
+                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=4.0
+            ),
+        ]
+        with mock.patch.object(
+            bracket_module, "probe_lens", side_effect=resolutions
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "絞りが食い違うなら1枚も補正しないこと")
+        self.assertEqual(
+            result["lens_correction"]["reason"], "lens_params_inconsistent_across_frames"
+        )
+
     def test_a_fully_resolvable_bracket_still_gets_lens_correction(self):
         """全フレーム解決できるときは従来どおり全フレームに補正が掛かること。"""
         applied_to: list[object] = []
@@ -712,6 +846,361 @@ class MergedRecipeTests(BracketTestCase):
 
         self.assertEqual(len(applied_to), 2, "全フレームに補正が掛かること")
         self.assertTrue(result["lens_correction"]["applied"])
+
+    def test_vignetting_headroom_skip_is_applied_to_the_whole_group(self):
+        """1枚の安全弁発火後、ビネット適用済みフレームだけ元配列から再実行する。"""
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        # 2パス目はデコードし直さず、1パス目と同じ元フレームを使う。
+        np.testing.assert_array_equal(calls[0][0], calls[2][0])
+        self.assertEqual(
+            result["lens_correction"],
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+                "skipped": ["vignetting_highlight_headroom"],
+            },
+        )
+
+    def test_vignetting_profile_focal_guard_skip_is_applied_to_the_whole_group(self):
+        """vignetting_profile_focal_guardも多層防御としてグループトリガーになること。
+
+        本来 merge_bracket の焦点距離一致ガードにより、この関数に到達する時点で
+        全フレームの焦点距離は揃っているはず。それでも lens.py が返す
+        vignetting_profile_focal_guard 自体はレンズ側の理由なので、安価な
+        多層防御としてトリガー集合に含めている（Opusレビュー指摘M-A）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sony / E PZ 16-50mm",
+            focal_length=16.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_profile_focal_guard"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        self.assertEqual(
+            result["lens_correction"]["skipped"], ["vignetting_profile_focal_guard"]
+        )
+
+    def test_geometry_correction_failure_disables_lens_correction_for_the_whole_group(self):
+        """幾何補正(歪曲/TCA)の部分失敗もグループ全体を無補正へフォールバックすること。
+
+        lens.py の apply_lens_correction は、歪曲/TCAが失敗しても成功済みの
+        ビネット補正だけは保持する設計（_GeometryCorrectionGuardError /
+        Exception の局所捕捉）。そのため1フレームだけ
+        「ビネット適用済み・幾何未適用」という applied:True の部分適用状態を
+        返すことがある。この状態は _GROUP_SKIP_TRIGGER_REASONS（ビネット用）の
+        対象外なので見逃され、歪曲補正済みのフレームと未適用のフレームが
+        混在したまま合成されてしまっていた（review skill指摘、位置合わせでは
+        除去できない放射状ゴーストが残る）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def mixed_geometry(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            normal_calls += 1
+            if normal_calls == 1:
+                # フレームA: 歪曲/TCAとも適用成功。
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["vignetting", "distortion", "tca"],
+                }
+            # フレームB: ビネットは成功したが、幾何補正だけが想定外の例外で
+            # 失敗した経路（成功済みのビネットは保持される）。
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["vignetting"],
+                "skipped": ["geometry_correction_failed"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=mixed_geometry
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # force_skip_vignetting=True の再実行（ビネット用の2パス目）は起きない。
+        # 幾何不一致はそれとは別の経路で、全フレーム無補正へフォールバックする。
+        self.assertEqual([force for _, force in calls], [False, False])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
+
+    def test_vignetting_non_finite_skip_is_applied_to_the_whole_group(self):
+        """非有限値破棄（マーカーなしの経路）もグループ判定のトリガーになること。
+
+        `vignetting_highlight_headroom` だけをトリガーにすると、フレームBが
+        非有限値でビネットを破棄した場合に見逃され、ビネット適用済みのフレームA
+        と未補正のフレームBが混ざったまま合成されてしまう（過去のMedium指摘）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            # フレームBはビネット補正が非有限値を生成して破棄された経路
+            # （skipped/reasonともにマーカーなしで返ってきていた過去の実装）。
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_non_finite"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # フレームAはビネット適用済み（flags に "vignetting"）だったので、
+        # グループ判定により force_skip_vignetting=True で再実行される。
+        self.assertEqual([force for _, force in calls], [False, False, True])
+        np.testing.assert_array_equal(calls[0][0], calls[2][0])
+        self.assertEqual(
+            result["lens_correction"],
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+                "skipped": ["vignetting_non_finite"],
+            },
+        )
+
+    def test_vignetting_color_modification_failure_does_not_trigger_group_skip(self):
+        """apply_color_modification失敗はフレーム間で決定論的なので単体では揃えない。
+
+        同一レンズ・同一dtype・同一寸法なら apply_color_modification の成否は
+        フレーム間で一致するはずの理由。グループ判定のトリガーには含めない
+        （含めると、このマーカー単体を持つフレームだけの偽陽性グループ化になる）。
+
+        フレームA=ビネット適用済み・フレームB=apply_color_modification失敗、という
+        異種構成にすること自体が検証の要。両フレームに同じ correction を返すと、
+        どちらの flags にも "vignetting" が無いため 2 パス目のループが最初から
+        全件スキップし、トリガー集合に含めても含めなくても結果が変わらない
+        （＝テストに判別力が無い。Opusレビューで指摘された空振りの修正）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[tuple[np.ndarray, bool]] = []
+        normal_calls = 0
+
+        def mixed(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append((rgb.copy(), force_skip_vignetting))
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                # フレームA: ビネット適用済み。
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            # フレームB: apply_color_modification失敗でビネットのみ非適用。
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion"],
+                "skipped": ["vignetting_color_modification_failed"],
+            }
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=mixed
+        ):
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        # force_skip_vignetting=True での再実行（3回目の呼び出し）が発生しないこと。
+        # フレームAが "vignetting" フラグを持つにも関わらず再実行されないのは、
+        # vignetting_color_modification_failed がトリガー集合に含まれないから。
+        self.assertEqual([force for _, force in calls], [False, False])
+
+    def test_lens_summary_preserves_shared_metadata(self):
+        per_frame = [
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+        ]
+        self.assertEqual(
+            _summarize_lens_corrections(per_frame),
+            {
+                "applied": True,
+                "lens": "Sigma / 10-18mm",
+                "flags": ["distortion"],
+                "skipped": ["vignetting_highlight_headroom"],
+                "focal_length": 10.0,
+                "aperture": 4.0,
+            },
+        )
 
 
 class AlignmentTests(BracketTestCase):
@@ -754,6 +1243,26 @@ class AlignmentTests(BracketTestCase):
         self.assertFalse(ok, "真っ黒なフレームが出たら位置合わせは失敗扱いにする")
         for result, source in zip(aligned, sources):
             self.assertTrue(np.array_equal(result, source), "元のフレームがそのまま返ること")
+
+    def test_alignment_black_guard_works_on_float01_frames(self):
+        sources = [
+            np.full((16, 16, 3), 0.25, dtype=np.float32),
+            np.full((16, 16, 3), 0.5, dtype=np.float32),
+        ]
+        observed_maxima: list[float] = []
+
+        def zero_one(src, dst):
+            observed_maxima.extend(float(frame.max()) for frame in src)
+            dst[1][:] = 0
+
+        with mock.patch.object(bracket_module.cv2, "createAlignMTB") as factory:
+            factory.return_value.process = zero_one
+            aligned, ok = bracket_module._align_frames(sources)
+
+        self.assertFalse(ok)
+        self.assertEqual(observed_maxima, [0.25 * 255.0, 0.5 * 255.0])
+        for result, source in zip(aligned, sources):
+            np.testing.assert_array_equal(result, source)
 
     def test_alignment_does_not_mutate_the_input_frames(self):
         """OpenCV には in-place で渡すが、呼び出し元のフレームは壊さないこと。"""
@@ -824,7 +1333,10 @@ class MergePostprocessParamsTests(unittest.TestCase):
     def test_half_size_follows_preview(self):
         adjustments = resolve_adjustments(DEFAULT_PRESET)
         raw = self.FakeRaw()
-        self.assertTrue(bracket_module._merge_postprocess_params(raw, adjustments, True)["half_size"])
+        self.assertEqual(
+            bracket_module._merge_postprocess_params(raw, adjustments, True)["half_size"],
+            engine.PREVIEW_HALF_SIZE,
+        )
         self.assertFalse(
             bracket_module._merge_postprocess_params(raw, adjustments, False)["half_size"]
         )
@@ -849,6 +1361,25 @@ class ToneAfterMergeTests(BracketTestCase):
             CAPTURES[:2], DEFAULT_PRESET, preview=True, adjustments={"shadow_lift": 100.0}
         )
         self.assertGreater(self.merged_array(high).mean(), self.merged_array(low).mean())
+
+    def test_highlight_recovery_is_noop_after_bracket_merge(self):
+        """Mertensが複数露出からハイライト情報を統合するため追加処理はしない。"""
+        without_recovery = merge_bracket(
+            CAPTURES[:2],
+            DEFAULT_PRESET,
+            preview=True,
+            adjustments={"highlight_recovery": 0.0},
+        )
+        with_recovery = merge_bracket(
+            CAPTURES[:2],
+            DEFAULT_PRESET,
+            preview=True,
+            adjustments={"highlight_recovery": 100.0},
+        )
+        low = self.merged_array(without_recovery)
+        high = self.merged_array(with_recovery)
+
+        np.testing.assert_array_equal(low, high)
 
     def test_adjustments_are_returned_resolved_in_full(self):
         result = merge_bracket(

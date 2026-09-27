@@ -3,8 +3,13 @@
 契約: docs/API_CONTRACT.md §2（Adjustments）・§4（命名）・§9（module 契約）
 
 処理順序は契約 §2 で固定:
-    rawpy postprocess → lensfun 補正 → shadow_lift LUT → resize
-    → Brightness → Contrast → Color → Sharpness → save(exif, icc)
+    rawpy postprocess（highlight_recovery込み） → lensfun 補正 → shadow_lift → resize
+    → Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
+
+RAWからJPEGへ落とすまでの中間画像は float32 で保持する。rawpyの16bit出力は
+65535で割ると常に[0,1]に収まるため、入力段階での明示的なクリップは不要である。
+暗部補正やトーン調整を8bitの途中で行うと、わずかな調整でも階調が段階化し、
+クリップした画素を後から戻せないためである。
 """
 
 from __future__ import annotations
@@ -21,13 +26,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import rawpy
-from PIL import Image, ImageEnhance
+from PIL import Image
 
 from . import config
 from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
-from .lens import apply_lens_correction, probe_lens
+from .lens import _all_finite, apply_lens_correction, probe_lens
 from .presets import (
     DEFAULT_PRESET,
     PRESETS,
@@ -54,8 +60,47 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: ENGINE_VERSION 4: レンズ歪曲補正に autoscale（ModifyFlags.SCALE）を追加し黒縁を除去。
 #: 出力が変わるため版を上げ、黒縁付きの現像・ブラケット合成キャッシュを無効化する
 #: （ENGINE_VERSION は両経路のキャッシュキーに入っている）。
-ENGINE_VERSION = 4
-RECIPE_VERSION = 2
+#:
+#: ENGINE_VERSION 5: RAW出力を16bitで受け、float32のままトーン処理して最後に8bit化。
+#: 露出の二重適用を解消し、ハイライトモードを全域Blendに統一した。
+#:
+#: ENGINE_VERSION 6: レンズ補正の境界リンギングを避けるため再標本化をINTER_LINEARへ変更し、
+#: TCA（倍率色収差）を歪曲補正と統合したRGB別マップで適用。float経路のビネット補正は
+#: 再標本化前の0..1クリップを止め、補正後の最終クリップまで階調を保持する。
+#:
+#: ENGINE_VERSION 7: プレビュー縮小をINTER_AREAへ変更し、シャープネスをRGB各チャンネルの
+#: 独立処理から輝度差だけを加える方式へ変更。色収差や細線の色付きハローを強調しない。
+#:
+#: ENGINE_VERSION 8: 広角レンズのビネット補正で広い範囲が白飛びする場合は、ビネットだけ
+#: 破棄して歪曲/TCA補正を継続する。50mm等の安全なビネット補正は維持する。
+#:
+#: ENGINE_VERSION 9: Sony E PZ 16-50mmの16〜18mmではプロファイル由来のビネット補正を
+#: 明示的に止める。画像ごとのハイライト安全弁も維持する。
+#:
+#: ENGINE_VERSION 10: プレビューでも LibRaw の full-size デモザイクを使う。half_size は
+#: 24MPのRAWを約6MPへ先に落とすため、1600pxへ縮小したときに船のマストや細線の解像感が
+#: カメラ内JPEGより落ちる。実測では同じDSC04441のLaplacian varianceが245.5→266.2へ
+#: 改善し、デコード時間は約0.2→2.1秒（1枚）になった。プレビューは速度より比較品質を優先する。
+#:
+#: ENGINE_VERSION 11: 6024→6000のような2%未満の微小縮小はINTER_AREAではなく中央クロップ
+#: にし、大きなレンズ補正の再標本化はINTER_CUBICへ変更した。full-sizeのDSC04440では
+#: レンズ補正後の細部低下が大きく、微小AREA縮小を重ねるとさらに軟化するためである。
+#:
+#: ENGINE_VERSION 12: ハイライト救済をrawpyの露出補正からfloat32のソフトニーへ移し、
+#: プレビューでも本現像と同じ微小クロップを先に適用するようにした。
+#:
+#: ENGINE_VERSION 13: 明示されたmax_edgeがDEFAULT_MAX_EDGEを超える場合は、標準サイズ
+#: 基準の先行クロップを行わず、入力が指定上限以下なら元画像をそのまま返すようにした。
+#:
+#: ENGINE_VERSION 14: highlight_recoveryをrawpyのHighlightModeへ離散マッピングし、
+#: float32側のソフトニー処理を削除した。exp_shift=1.0固定は維持する。
+#:
+#: ENGINE_VERSION 15: ビネット補正が非有限値/apply_color_modification失敗で破棄された
+#: 経路にも skipped/reason のマーカーを追加した（lens.py）。画素出力は変わらないが、
+#: レシピJSONの lens_correction.reason の値が変わりうるため、古いキャッシュのレシピを
+#: 引き継がないようにする。
+ENGINE_VERSION = 15
+RECIPE_VERSION = 9
 
 DEFAULT_MAX_EDGE = 6000
 PREVIEW_MAX_EDGE = 1600
@@ -71,10 +116,23 @@ JPEG_QUALITY = 92
 #: 露出変更はヒストグラム正規化でほぼ打ち消される。実測（DSC02943, half_size）:
 #:   no_auto_bright=False → ±1EV での平均輝度差は 0.18（実質スライダーが死ぬ）
 #:   no_auto_bright=True  → 同 15.65 だが平均輝度 12.7（カメラJPEG 52.4 の約1/4で暗すぎる）
-#: そこで `exposure` は契約どおり `exp_shift` に渡しつつ、自動明るさ補正の**後段**に
-#: 効く `bright` にも同じ倍率を渡している（実測スプレッド 42.7）。§2 の実装マッピングに
-#: 対する追加であり、削除・調整は Wave 3 の課題。
+#: 自動明るさ補正は残すが、露出スライダーを二重に掛けないよう `exp_shift` は 1.0
+#: に固定し、`bright` のみに露出倍率を渡す。LibRaw の自動正規化後にも露出調整が残り、
+#: EVの増減が過度に明るさへ反映される問題を抑える。
 AUTO_BRIGHT_THR = 0.01
+
+# プレビューを先に半分へデモザイクすると、後段の1600px縮小で細部が二重に失われる。
+# full-sizeでデモザイクしてからリサイズする。`preview=False`も元々full-sizeなので、
+# プレビューは half_size にしない。
+#
+# この定数はその設計方針を明示するための**ドキュメント用**定数で、コードからは参照しない。
+# rawpy の postprocess 引数は `"half_size": False` と直書きする
+# （engine / bracket の両デコード経路とも、preview の有無にかかわらず常に False）。
+PREVIEW_HALF_SIZE = False
+
+# 2%未満の縮小は再標本化より中央クロップの方が細部を保持する。レンズ補正の端部を
+# わずかに捨てることにもなり、autoscale境界の影響を出力へ持ち込まない。
+MINOR_RESIZE_CROP_SCALE = 0.98
 
 #: shadow_lift LUT の強さ係数（契約 §2 の式の定数部）。Wave 3 で目視調整可。
 SHADOW_LIFT_GAIN = 0.5 * 255.0 * 4.0
@@ -186,6 +244,7 @@ def _params_hash(
             "engine": ENGINE_VERSION,
             "rawpy": rawpy.__version__,
             "pillow": Image.__version__,
+            "opencv": cv2.__version__,
         },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -209,6 +268,29 @@ def _shadow_lift_table(lift: float) -> list[int] | None:
     return table
 
 
+def _apply_shadow_lift_array(rgb: np.ndarray, lift: float) -> np.ndarray:
+    """暗部補正を float32 (0..1) に連続的に適用する。
+
+    8bit LUT と同じ式を使うが、JPEG化前の高精度バッファへ直接適用する。
+    `lift=0` でも入力を範囲内へ整え、レンズ補正後の安全弁として使える。
+    """
+    working = np.asarray(rgb, dtype=np.float32).copy()
+    np.clip(working, 0.0, 1.0, out=working)
+    if lift <= 0:
+        return working
+
+    strength = float(lift) / 100.0
+    normalized = working
+    lifted = normalized + (
+        strength
+        * (SHADOW_LIFT_GAIN / 255.0)
+        * normalized
+        * (1.0 - normalized) ** 2
+    )
+    np.clip(lifted, 0.0, 1.0, out=lifted)
+    return lifted.astype(np.float32, copy=False)
+
+
 def _postprocess_params(
     raw: Any,
     adjustments: dict[str, Any],
@@ -218,6 +300,15 @@ def _postprocess_params(
     exposure_gain = 2.0**exposure
     highlight_recovery = float(adjustments["highlight_recovery"])
     noise_reduction = adjustments["noise_reduction"]
+
+    # rawpyのReconstruct(3..9)は復元の強さではなく、白寄り/色寄りの選択なので、
+    # highlight_recoveryは既存の75境界を維持した3段階のモードへ割り当てる。
+    if highlight_recovery <= 0.0:
+        highlight_mode = rawpy.HighlightMode.Clip
+    elif highlight_recovery < 75.0:
+        highlight_mode = rawpy.HighlightMode.Blend
+    else:
+        highlight_mode = rawpy.HighlightMode.ReconstructDefault
 
     if noise_reduction == "full":
         fbdd_mode = rawpy.FBDDNoiseReductionMode.Full
@@ -231,21 +322,17 @@ def _postprocess_params(
 
     params: dict[str, Any] = {
         "output_color": rawpy.ColorSpace.sRGB,
-        "output_bps": 8,
+        "output_bps": 16,
         "demosaic_algorithm": rawpy.DemosaicAlgorithm.AHD,
-        "half_size": preview,
+        # プレビューも本現像と同じ full-size でデモザイクする（PREVIEW_HALF_SIZE 参照）。
+        "half_size": False,
         "no_auto_bright": False,
         "auto_bright_thr": AUTO_BRIGHT_THR,
-        # 契約 §2 の実装マッピング。auto bright に打ち消されるため bright も併用する
-        # （AUTO_BRIGHT_THR のコメント参照）。
-        "exp_shift": min(8.0, max(0.25, exposure_gain)),
+        # auto bright の前段と後段で同じEVを二重適用しない。自動明るさ補正は有効の
+        # まま、露出スライダーは bright に一度だけ渡す（AUTO_BRIGHT_THR のコメント参照）。
+        "exp_shift": 1.0,
         "bright": exposure_gain,
-        "exp_preserve_highlights": 0.4 + 0.006 * highlight_recovery,
-        "highlight_mode": (
-            rawpy.HighlightMode.ReconstructDefault
-            if highlight_recovery >= 75
-            else rawpy.HighlightMode.Blend
-        ),
+        "highlight_mode": highlight_mode,
         "fbdd_noise_reduction": fbdd_mode,
         "median_filter_passes": median_passes,
         "use_auto_wb": False,
@@ -265,18 +352,142 @@ def _postprocess_params(
     return params
 
 
-def _apply_tone(image: Image.Image, adjustments: dict[str, Any]) -> Image.Image:
-    """resize 後のトーン調整（契約 §2 の順序: Brightness → Contrast → Color → Sharpness）。"""
-    image = ImageEnhance.Brightness(image).enhance(float(adjustments["brightness"]))
-    image = ImageEnhance.Contrast(image).enhance(float(adjustments["contrast"]))
+def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
+    """float32 RGB画像を最大辺まで縮小する。
+
+    `max_edge` が標準本現像サイズ（6000px）以下の場合、元画像が6000pxを2%未満
+    だけ上回れば中央クロップを先に行う。その後の縮小は常にINTER_AREAなので、
+    full-size現像の6024→6000の画角を1600pxプレビューでも共有できる。6000pxを
+    超える `max_edge` ではこの先行クロップを行わず、入力が上限以下なら変更しない。
+    """
+    height, width = rgb.shape[:2]
+    current_max = max(height, width)
+
+    # 公開APIの最小出力サイズ未満は現像経路には入らないため、既存の小配列向け
+    # ユーティリティ挙動（呼び出し時のmax_edgeに対する微小クロップ）を維持する。
+    if current_max < MIN_MAX_EDGE:
+        if current_max <= max_edge:
+            return rgb
+        scale = float(max_edge) / float(current_max)
+        target_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        if scale >= MINOR_RESIZE_CROP_SCALE:
+            target_width, target_height = target_size
+            left = max(0, (width - target_width) // 2)
+            top = max(0, (height - target_height) // 2)
+            return rgb[top : top + target_height, left : left + target_width].copy()
+        return cv2.resize(rgb, target_size, interpolation=cv2.INTER_AREA).astype(
+            np.float32, copy=False
+        )
+
+    if max_edge <= DEFAULT_MAX_EDGE:
+        # DEFAULT_MAX_EDGEを基準にすることで、プレビューと本現像でクロップ判定が変わらない。
+        crop_max = min(DEFAULT_MAX_EDGE, current_max)
+        crop_scale = float(crop_max) / float(current_max)
+        if crop_scale < 1.0 and crop_scale >= MINOR_RESIZE_CROP_SCALE:
+            target_size = (
+                max(1, round(width * crop_scale)),
+                max(1, round(height * crop_scale)),
+            )
+            target_width, target_height = target_size
+            left = max(0, (width - target_width) // 2)
+            top = max(0, (height - target_height) // 2)
+            rgb = rgb[top : top + target_height, left : left + target_width].copy()
+
+    if max(rgb.shape[:2]) <= max_edge:
+        return rgb
+
+    scale = float(max_edge) / float(max(rgb.shape[:2]))
+    target_size = (
+        max(1, round(rgb.shape[1] * scale)),
+        max(1, round(rgb.shape[0] * scale)),
+    )
+    # Lanczos は細線・高コントラスト境界の前後に明暗の振動を作りやすい。
+    # 現像のプレビューは常に縮小方向なので、画素面積平均のAREAを使って輪郭を
+    # 保ちつつ、レンズ補正で生じた微小な色ずれをハローへ変換しない。
+    return cv2.resize(rgb, target_size, interpolation=cv2.INTER_AREA).astype(
+        np.float32, copy=False
+    )
+
+
+def _apply_tone_array(rgb: np.ndarray, adjustments: dict[str, Any]) -> np.ndarray:
+    """float32 RGBへ Brightness → Contrast → Color → Sharpness を適用する。
+
+    入力は [0,1] にクリップ済みであることを前提とする（前段の
+    `_apply_shadow_lift_array` が [0,1] に揃えた float32 を `_resize_array` が
+    縮小するだけなので、現像・合成いずれの経路でも範囲内から外れない）。
+    出力側の最終クリップだけをここで行う。
+    """
+    image = np.asarray(rgb, dtype=np.float32).copy()
+
+    brightness = float(adjustments["brightness"])
+    image *= brightness
+
+    contrast = float(adjustments["contrast"])
+    image = (image - 0.5) * contrast + 0.5
 
     saturation = float(adjustments["saturation"])
+    luma = (
+        image[..., 0:1] * 0.2126
+        + image[..., 1:2] * 0.7152
+        + image[..., 2:3] * 0.0722
+    )
     if saturation == 0:
-        image = image.convert("L").convert("RGB")
+        image = np.repeat(luma, 3, axis=2)
     else:
-        image = ImageEnhance.Color(image).enhance(saturation)
+        image = luma + (image - luma) * saturation
 
-    return ImageEnhance.Sharpness(image).enhance(float(adjustments["sharpness"]))
+    sharpness = float(adjustments["sharpness"])
+    if sharpness > 1.0:
+        # RGB各チャンネルのunsharpは、TCAの残差やJPEG前の微小な色ずれを別々に
+        # 増幅して、細線の両側へマゼンタ/シアンのハローを作る。Rec.709輝度の
+        # 高周波成分だけを3チャンネルへ同量加えると、明暗のキレを保ったまま
+        # 色差は増幅しない。ごく小さい差分はノイズなので閾値で捨てる。
+        luma_blurred = cv2.GaussianBlur(luma[..., 0], (0, 0), sigmaX=0.8)[..., None]
+        detail_luma = luma - luma_blurred
+        threshold = 1.0 / 255.0
+        detail_luma = np.sign(detail_luma) * np.maximum(
+            np.abs(detail_luma) - threshold, 0.0
+        )
+        image = image + detail_luma * ((sharpness - 1.0) * 1.5)
+    elif sharpness < 1.0:
+        # 柔らかいプリセットは従来どおりRGB全体を混ぜる。こちらは色を強調する
+        # 操作ではなく、人物向けの低域寄りのぼかしなので挙動を維持する。
+        blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=0.8)
+        image = image * sharpness + blurred * (1.0 - sharpness)
+
+    np.clip(image, 0.0, 1.0, out=image)
+    return image.astype(np.float32, copy=False)
+
+
+def _apply_tone(image: Image.Image, adjustments: dict[str, Any]) -> Image.Image:
+    """既存のテスト・合成コード向け8bitラッパー。
+
+    実際の現像経路は `_apply_tone_array()` を直接使い、ここでは互換性のため
+    PIL画像を受け取って同じ float32 実装を通して返す。
+    """
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    toned = _apply_tone_array(rgb, adjustments)
+    return Image.fromarray(np.rint(toned * 255.0).astype(np.uint8), mode="RGB")
+
+
+def _decode_16bit_to_float01(rgb: np.ndarray) -> np.ndarray:
+    """rawpy の16bit整数出力を float32 0..1 へ変換する。
+
+    `output_bps=16` の postprocess 出力は 0..65535 の整数で、65535 で割ると
+    常に [0,1] に収まるため、ここでの明示的なクリップは不要。単独現像
+    （`develop_raw`）とブラケット合成（`bracket._decode_frame`）が同じ変換を
+    共有するための共通ヘルパー。
+    """
+    return np.asarray(rgb, dtype=np.float32) / 65535.0
+
+
+def _array_to_image(rgb: np.ndarray) -> Image.Image:
+    """float32 RGB (0..1) を最終JPEG用の8bit PIL画像へ変換する。"""
+    working = np.asarray(rgb, dtype=np.float32).copy()
+    if not _all_finite(working):
+        raise RawDevelopmentError("現像結果が不正な値になりました。")
+    np.clip(working, 0.0, 1.0, out=working)
+    return Image.fromarray(np.rint(working * 255.0).astype(np.uint8), mode="RGB")
 
 
 def _resolve_save_kwargs(source_jpg: Path, width: int, height: int) -> tuple[dict[str, Any], bool]:
@@ -452,22 +663,16 @@ def develop_raw(
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
 
-    rgb = np.asarray(rgb, dtype=np.uint8)
+    rgb = _decode_16bit_to_float01(rgb)
 
-    # --- レンズ補正（リサイズ前） ---
+    # --- rawpy postprocess（highlight_recovery込み） → レンズ補正（リサイズ前） ---
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
 
-    image = Image.fromarray(rgb, mode="RGB")
-
-    # --- shadow_lift LUT（リサイズ前） ---
-    table = _shadow_lift_table(float(resolved["shadow_lift"]))
-    if table is not None:
-        image = image.point(table * 3)  # RGB は 256×3 エントリ必要
-
-    if max(image.size) > effective_max_edge:
-        image.thumbnail((effective_max_edge, effective_max_edge), Image.Resampling.LANCZOS)
-
-    image = _apply_tone(image, resolved)
+    # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
+    rgb = _apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
+    rgb = _resize_array(rgb, effective_max_edge)
+    rgb = _apply_tone_array(rgb, resolved)
+    image = _array_to_image(rgb)
 
     save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, image.width, image.height)
     exif_inherited = _save_developed_jpeg(image, output_path, save_kwargs, exif_inherited)
@@ -494,6 +699,7 @@ def develop_raw(
             "engine_version": ENGINE_VERSION,
             "rawpy_version": rawpy.__version__,
             "pillow_version": Image.__version__,
+            "opencv_version": cv2.__version__,
         },
         "output": {
             "path": _relative_path(output_path),
@@ -534,7 +740,7 @@ def main() -> None:
     parser.add_argument(
         "--preview",
         action="store_true",
-        help="プレビュー現像（half_size・長辺1600px・outputs/preview/ へ出力）。",
+        help="プレビュー現像（full-sizeデモザイク・長辺1600px・outputs/preview/ へ出力）。",
     )
     parser.add_argument(
         "--adjustments",

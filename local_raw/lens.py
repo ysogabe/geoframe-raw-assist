@@ -1,4 +1,4 @@
-"""lensfun によるレンズ補正（ビネット・歪曲）。
+"""lensfun によるレンズ補正（ビネット・歪曲・TCA）。
 
 契約: docs/API_CONTRACT.md §7「lensfun DB の扱い」 / §9 / docs/spikes-wave0.md スパイク1
 
@@ -27,6 +27,17 @@ LENSFUN_DB_DIR = Path(__file__).resolve().parent / "lensfun_db"
 
 #: Modifier.initialize に渡す被写体距離[m]。風景主体なので実質無限遠。
 FOCUS_DISTANCE_METERS = 1000.0
+
+#: ビネット補正の候補画像で、いずれかのチャンネルが1.0を超える割合がこれを
+#: 上回ったら補正を捨てる。広角レンズの強いゲインを空や雲へ一括適用すると、
+#: その後のトーン処理で大面積の白飛びになるため。歪曲/TCAは継続する。
+VIGNETTING_HIGHLIGHT_FRACTION_LIMIT = 0.10
+
+#: このプロファイルの16〜18mmは、現行の Sony ARW/rawpy 経路では lensfun の
+#: 周辺減光ゲインが過大になりやすい。焦点距離が短い範囲だけ周辺減光を止め、
+#: 歪曲/TCAは残す。モデル名は loose match ではなく解決済みDBの厳密値で比較する。
+SONY_E_PZ_16_50_MODEL = "E PZ 16-50mm f/3.5-5.6 OSS"
+SONY_E_PZ_16_50_VIGNETTING_MIN_FOCAL = 18.0
 
 try:
     import lensfunpy
@@ -204,14 +215,53 @@ def _all_finite(array: np.ndarray) -> bool:
     return bool(np.isfinite(array.min()) and np.isfinite(array.max()))
 
 
+def _remap_interpolation(height: int, width: int) -> int:
+    """画像サイズに応じたレンズ補正の補間方式を返す。"""
+    # 24MP前後の本現像・品質プレビューではLINEARの軟化が目立つ。一方、半解像度の
+    # 高速プレビューや小さなテスト画像では、CUBICのオーバーシュートよりLINEARを優先する。
+    return cv2.INTER_CUBIC if max(height, width) >= 4000 else cv2.INTER_LINEAR
+
+
+def _vignetting_profile_guard(resolution: LensResolution) -> str | None:
+    """特定プロファイルでビネット補正を止める理由を返す。"""
+    lens_obj = resolution.lens
+    maker = str(getattr(lens_obj, "maker", "")).strip().casefold()
+    model = str(getattr(lens_obj, "model", "")).strip().casefold()
+    if (
+        maker == "sony"
+        and model == SONY_E_PZ_16_50_MODEL.casefold()
+        and resolution.focal_length is not None
+        and resolution.focal_length <= SONY_E_PZ_16_50_VIGNETTING_MIN_FOCAL
+    ):
+        return "profile_focal_guard"
+    return None
+
+
+class _GeometryCorrectionGuardError(Exception):
+    """歪曲/TCAの出力を破棄して部分適用を続けるための内部例外。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def apply_lens_correction(
     rgb: np.ndarray,
     resolution: LensResolution,
+    force_skip_vignetting: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """rawpy 出力 (H, W, 3) にビネット・歪曲補正を適用する（リサイズ前に呼ぶ）。
+    """rawpy 出力 (H, W, 3) にビネット・歪曲・TCA補正を適用する。
+
+    大きな出力では INTER_CUBIC で細線の解像感を保ち、半解像度以下の高速経路では
+    INTER_LINEAR で安全性を優先する。TCA較正があるレンズは歪曲と統合したRGB別マップで
+    一度だけ適用する。
 
     返り値は `(補正後配列, lens_correction dict)`。失敗時は入力配列をそのまま返す。
     寸法は EXIF ではなく **実際の配列** から取る（preview の half_size で半分になるため）。
+
+    `force_skip_vignetting=True` ではビネット補正だけを強制的にスキップする。
+    ブラケットのように、呼び出し元がグループ全体でビネット補正の適用可否を
+    揃えたい場合に使う。既定値では従来どおりフレーム単位の安全弁を適用する。
     """
     if not resolution.applicable:
         return rgb, resolution.unapplied()
@@ -219,6 +269,7 @@ def apply_lens_correction(
     try:
         height, width = rgb.shape[0], rgb.shape[1]
         applied_flags: list[str] = []
+        skipped_flags: list[str] = []
         source_dtype = rgb.dtype
         maximum = float(np.iinfo(source_dtype).max) if np.issubdtype(source_dtype, np.integer) else 1.0
 
@@ -243,27 +294,67 @@ def apply_lens_correction(
         # はみ出し、画素の約 2% が黒縁・リンギング）。autoscale は補正込みの座標マップに
         # 画面いっぱいへの拡大を織り込むので画像外参照が 0 になり、出力寸法は W×H のまま
         # 不変（自前のクロップ・リサイズは不要）。
+        has_distortion = bool(getattr(resolution.lens, "calib_distortion", None))
+        has_tca = bool(getattr(resolution.lens, "calib_tca", None))
+        vignetting_guard_reason = (
+            "forced_skip"
+            if force_skip_vignetting
+            else _vignetting_profile_guard(resolution)
+        )
+
+        # TCAがあるレンズだけTCAフラグを立てる。テスト用の軽量な偽lensfun実装など、
+        # 古いModifyFlagsにTCAが無い環境でも既存の歪曲補正は継続できるようにする。
+        modify_flags = 0
+        if vignetting_guard_reason is None:
+            modify_flags |= lensfunpy.ModifyFlags.VIGNETTING
+        if has_tca:
+            modify_flags |= getattr(lensfunpy.ModifyFlags, "TCA", 0)
+        if has_distortion:
+            modify_flags |= (
+                lensfunpy.ModifyFlags.DISTORTION | lensfunpy.ModifyFlags.SCALE
+            )
+
         modifier.initialize(
             resolution.focal_length,
             resolution.aperture,
             FOCUS_DISTANCE_METERS,
             pixel_format=working.dtype.type,
-            flags=lensfunpy.ModifyFlags.VIGNETTING
-            | lensfunpy.ModifyFlags.DISTORTION
-            | lensfunpy.ModifyFlags.SCALE,
+            flags=modify_flags,
         )
 
         # --- ビネット補正（float32 0..1 で in-place） ---
-        if modifier.apply_color_modification(working):
+        if vignetting_guard_reason is not None:
+            corrected = rgb
+            skipped_flags.append(f"vignetting_{vignetting_guard_reason}")
+        elif modifier.apply_color_modification(working):
             if _all_finite(working):
-                # 正しい pixel_format でのゲインは中心 1.00 →四隅 2.1〜2.4 に収まり、
-                # 発散しない（実測: ILCE-6400 + Sigma 30mm f/1.4 で最大 2.09、
-                # 同 + Sony E 55-210mm @55mm で最大 2.35）。それでも周辺のもともと
-                # 明るい画素は 1.0 を超える（0.9 × 2.09 = 1.88）ので、クリップは
-                # 「発散対策」ではなく **ハイライトの飽和処理** として残す。
-                np.clip(working, 0.0, 1.0, out=working)
-                corrected = (working * maximum).astype(source_dtype)
-                applied_flags.append("vignetting")
+                # 正しい pixel_format でのゲインは発散しないが、明るい空に強い
+                # ビネット補正を掛けると広い範囲が1.0を超えることがある。これは
+                # クリップして通すと、周辺減光の修正ではなく大面積の白飛びになる。
+                highlight_fraction = float(
+                    np.any(working > 1.0, axis=2).mean()
+                )
+                if highlight_fraction > VIGNETTING_HIGHLIGHT_FRACTION_LIMIT:
+                    LOGGER.warning(
+                        "ビネット補正でハイライトの余裕を失うため破棄します: %s (%.1f%%)",
+                        resolution.lens_name,
+                        highlight_fraction * 100.0,
+                    )
+                    # working は in-place で変更済みだが rgb は元の配列のまま。
+                    # 元画像へ戻して、後段の歪曲/TCAだけは適用する。
+                    corrected = rgb
+                    skipped_flags.append("vignetting_highlight_headroom")
+                else:
+                    # float32経路では周辺の1.0超えを歪曲再標本化まで保持する。
+                    # 内部上限4.0は異常なDBゲインの安全弁で、最終表示用の0..1
+                    # クリップはengine側で行う。整数経路は従来どおり飽和させる。
+                    if np.issubdtype(source_dtype, np.integer):
+                        np.clip(working, 0.0, 1.0, out=working)
+                        corrected = (working * maximum).astype(source_dtype)
+                    else:
+                        np.clip(working, 0.0, 4.0, out=working)
+                        corrected = working
+                    applied_flags.append("vignetting")
             else:
                 # 安全網: np.clip は NaN を素通しする（np.clip(nan, 0, 1) は nan）ため、
                 # クリップでは壊れた出力を止められない。非有限値が出たらビネット補正の
@@ -272,10 +363,12 @@ def apply_lens_correction(
                     "ビネット補正が非有限値を生成したため破棄します: %s", resolution.lens_name
                 )
                 corrected = rgb
+                skipped_flags.append("vignetting_non_finite")
         else:
             corrected = rgb
+            skipped_flags.append("vignetting_color_modification_failed")
 
-        # --- 歪曲補正 ---
+        # --- 歪曲 / TCA補正 ---
         # 歪曲較正の無いレンズでは幾何マップを要求しない。SCALE（autoscale）は幾何補正が
         # ひとつも無くても恒等マップ（float32 丸め誤差 ~0.001px 付き）を返すため、そのまま
         # 呼ぶと "distortion" フラグが偽って付いて無意味な恒等 remap が走り、較正なしの
@@ -284,36 +377,87 @@ def apply_lens_correction(
         # getattr なのは、属性が無い/None の異常系でここが AttributeError になると
         # 外側の catch-all が成功済みのビネット補正まで道連れに破棄するため
         # （その場合は歪曲だけを黙って諦め、部分適用のまま返すのが正しい）。
-        if getattr(resolution.lens, "calib_distortion", None):
-            coordinates = modifier.apply_geometry_distortion()
-        else:
+        # 歪曲/TCAは、ビネット補正が成功した配列を退避してから適用する。マップの
+        # 形状不一致やremap後の非有限値は幾何補正だけを諦め、ビネットの部分成功を守る。
+        corrected_before_geometry = corrected
+        try:
+            tca_coordinates = False
             coordinates = None
-        if coordinates is not None:
-            # autoscale 済みでもマップ端は実質ソース境界上（最近傍 ~0.2px）に乗るため、
-            # 既定の BORDER_CONSTANT だと Lanczos カーネル（8x8 タップ）の足がフレーム外の
-            # 黒を跨ぎ、縁数 px に明縁/暗帯が残る（実測: 55-210mm @55mm で四隅ゲインが
-            # 真値 2.353 → 2.910 の +24% 明縁、Sigma 10-18mm @10.7mm で 0.952〜1.126 の
-            # 暗帯/明縁）。BORDER_REPLICATE で縁画素を複製すると両方消える
-            # （実測: 四隅 2.348 ≈ 真値、Sigma は全画素 1.000）。
-            corrected = cv2.remap(
-                corrected,
-                coordinates,
-                None,
-                cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REPLICATE,
+            if has_tca:
+                coordinates = (
+                    modifier.apply_subpixel_geometry_distortion()
+                    if has_distortion
+                    else modifier.apply_subpixel_distortion()
+                )
+                tca_coordinates = coordinates is not None
+            if coordinates is None and has_distortion:
+                coordinates = modifier.apply_geometry_distortion()
+            if coordinates is not None:
+                # autoscale 済みでもマップ端は実質ソース境界上に乗るため、画像外を黒で埋める
+                # BORDER_CONSTANTではなくBORDER_REPLICATEを使う。大きな本現像はCubic、
+                # 半解像度以下はLinearで再標本化し、TCAはRGB別の統合マップを一度だけ適用する。
+                coordinates = np.asarray(coordinates, dtype=np.float32)
+                interpolation = _remap_interpolation(height, width)
+                if tca_coordinates:
+                    if coordinates.shape != (height, width, 3, 2):
+                        raise _GeometryCorrectionGuardError("tca_map_unexpected_shape")
+                    remapped = np.empty_like(corrected)
+                    for channel in range(3):
+                        remapped[..., channel] = cv2.remap(
+                            corrected[..., channel],
+                            coordinates[..., channel, :],
+                            None,
+                            interpolation,
+                            borderMode=cv2.BORDER_REPLICATE,
+                        )
+                    if not _all_finite(remapped):
+                        raise _GeometryCorrectionGuardError("geometry_non_finite")
+                    corrected = remapped
+                    if has_distortion:
+                        applied_flags.append("distortion")
+                    applied_flags.append("tca")
+                else:
+                    corrected = cv2.remap(
+                        corrected,
+                        coordinates,
+                        None,
+                        interpolation,
+                        borderMode=cv2.BORDER_REPLICATE,
+                    )
+                    if not _all_finite(corrected):
+                        raise _GeometryCorrectionGuardError("geometry_non_finite")
+                    applied_flags.append("distortion")
+
+            if not _all_finite(corrected):
+                raise _GeometryCorrectionGuardError("geometry_non_finite")
+        except _GeometryCorrectionGuardError as error:
+            corrected = corrected_before_geometry
+            skipped_flags.append(error.reason)
+        except Exception as error:
+            # lensfun/OpenCVの想定外エラーでも、成功済みのビネット補正は保持して
+            # 歪曲/TCAだけをスキップする。理由は安定したフラグに正規化し、詳細はログへ残す。
+            corrected = corrected_before_geometry
+            skipped_flags.append("geometry_correction_failed")
+            LOGGER.warning(
+                "歪曲/TCA補正をスキップします (%s): %s",
+                type(error).__name__,
+                error,
             )
-            applied_flags.append("distortion")
 
         if not applied_flags:
-            return rgb, resolution.unapplied("lens_not_calibrated")
+            reason = skipped_flags[0] if skipped_flags else "lens_not_calibrated"
+            return rgb, resolution.unapplied(reason)
 
-        return corrected, {
+        correction = {
             "applied": True,
             "lens": resolution.lens_name,
             "flags": applied_flags,
             "focal_length": resolution.focal_length,
             "aperture": resolution.aperture,
         }
+        if skipped_flags:
+            correction["skipped"] = skipped_flags
+        return corrected, correction
     except Exception as error:
         LOGGER.warning("レンズ補正に失敗しました。補正なしで続行します: %s", error)
         return rgb, resolution.unapplied(f"error:{error}")

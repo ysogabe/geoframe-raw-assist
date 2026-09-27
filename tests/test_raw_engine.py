@@ -8,17 +8,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+import rawpy
 from PIL import Image
 
 from local_raw import engine
 from local_raw.engine import (
+    DEFAULT_MAX_EDGE,
     RawDevelopmentError,
+    _apply_shadow_lift_array,
+    _apply_tone_array,
     _params_hash,
     _resolve_save_kwargs,
     _save_developed_jpeg,
     _save_recipe,
     _shadow_lift_table,
     _temp_path,
+    _resize_array,
     develop_raw,
 )
 from local_raw.presets import (
@@ -255,6 +261,136 @@ class ShadowLiftTableTests(unittest.TestCase):
 
     def test_stronger_lift_brightens_more(self):
         self.assertGreater(_shadow_lift_table(100)[85], _shadow_lift_table(25)[85])
+
+
+class FloatPipelineTests(unittest.TestCase):
+    class FakeRaw:
+        camera_whitebalance = [2.0, 1.0, 1.5, 1.0]
+
+    def test_shadow_lift_keeps_fractional_values_before_jpeg_quantization(self):
+        source = np.array([[[0.1234, 0.2345, 0.3456]]], dtype=np.float32)
+        lifted = _apply_shadow_lift_array(source, 50)
+        self.assertEqual(lifted.dtype, np.float32)
+        self.assertTrue(np.all(lifted >= source))
+        self.assertTrue(np.all(lifted <= 1.0))
+        self.assertNotEqual(float(lifted[0, 0, 0]), round(float(lifted[0, 0, 0]) * 255) / 255)
+
+    def test_tone_zero_saturation_is_rec709_monochrome(self):
+        source = np.array([[[0.1, 0.4, 0.8]]], dtype=np.float32)
+        adjustments = resolve_adjustments(DEFAULT_PRESET, {"saturation": 0.0})
+        toned = _apply_tone_array(source, adjustments)
+        self.assertEqual(toned.dtype, np.float32)
+        self.assertAlmostEqual(float(toned[0, 0, 0]), float(toned[0, 0, 1]), places=6)
+        self.assertAlmostEqual(float(toned[0, 0, 1]), float(toned[0, 0, 2]), places=6)
+
+    def test_tone_sharpness_does_not_amplify_channel_differences(self):
+        """シャープネスは色差ではなく輝度差を強める。"""
+        source = np.zeros((9, 9, 3), dtype=np.float32)
+        source[:, :4] = [0.22, 0.34, 0.46]
+        source[:, 4:] = [0.58, 0.47, 0.36]
+        adjustments = resolve_adjustments(
+            DEFAULT_PRESET,
+            {
+                "brightness": 1.0,
+                "contrast": 1.0,
+                "saturation": 1.0,
+                "sharpness": 1.5,
+            },
+        )
+        toned = _apply_tone_array(source, adjustments)
+        # クリップしない値域なので、輝度差を全チャンネルへ同量加えた結果、各色差は
+        # シャープネスの前後で不変であるべき（RGB別unsharpならここが変わる）。
+        np.testing.assert_allclose(
+            toned[..., 0] - toned[..., 1], source[..., 0] - source[..., 1], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            toned[..., 1] - toned[..., 2], source[..., 1] - source[..., 2], atol=1e-6
+        )
+
+    def test_raw_postprocess_uses_single_exposure_stage_and_16bit(self):
+        adjustments = resolve_adjustments(DEFAULT_PRESET, {"exposure": 1.0, "highlight_recovery": 100})
+        params = engine._postprocess_params(self.FakeRaw(), adjustments, False)
+        self.assertEqual(params["output_bps"], 16)
+        self.assertEqual(params["exp_shift"], 1.0)
+        self.assertEqual(params["bright"], 2.0)
+        self.assertEqual(params["highlight_mode"], rawpy.HighlightMode.ReconstructDefault)
+        self.assertNotIn("exp_preserve_highlights", params)
+
+    def test_highlight_recovery_selects_discrete_rawpy_modes(self):
+        """highlight_recoveryはClip/Blend/ReconstructDefaultの3段階で選択する。"""
+        expected_modes = {
+            0.0: rawpy.HighlightMode.Clip,
+            50.0: rawpy.HighlightMode.Blend,
+            75.0: rawpy.HighlightMode.ReconstructDefault,
+            90.0: rawpy.HighlightMode.ReconstructDefault,
+        }
+        for recovery, expected in expected_modes.items():
+            with self.subTest(highlight_recovery=recovery):
+                adjustments = resolve_adjustments(
+                    DEFAULT_PRESET, {"highlight_recovery": recovery}
+                )
+                params = engine._postprocess_params(self.FakeRaw(), adjustments, False)
+                self.assertEqual(params["highlight_mode"], expected)
+                self.assertNotIn("exp_preserve_highlights", params)
+
+    def test_preview_keeps_full_demosaic_resolution(self):
+        """プレビューでも先にhalf_sizeへ落とさず、最後に1600pxへ縮小する。"""
+        adjustments = resolve_adjustments(DEFAULT_PRESET)
+        params = engine._postprocess_params(self.FakeRaw(), adjustments, True)
+        self.assertFalse(params["half_size"])
+
+    def test_minor_resize_crops_instead_of_averaging(self):
+        source = np.arange(100 * 102 * 3, dtype=np.float32).reshape(100, 102, 3)
+        result = _resize_array(source, 100)
+        self.assertEqual(result.shape, (98, 100, 3))
+        np.testing.assert_array_equal(result, source[1:99, 1:101])
+
+    def test_preview_and_full_resize_share_the_same_source_frame(self):
+        """6024→6000の微小クロップをプレビューでも先に共有する。"""
+        # height は 400 まで縮小する（width=6024 が current_max を決めるので
+        # MIN_MAX_EDGE=1200 を下回らず、_resize_array の小配列分岐に入らない）。
+        # 検証するのは width 方向の先行クロップ（6024→6000, left=12）の共有なので、
+        # 検証内容は 4000 の頃と同一のまま配列確保だけを軽量化している。
+        height, width = 400, 6024
+        source = np.empty((height, width, 3), dtype=np.float32)
+        source[..., 0] = np.arange(width, dtype=np.float32)[None, :]
+        source[..., 1] = np.arange(height, dtype=np.float32)[:, None]
+        source[..., 2] = 1.0
+
+        full = _resize_array(source, 6000)
+        preview = _resize_array(source, 1600)
+
+        self.assertEqual(full.shape, (398, 6000, 3))
+        self.assertEqual(float(full[0, 0, 0]), 12.0)
+        self.assertEqual(float(full[-1, -1, 0]), 6011.0)
+
+        # プレビューを元画像から直接縮小した結果ではなく、同じ先行クロップ済み
+        # フレームを縮小した結果と一致することを確認する。
+        expected_preview = _resize_array(full, 1600)
+        np.testing.assert_allclose(preview, expected_preview, rtol=0.0, atol=1e-6)
+
+    def test_resize_boundary_preserves_input_only_for_requested_max_edge(self):
+        """6000基準の先行クロップがmax_edge=6048へ漏れない。"""
+        for source_edge in (6000, 6001, 6024, 6048):
+            source = np.empty((1, source_edge, 3), dtype=np.float32)
+            source[..., 0] = np.arange(source_edge, dtype=np.float32)
+            source[..., 1:] = 0.0
+
+            for max_edge in (6000, 6048):
+                with self.subTest(source_edge=source_edge, max_edge=max_edge):
+                    result = _resize_array(source, max_edge)
+                    should_crop = (
+                        max_edge <= DEFAULT_MAX_EDGE and source_edge > max_edge
+                    )
+                    if should_crop:
+                        crop_left = (source_edge - max_edge) // 2
+                        self.assertEqual(result.shape, (1, max_edge, 3))
+                        self.assertIsNot(result, source)
+                        self.assertEqual(float(result[0, 0, 0]), crop_left)
+                        self.assertEqual(float(result[0, -1, 0]), crop_left + max_edge - 1)
+                    else:
+                        self.assertIs(result, source)
+                        self.assertEqual(result.shape, source.shape)
 
 
 class TempPathTests(unittest.TestCase):

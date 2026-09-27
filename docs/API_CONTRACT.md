@@ -159,13 +159,15 @@ DevelopedResult = {
   params_hash:string,
   adjustments:Adjustments,  // 解決後の全量（Partial ではない）
   width, height, elapsed_seconds, cached:boolean, preview:boolean,
-  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  lens_correction:{applied:boolean, reason?:string, lens?:string,
+                    lens_model?:string, flags?:string[], skipped?:string[],
+                    focal_length?:number, aperture?:number},
   exif_inherited:boolean,
   output_url:string
 }
 ```
 
-- `preview:true` → rawpy `half_size=True` + `max_edge=1600`、出力先 `outputs/preview/`（2〜5秒）。
+- `preview:true` → rawpy `half_size=False`（プレビュー / 本現像とも full-size デモザイクを共有し、画角を一致させる） + `max_edge=1600`、出力先 `outputs/preview/`（2〜5秒）。
 - 本現像は `outputs/developed/`（10〜20秒）。
 - `max_edge` の許容範囲は **1200〜6048**（範囲外は 400 `"最大辺は1200〜6048pxで指定してください。"`）。
 - **`output_url` にはキャッシュバスター `?v=<st_mtime_ns>` が付く**（現行実装の挙動を維持）。
@@ -204,17 +206,26 @@ MergedResult = {
   adjustments:Adjustments,  // 解決後の全量（Partial ではない）
   width, height, elapsed_seconds, cached:boolean, preview:boolean,
   aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
-  lens_correction:{applied:boolean, reason?:string, lens?:string},
+  lens_correction:{applied:boolean, reason?:string, lens?:string,
+                    lens_model?:string, flags?:string[], skipped?:string[],
+                    focal_length?:number, aperture?:number},
   exif_inherited:boolean,
   output_url:string         // 本合成 /merged/<file>?v=<st_mtime_ns>
                             // プレビュー /merged-preview/<file>?v=<st_mtime_ns>
 }
 ```
 
+`MergedResult.lens_correction` はフレーム別の補正結果を要約した値である。`applied` は全フレームが
+`true` の場合だけ `true`、全フレームが `false` の場合だけ `false` になり、混在時は
+`{applied:false, reason:"inconsistent_across_frames"}` になる。`flags` / `skipped` /
+`focal_length` / `aperture` は、全フレームにキーが存在して値も一致する場合だけ共有フィールドとして
+埋まり、キー欠落または不一致があればそのキーは省略される。全不適用時の `reason` は先頭フレームの
+値（無ければ `unknown`）を使い、`lens_model` は先頭フレームに値がある場合に記録する。
+
 露出を変えて撮ったブラケット（解析の `exposure_bracket`）を **Exposure Fusion（Mertens）**
 で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。
 
-- `preview:true` → rawpy `half_size=True` + `max_edge=1600`、出力先 `outputs/merged_preview/`。
+- `preview:true` → rawpy `half_size=False`（プレビュー / 本合成とも full-size デモザイクを共有し、画角を一致させる） + `max_edge=1600`、出力先 `outputs/merged_preview/`。
   本合成は `outputs/merged/`（2026-08-20b 追補）。**プレビューと本合成はディレクトリで分ける**:
   `params_hash` が違うのでファイル名は衝突しないが、同居しているとサーバ側で「原寸か
   プレビューか」を判定できず、`POST /api/export` の `variant:"merged"` に長辺1600pxの合成を
@@ -231,18 +242,33 @@ MergedResult = {
 - `capture_ids` は現像元フォルダ直下に限定し（`resolve()` 後の親一致）、重複は 400。
   戻り値・ファイル名・EXIF 継承元・位置合わせの基準は**昇順に正規化した順**に揃える。
 - 処理順序（固定）: rawpy(**`no_auto_bright=True`**) → lensfun補正 → AlignMTB →
-  MergeMertens → クリップ → resize → shadow_lift LUT → Brightness → Contrast →
+  MergeMertens → クリップ → resize → shadow_lift (float32) → Brightness → Contrast →
   Color → Sharpness → save(exif, icc)
 - **`no_auto_bright=True` が要**。`develop_raw` 側の自動明るさ補正はフレームごとに露出を
   正規化するため、そのまま流用すると**ブラケットの露出差が消えて合成が無意味になる**
   （実測: 同ブラケット5枚を `develop_raw` すると平均輝度が 46.7〜49.4 に揃ってしまう）。
 - `Adjustments` のうち **`exposure` と `highlight_recovery` は使わない**（どちらも rawpy 段で
-  フレームごとの露出を動かすパラメータであり、合成の前提を壊すため）。`wb_temp` /
-  `noise_reduction` は全フレームに同一に効くので反映する。トーン調整は**合成結果に対して
-  1回だけ**適用する。
+  フレームごとの露出・ハイライト処理を動かすパラメータであり、合成の前提を壊すため）。特に
+  Mertens Exposure Fusion は複数フレームの露出差そのものを情報として使うため、rawpy 段の
+  ハイライト復元モードを個々のフレームに適用すると復元の効き方が揃わず、フュージョンの前提が
+  崩れる。`highlight_recovery` は no-op とし、複数露出からハイライト情報を統合する Mertens
+  自体の処理に任せる。`wb_temp` / `noise_reduction` は全フレームに同一に効くので反映する。
+  トーン調整は**合成結果に対して1回だけ**適用する。
 - EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
 - `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
   ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
+- 全フレームで lensfun の解決自体が成功していても、焦点距離または絞りが一致しない場合は、
+  幾何ワープを揃えられないため全フレーム無補正へフォールバックする。この場合の reason は
+  `lens_params_inconsistent_across_frames` であり、一部フレームのレンズ解決失敗を表す
+  `inconsistent_across_frames` とは別物である（Sony E PZ 16-50mm のパワーズーム等での
+  ズーム位置の微小なずれを検出するため）。
+- 事前の焦点距離・絞り一致検証を通過しても、実行時に一部フレームだけ歪曲/TCA（幾何補正）
+  が失敗することがある（`tca_map_unexpected_shape` / `geometry_non_finite` /
+  `geometry_correction_failed`）。この場合 `apply_lens_correction` は成功済みのビネット
+  補正だけを保持した部分適用状態（`applied:true`）を返すため、ビネット用のグループ判定
+  （`skipped` の `vignetting_*` 系）では検出できない。歪曲補正は放射状のワープで位置合わせ
+  では混在を除去できないため、これを検出したら全フレーム無補正へフォールバックし、reason
+  は `geometry_inconsistent_across_frames` になる。
 
 #### キャッシュキー
 
@@ -373,11 +399,11 @@ Drive 上のファイル名（**プレフィックス込み**）が既に存在�
 
 ```
 Adjustments = {
-  exposure: number,           // EV -2.0..+2.0 → rawpy exp_shift = clamp(2**ev, 0.25, 8)
+  exposure: number,           // EV -2.0..+2.0 → rawpy bright = 2**ev（exp_shift は1.0）
   wb_temp: number,            // -100..100。camera_whitebalance の R/B ゲインをスケールし user_wb へ
-  shadow_lift: number,        // 0..100。256エントリLUT（下半分中心の持ち上げ）
-  highlight_recovery: number, // 0..100 → exp_preserve_highlights 0.4..1.0、>=75 で HighlightMode.Reconstruct
-  brightness: number,         // 0.7..1.4  (ImageEnhance.Brightness)
+  shadow_lift: number,        // 0..100。8bit LUTと同じ式をfloat32 (0..1)へ連続適用（JPEG化前）
+  highlight_recovery: number, // 0..100 → Clip / Blend / ReconstructDefault の3段階
+  brightness: number,         // 0.7..1.4  (float32 RGB配列を倍率適用)
   contrast: number,           // 0.8..1.4
   saturation: number,         // 0.0..1.5  (0 = モノクロ)
   sharpness: number,          // 0.8..1.6
@@ -390,13 +416,37 @@ Adjustments = {
 
 ### 実装マッピング（プラン §f 後半）
 
-- `exposure` → `exp_shift = clamp(2**ev, 0.25, 8)`
+- `exposure` → `exp_shift = 1.0`、`bright = 2**ev`（自動明るさ補正との二重適用を避ける）
 - `wb_temp` → `raw.camera_whitebalance` を基準に R×(1+0.003·t)、B×(1−0.003·t) で `user_wb`
   （t=0 のときは従来どおり `use_camera_wb=True`）
-- `highlight_recovery` → `exp_preserve_highlights = 0.4 + 0.006·hr`、hr≥75 で `HighlightMode.Reconstruct`
-- `shadow_lift` → 256エントリLUT `y = x + (lift/100)·0.5·255·(x/255)·(1−x/255)²·4`（係数は Wave 3 で目視調整）
-- `saturation == 0` → `convert("L").convert("RGB")`
-- **処理順序（固定）**: rawpy → lensfun補正 → shadow_lift LUT → resize → Brightness → Contrast → Color → Sharpness → save(exif, icc)
+- `highlight_recovery` → rawpy の `HighlightMode` へ離散マッピングする。`hr<=0` は `Clip`、
+  `0<hr<75` は `Blend`、`hr>=75` は `ReconstructDefault`（75境界を含む）。
+- `shadow_lift` → 本番経路では256エントリLUTを使わず、8bit LUTと同じ式を float32 (0..1) へ
+  連続適用する（JPEG化前）。
+- `brightness` → float32 RGB配列へ `image *= brightness` の倍率適用（最終クリップは後段）。
+- `saturation == 0` → Rec.709 luma のRGB複製
+- **処理順序（固定）**: rawpy postprocess (16bit; `highlight_recovery` は上記 `HighlightMode` へ
+  マッピング) → 65535除算で float32化 → lensfun補正 → shadow_lift (float32) → resize →
+  Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
+
+- `highlight_recovery` の旧来の連続ソフトニーは、rawpy の16bit出力を65535で正規化した値が常に
+  `<=1.0` で実質何もしていなかったため廃止した。現在の離散3段階・75境界の方式は、閾値の前後で
+  rawpy の `HighlightMode` が切り替わる不連続を新たに生む（隣接するプリセットやスライダー値で
+  階調が急変しうる）。これはトレードオフを承知のうえで、低コストな方式としてユーザー判断により
+  意図的に採用されたものであり、見落としではない。
+- **入力範囲の不変条件**: `_apply_tone_array` は入力が `[0,1]` にプリクリップ済みであることを
+  前提とする。`develop_raw` 経路ではレンズ補正（最大4.0までのヘッドルームを許容しうる）の後に
+  `_apply_shadow_lift_array` が、`merge-bracket` 経路では同じくレンズ補正の後に `_merge_frames` が
+  クリップすることで担保する。この順序を将来入れ替えると静かに壊れる。
+- この安全性は `_resize_array` が再標本化を行う場合に常に `cv2.INTER_AREA`（非負重みの加重平均で
+  オーバーシュートしない補間方式）を使うことにも依存する（微小縮小の先行中央クロップは再標本化
+  なし）。補間方式は過去に何度か変更されており、同一入力の実測では `INTER_AREA` が
+  `min=0.0134/max=0.9723` に収まる一方、`INTER_CUBIC` は `min=-0.2312/max=1.2251` まで超過した。
+  将来リンギングを起こしうる補間へ変更すると、範囲外の値がクリップされないままトーン処理へ渡る
+  可能性がある。
+- `_resize_array` の DEFAULT_MAX_EDGE（6000px）基準の先行中央クロップは `max_edge <= 6000` の
+  場合にだけ行う。`max_edge` が DEFAULT_MAX_EDGE を超える場合は先行クロップを行わない。この
+  判定はプレビューと本現像で画角を一致させるための設計だが、上限超過の `max_edge` には適用されない。
 
 ---
 
@@ -464,9 +514,9 @@ GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
 ```
 outputs/
   developed/    本現像JPEG + レシピJSON          → GET /outputs/
-  preview/      プレビュー現像(half_size,1600px) → GET /preview/
+  preview/      プレビュー現像(full-sizeデモザイク,1600px) → GET /preview/
   merged/       ブラケット露出合成JPEG + レシピJSON → GET /merged/
-  merged_preview/ 合成プレビュー(half_size,1600px)  → GET /merged-preview/
+  merged_preview/ 合成プレビュー(full-sizeデモザイク,1600px)  → GET /merged-preview/
   thumbnails/   解析用サムネ .webp               → GET /thumbs/
   analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
   export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
@@ -483,22 +533,22 @@ outputs/
 
 ## 5. プリセット11種（凍結版・プラン §f + 2026-08-19 追補）
 
-全プリセットは `Adjustments` の全キーを持つ。rawpy 固定値は AHD / sRGB / 8bit。
+全プリセットは `Adjustments` の全キーを持つ。rawpy 固定値は AHD / sRGB / 16bit（最終JPEGは8bit）。
 数値は初期案であり、**Wave 3 で実画像を見ながら微調整してよい**（キー構成と name は凍結）。
 
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `neutral_recovery` | 階調回復 | 0.0 | 0 | 15 | 60 | 1.0 | 1.03 | 1.02 | 1.04 | light |
-| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 55 | 1.0 | 1.10 | 1.08 | 1.08 | light |
-| `nightscape` | 夜景ノイズ低減 | +0.2 | -5 | 25 | 50 | 1.05 | 1.07 | 1.04 | 1.03 | full |
-| `sunset_glow` | 夕景・マジックアワー | -0.1 | +25 | 15 | 80 | 1.0 | 1.08 | 1.12 | 1.05 | light |
-| `indoor_warm` | 室内・料理 | +0.3 | +10 | 30 | 45 | 1.05 | 1.02 | 1.05 | 1.04 | light |
-| `portrait_soft` | 人物・柔らか | +0.1 | +5 | 20 | 55 | 1.02 | 0.96 | 1.03 | 0.95 | light |
-| `monochrome_street` | モノクロ | 0.0 | 0 | 10 | 60 | 1.0 | 1.15 | 0.0 | 1.10 | light |
-| `highlight_rescue` | 白飛び救済 | -0.5 | 0 | 40 | 100 | 1.05 | 1.0 | 1.0 | 1.02 | light |
-| `shadow_rescue` | 黒つぶれ救済 | +0.3 | 0 | 80 | 65 | 1.05 | 0.98 | 1.06 | 1.02 | full |
-| `backlit_rescue` | 逆光 | +0.35 | +5 | 80 | 90 | 1.04 | 0.96 | 1.08 | 1.05 | light |
-| `vivid_travel` | ビビッド | 0.0 | +5 | 10 | 55 | 1.0 | 1.12 | 1.18 | 1.10 | light |
+| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 55 | 1.0 | 1.10 | 1.08 | 1.15 | light |
+| `nightscape` | 夜景ノイズ低減 | 0.0 | -3 | 15 | 55 | 1.0 | 1.04 | 1.0 | 1.02 | full |
+| `sunset_glow` | 夕景・マジックアワー | -0.1 | 12 | 8 | 70 | 1.0 | 1.05 | 1.07 | 1.03 | light |
+| `indoor_warm` | 室内・料理 | 0.1 | 5 | 18 | 55 | 1.0 | 1.02 | 1.03 | 1.02 | light |
+| `portrait_soft` | 人物・柔らか | 0.0 | 3 | 12 | 60 | 1.0 | 0.98 | 1.0 | 0.96 | light |
+| `monochrome_street` | モノクロ | 0.0 | 0 | 10 | 60 | 1.0 | 1.08 | 0.0 | 1.04 | light |
+| `highlight_rescue` | 白飛び救済 | -0.3 | 0 | 15 | 90 | 1.0 | 1.0 | 1.0 | 1.02 | light |
+| `shadow_rescue` | 黒つぶれ救済 | 0.0 | 0 | 45 | 65 | 1.0 | 1.0 | 1.0 | 1.01 | full |
+| `backlit_rescue` | 逆光 | 0.0 | 0 | 50 | 80 | 1.0 | 1.0 | 1.02 | 1.02 | light |
+| `vivid_travel` | ビビッド | 0.0 | 0 | 10 | 55 | 1.0 | 1.07 | 1.10 | 1.05 | light |
 
 > **追補 2026-08-19（プリセット2種追加・ユーザー承認済み）**
 > 解析は「暗部の黒つぶれ」「白飛び」を推薦理由として出すのに、救済プリセットは
@@ -514,7 +564,8 @@ outputs/
 
 > **Wave 0 時点の実装は旧3種**（`neutral_recovery` / `landscape_clear` / `nightscape`、旧キー体系
 > `exp_shift` / `auto_bright_thr` / `contrast` / `color` / `sharpness`）が `local_raw/presets.py` に
-> 値を変えずに移設された状態。9種化と `Adjustments` キー体系への移行は **Wave 1-A** の担当。
+> 値を変えずに移設された状態。9種化と `Adjustments` キー体系への移行は **Wave 1-A** の担当
+> （その後 2026-08-19 追補でさらに2種追加され、現在は §5 のとおり11種）。
 
 ---
 
@@ -544,7 +595,19 @@ outputs/
    `find_lenses(camera, maker=None, lens=<EXIF値>)` と、`maker=None` で呼ぶこと。
 4. `db_version` は `lensfunpy.lensfun_version` タプルを整形した文字列。DBスナップショット固有の版番号は存在しない。
 5. lensfun が使えない／レンズが見つからない場合も **現像は必ず成功させる**。
-   `lens_correction` に `{applied:false, reason:"lens_not_in_db"|"camera_not_found"|"lensfunpy_unavailable"|"error:<msg>"}` を記録する。
+   `lens_correction` に `{applied:false, reason:...}` を記録する。lens.py の事前解決で現れる
+   reason は `lens_not_in_db` / `camera_not_found` / `lensfunpy_unavailable` /
+   `error:opencv_unavailable` / `error:focal_or_aperture_missing` / `error:<msg>`。
+   `LensResolution.unapplied()` のフォールバックは `unknown`、補正フラグが一つも立たず
+   較正自体が無い場合は `lens_not_calibrated` である。補正フラグが一つも立たないまま
+   skipped 理由がある場合は、skipped の先頭値が reason に昇格し、`skipped[]` 自体は返さない。
+   適用時は `flags` に `vignetting` / `distortion` / `tca` の実適用分を記録する。部分適用時の
+   `skipped[]` に現れうる値は `vignetting_forced_skip` / `vignetting_profile_focal_guard` /
+   `vignetting_highlight_headroom` / `vignetting_non_finite` /
+   `vignetting_color_modification_failed` / `tca_map_unexpected_shape` /
+   `geometry_non_finite` / `geometry_correction_failed` である。幾何補正は、配列の長辺
+   `max(height,width)` が **4000px以上なら `INTER_CUBIC`、未満なら `INTER_LINEAR`** とし、
+   TCA較正がある場合はRGB別マップで歪曲補正と一度に適用する。
 
 ### EXIF 継承（契約に影響する確定事項）
 
@@ -582,7 +645,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 
 ### `local_raw/presets.py`（所有: Wave 1-A）
 
-- `PRESETS: dict[str, dict]` — key = preset name（9種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
+- `PRESETS: dict[str, dict]` — key = preset name（§5のとおり11種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
 - `preset_infos() -> list[dict]` — 契約 `PresetInfo[]` そのもの（`/api/health` 用。Wave 1-B はこれを呼ぶだけ）
 - `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
 - `DEFAULT_PRESET = "neutral_recovery"`
@@ -648,8 +711,8 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   サーバ側で原寸とプレビューを区別できず、`POST /api/export` にプレビューをマスターとして
   書き出せてしまう
 - 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
-  `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。LUT とトーンは
-  `engine._shadow_lift_table()` / `engine._apply_tone()` を再利用する
+  `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。`shadow_lift` とトーンは
+  `engine._apply_shadow_lift_array()` / `engine._apply_tone_array()` を再利用する。RAWは16bitで受け、合成結果の8bit化は最後に行う
 - `cv2.createAlignMTB().process(src, dst)` は **src と同じリストを渡して in-place で受ける**。
   空リストは何も書かれず、事前確保したリストは**1枚が全面0になる**（実測 OpenCV 5.0.0）
 
