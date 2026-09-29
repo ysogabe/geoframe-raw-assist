@@ -366,7 +366,7 @@ DevelopmentCandidatesResponse = {
            decode_edge:number, decodes:number },
   star_scene: { is_star_scene:boolean, star_count:number,
                 dark_background_ratio:number, bright_point_ratio:number,
-                star_point_density:number, exif_night:boolean,
+                star_point_density:number|null, exif_night:boolean,
                 exif_state:"night"|"daylight"|"unknown", star_halo:number,
                 star_color_saturation:number },
   candidates: DevelopmentCandidate[],
@@ -378,6 +378,8 @@ DevelopmentCandidate = {
   metrics:object, score:number, reasons:string[]
 }
 ```
+
+`star_scene.star_point_density`（点/画素）は点光源を実際に測ったときだけ数値になり、測っていないとき（EXIF が daylight、night で大面積光源が上限超え、EXIF 不明で暗背景などの前提条件に落ちた場合）は `null`。
 
 候補は調整値だけを返す。候補の選択は人が行い、選択しただけではRAW現像を実行しない。
 

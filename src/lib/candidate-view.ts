@@ -32,8 +32,8 @@ export function summarizeStarScene(scene: StarSceneInfo): StarSceneSummary {
     ? `${(Math.min(1, Math.max(0, scene.bright_point_ratio)) * 100).toFixed(2)}%`
     : "—";
   const count = Number.isFinite(scene.star_count) ? `${Math.round(scene.star_count)}個` : "—";
-  // 点/画素 → 「1万画素あたり n 点」。旧 API 応答（欠落）は非有限扱いで「—」。
-  const density = Number.isFinite(scene.star_point_density)
+  // 点/画素 → 「1万画素あたり n 点」。測っていない（null）・旧 API 応答（欠落）は「—」で「—」。
+  const density = scene.star_point_density != null && Number.isFinite(scene.star_point_density)
     ? `1万画素あたり ${(Math.max(0, scene.star_point_density) * 10000).toFixed(1)}点`
     : "—";
   const exif =

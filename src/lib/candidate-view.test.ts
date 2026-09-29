@@ -64,6 +64,9 @@ describe("summarizeStarScene", () => {
     expect(summarizeStarScene({ ...scene, star_point_density: NaN }).facts[1].value).toBe("—");
     expect(summarizeStarScene({ ...scene, star_point_density: 0.0008 }).facts[1].value).toBe("1万画素あたり 8.0点");
   });
+  it("点光源の密度が null（測っていない）なら「—」", () => {
+    expect(summarizeStarScene({ ...scene, star_point_density: null }).facts[1].value).toBe("—");
+  });
   it("古い API 応答（新フィールド欠落）でも壊れず「不明」「—」になる", () => {
     const old: Partial<StarSceneInfo> = { ...scene };
     delete old.star_point_density;

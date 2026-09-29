@@ -917,7 +917,20 @@ class StarSceneGateTests(unittest.TestCase):
         measured = self.gate(make_sky(400), HANDHELD_NIGHT_EXIF)
         self.assertEqual(measured["exif_state"], "daylight")
         self.assertFalse(measured["is_star_scene"])
-        self.assertEqual(measured["star_point_density"], 0.0)
+        # daylight は点光源を測らないので密度は 0.0 ではなく None（JSON null）。
+        self.assertIsNone(measured["star_point_density"])
+
+    def test_point_density_is_null_unless_it_was_measured(self):
+        # night で大面積光源が上限超え: 密度を測る前に落ちる。
+        big = make_sky(400, patch=(60, 80))
+        self.assertIsNone(self.gate(big, NIGHT_EXIF)["star_point_density"])
+        # unknown で暗背景の前提に落ちる（中間調の背景）。
+        self.assertIsNone(self.gate(make_sky(400, background=0.35), None)["star_point_density"])
+        # 判定なし（候補評価用）。
+        self.assertIsNone(candidates._star_measurements(make_sky(400), NIGHT_EXIF, evaluate_gate=False)["star_point_density"])
+        # 測ったときは数値。
+        self.assertIsInstance(self.gate(make_sky(400), NIGHT_EXIF)["star_point_density"], float)
+        self.assertIsInstance(self.gate(make_sky(400), None)["star_point_density"], float)
 
     def test_long_exposure_with_few_points_is_not_a_star_scene(self):
         for points in (0, 5, 60):
@@ -952,11 +965,11 @@ class StarSceneGateTests(unittest.TestCase):
             self.assertEqual(self.gate(make_sky(40), garbage)["exif_state"], "unknown")
 
     def test_exposure_time_boundary(self):
+        # しきい値そのもの（2 秒）をリテラルで固定する。
         base = {"f_number": 1.4, "iso": 6400}
-        at_limit = self.gate(make_sky(400), {**base, "exposure_time": candidates.STAR_MIN_EXPOSURE_SEC})
-        below = self.gate(make_sky(400), {**base, "exposure_time": candidates.STAR_MIN_EXPOSURE_SEC - 0.01})
-        self.assertTrue(at_limit["is_star_scene"])
-        self.assertFalse(below["is_star_scene"])
+        self.assertTrue(self.gate(make_sky(400), {**base, "exposure_time": 2.0})["is_star_scene"])
+        self.assertFalse(self.gate(make_sky(400), {**base, "exposure_time": 1.99})["is_star_scene"])
+        self.assertEqual(self.gate(make_sky(400), {**base, "exposure_time": 1.99})["exif_state"], "daylight")
 
     def test_ev100_boundary(self):
         # EV100 = log2(N²/t) − log2(ISO/100)。N=4, t=4s なら ISO1600 でちょうど −2.0。
@@ -967,10 +980,66 @@ class StarSceneGateTests(unittest.TestCase):
         self.assertFalse(self.gate(make_sky(400), brighter)["is_star_scene"])
 
     def test_point_density_boundary(self):
-        area = 320 * 480
-        minimum = int(np.ceil(candidates.STAR_MIN_POINT_DENSITY * area))
-        self.assertTrue(self.gate(make_sky(minimum + 5), NIGHT_EXIF)["is_star_scene"])
-        self.assertFalse(self.gate(make_sky(minimum - 5), NIGHT_EXIF)["is_star_scene"])
+        # 320x480=153600 画素。0.0008 は 122.88 点: 123 点で満たし 122 点で満たさない（リテラルで固定）。
+        at_limit = self.gate(make_sky(123), NIGHT_EXIF)
+        self.assertEqual(at_limit["star_count"], 123)
+        self.assertAlmostEqual(at_limit["star_point_density"], 123 / 153600, places=6)
+        self.assertTrue(at_limit["is_star_scene"])
+        self.assertFalse(self.gate(make_sky(122), NIGHT_EXIF)["is_star_scene"])
+
+    def test_unknown_is_stricter_than_night_on_point_density(self):
+        # 200 点 = 密度 0.0013（0.0008 以上 0.002 未満）: night なら星空、unknown なら星空ではない。
+        image = make_sky(200)
+        self.assertTrue(self.gate(image, NIGHT_EXIF)["is_star_scene"])
+        self.assertFalse(self.gate(image, None)["is_star_scene"])
+        self.assertFalse(self.gate(image, {"exposure_time": 20.0})["is_star_scene"])
+        # 密度 0.002 以上（400 点 = 0.0026）なら unknown でも星空。
+        self.assertTrue(self.gate(make_sky(400), None)["is_star_scene"])
+
+    def test_exposure_without_ev100_is_unknown_not_night(self):
+        # 露光は 2 秒以上でも F値・ISO が無く EV100 を計算できない → night ではなく unknown。
+        measured = self.gate(make_sky(400), {"exposure_time": 20.0})
+        self.assertIsNone(engine.ev100({"exposure_time": 20.0}))
+        self.assertEqual(measured["exif_state"], "unknown")
+        self.assertFalse(measured["exif_night"])
+
+    def test_unknown_requires_a_dark_background_but_night_does_not(self):
+        # 暗い背景（輝度 < 0.20）の割合 0.72 の境界。上側の行を暗く、下側を中間調にする。
+        def split_sky(dark_share: float) -> np.ndarray:
+            image = make_sky(400)
+            rows = int(round(320 * dark_share))
+            image[rows:, :, :] = np.maximum(image[rows:, :, :], 0.5)
+            # 星（0.95）は残し、背景だけ 0.5 にする。
+            return image
+
+        above = split_sky(0.75)
+        below = split_sky(0.69)
+        self.assertGreater(self.gate(above, None)["dark_background_ratio"], 0.72)
+        self.assertLess(self.gate(below, None)["dark_background_ratio"], 0.72)
+        self.assertTrue(self.gate(above, None)["is_star_scene"])
+        self.assertFalse(self.gate(below, None)["is_star_scene"])
+        # night は背景の暗さを問わない。
+        self.assertTrue(self.gate(below, NIGHT_EXIF)["is_star_scene"])
+
+    def test_big_light_source_level_and_area_ratio(self):
+        def sky_with_patch(rows: int, level: float) -> np.ndarray:
+            image = make_sky(200)
+            image[100 : 100 + rows, 200:260] = level
+            return image
+
+        def big_ratio(image: np.ndarray) -> float:
+            return float(np.mean(image.mean(axis=2) >= 0.85))
+
+        small = sky_with_patch(45, 0.9)  # 0.9 の大光源 ≈ 1.9%
+        large = sky_with_patch(56, 0.9)  # ≈ 2.2%
+        dim = sky_with_patch(56, 0.8)  # 面積は同じでも輝度 0.8 は大光源に数えない
+        self.assertLess(big_ratio(small), 0.02)
+        self.assertGreater(big_ratio(large), 0.02)
+        self.assertEqual(big_ratio(dim), float(np.mean(dim.mean(axis=2) >= 0.85)))
+        self.assertLess(big_ratio(dim), 0.005)
+        self.assertTrue(self.gate(small, NIGHT_EXIF)["is_star_scene"])
+        self.assertFalse(self.gate(large, NIGHT_EXIF)["is_star_scene"])
+        self.assertTrue(self.gate(dim, NIGHT_EXIF)["is_star_scene"])
 
     def test_generate_offers_stars_only_when_exif_and_points_agree(self):
         star_scene = make_sky(400, background=0.35)
@@ -984,3 +1053,33 @@ class StarSceneGateTests(unittest.TestCase):
     def generate_with(self, scene: np.ndarray, exif: dict) -> dict:
         return CandidateOptimizerTests().generate(FakeDecoder(scene), exif=exif)
 
+
+
+class PointLightCountTests(unittest.TestCase):
+    """_point_light_count: 背景との局所差で小さな点だけを数える。"""
+
+    @staticmethod
+    def field(bump: float, *, size: int = 1, background: float = 0.3, count: int = 10) -> np.ndarray:
+        gray = np.full((320, 480), background, dtype=np.float32)
+        for index in range(count):
+            y, x = 20 + 25 * index, 40 + 30 * index
+            gray[y : y + size, x : x + size] += bump
+        return gray
+
+    def test_low_contrast_point_near_the_peak_threshold_is_counted(self):
+        # 1 画素の点は約 0.98 倍の差になる。最大差が 0.08 をわずかに超える点は数える。
+        self.assertEqual(candidates._point_light_count(self.field(0.09)), 10)
+        self.assertEqual(candidates._point_light_count(self.field(0.5)), 10)
+
+    def test_points_below_the_peak_threshold_are_not_counted(self):
+        # 最大差が 0.08 に届かない（0.04 以上の連結領域にはなる）点は数えない。
+        self.assertEqual(candidates._point_light_count(self.field(0.07)), 0)
+        self.assertEqual(candidates._point_light_count(self.field(0.03)), 0)
+
+    def test_large_blob_is_not_a_point(self):
+        # 面積上限（画素数 × 0.00011 ≈ 17 画素）を超える塊は、コントラストが高くても点ではない。
+        self.assertEqual(candidates._point_light_count(self.field(0.5, size=3)), 10)
+        self.assertEqual(candidates._point_light_count(self.field(0.5, size=12, count=5)), 0)
+
+    def test_flat_image_has_no_points(self):
+        self.assertEqual(candidates._point_light_count(np.full((64, 64), 0.5, dtype=np.float32)), 0)

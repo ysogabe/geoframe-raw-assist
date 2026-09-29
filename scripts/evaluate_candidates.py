@@ -438,6 +438,8 @@ def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "dark_background_ratio": star.get("dark_background_ratio"),
                 "bright_point_ratio": star.get("bright_point_ratio"),
                 "exif_night": star.get("exif_night"),
+                "exif_state": star.get("exif_state"),
+                "star_point_density": star.get("star_point_density"),
                 "has_stars_candidate": any(c["id"] == "stars" for c in record["candidates"]),
                 "stars_rejected": any(r["id"] == "stars" for r in record.get("rejected", [])),
             }
@@ -569,13 +571,16 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
         "",
         f"## star_scene 判定（true: {summary['star_scene_true']}/{summary['cases']}）",
         "",
-        "| ケース | is_star | star_count | dark_bg | bright_pt | exif_night | stars候補 | stars却下 |",
-        "|---|---|---:|---:|---:|---|---|---|",
+        "注: exif_night は exif_state == night のこと。point_density は測っていないとき（daylight 等）は - 表示。",
+        "",
+        "| ケース | is_star | star_count | dark_bg | bright_pt | exif_state | exif_night | point_density | stars候補 | stars却下 |",
+        "|---|---|---:|---:|---:|---|---|---:|---|---|",
     ]
     for row in summary["star_scene"]:
         lines.append(
             f"| {row['case']} | {row['is_star_scene']} | {row['star_count']} | {_fmt(row['dark_background_ratio'])} "
-            f"| {_fmt(row['bright_point_ratio'], 5)} | {row['exif_night']} | {row['has_stars_candidate']} | {row['stars_rejected']} |"
+            f"| {_fmt(row['bright_point_ratio'], 5)} | {row['exif_state']} | {row['exif_night']} "
+            f"| {_fmt(row['star_point_density'], 6)} | {row['has_stars_candidate']} | {row['stars_rejected']} |"
         )
     lines += ["", "## 所要時間（秒）", "", "| 項目 | n | 平均 | 中央値 | p90 | 最小 | 最大 |", "|---|---:|---:|---:|---:|---:|---:|"]
     for label, key in (
@@ -741,7 +746,7 @@ def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str
             # 候補生成と同じゲート: natural は star_scene 判定、それ以外は stars のみ True。
             gate = is_star if candidate["id"] == "natural" else candidate["id"] == "stars"
             candidate["raw_metrics"] = dc._image_metrics(natural, image, exif, gate, shadow_mask)
-            ungated = dc._star_measurements(image, exif)
+            ungated = dc._star_measurements(image, exif, evaluate_gate=False)
             candidate["raw_star_ungated"] = {
                 name: ungated.get(name)
                 for name in ("star_count", "star_halo", "star_color_saturation", "is_star_scene")

@@ -290,7 +290,7 @@ def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
 def ev100(exif: dict[str, Any] | None) -> float | None:
     """EXIF の F値・露光秒・ISO から EV100 = log2(N²/t) − log2(ISO/100) を返す純粋関数。
 
-    3値のどれかが無い・数値でない・有限でない・0以下のときは None。
+    3値のどれかが無い・数値でない・有限でない・0以下・計算が溢れるときは None。
     """
     if not exif:
         return None
@@ -302,7 +302,11 @@ def ev100(exif: dict[str, Any] | None) -> float | None:
         return None
     if not all(math.isfinite(value) and value > 0 for value in (f_number, exposure_time, iso)):
         return None
-    return math.log2(f_number**2 / exposure_time) - math.log2(iso / 100.0)
+    try:
+        return math.log2(f_number**2 / exposure_time) - math.log2(iso / 100.0)
+    except OverflowError:
+        # 極端な F値（例: 1e200）で f_number**2 が溢れる。判定不能として扱う。
+        return None
 
 
 def _bright_k_for_ev100(value: float | None) -> float | None:

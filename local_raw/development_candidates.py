@@ -418,7 +418,8 @@ def _star_measurements(
     point_count = len(points)
 
     exif_state = _exif_night_state(exif or {})
-    point_density = 0.0
+    # 点光源密度は実際に測った経路でだけ値を持つ（測っていなければ None）。
+    point_density: float | None = None
     is_star_scene = False
     if evaluate_gate and exif_state != "daylight":
         big_light_ratio = float(np.mean(gray >= STAR_BIG_LIGHT_LEVEL))
@@ -465,7 +466,7 @@ def _star_measurements(
     return {
         "is_star_scene": bool(is_star_scene),
         "star_count": int(point_count),
-        "star_point_density": round(point_density, 6),
+        "star_point_density": None if point_density is None else round(point_density, 6),
         "dark_background_ratio": round(dark_fraction, 6),
         "bright_point_ratio": round(bright_ratio, 6),
         "exif_night": exif_state == "night",
