@@ -24,6 +24,7 @@ from local_raw.exif import (
     TAG_SOFTWARE,
     build_inherited_exif,
     read_capture_exif,
+    read_capture_exif_from_bytes,
 )
 
 LENS_MODEL = "10-18mm F2.8 DC DN | Contemporary 023"
@@ -131,6 +132,17 @@ class ReadCaptureExifTests(unittest.TestCase):
             broken = Path(directory) / "broken.JPG"
             broken.write_bytes(b"not a jpeg")
             self.assertEqual(read_capture_exif(broken), {})
+
+
+class ReadCaptureExifFromBytesTests(unittest.TestCase):
+    def test_matches_file_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.JPG"
+            _write_source_jpeg(path)
+            self.assertEqual(read_capture_exif_from_bytes(path.read_bytes()), read_capture_exif(path))
+
+    def test_garbage_returns_empty(self):
+        self.assertEqual(read_capture_exif_from_bytes(b"not a jpeg"), {})
 
 
 if __name__ == "__main__":

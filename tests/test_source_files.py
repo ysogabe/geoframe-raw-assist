@@ -122,7 +122,9 @@ class ResolutionTest(unittest.TestCase):
                         with self.assertRaises(Exception) as raised:
                             develop_raw("DSC00001", "neutral_recovery", max_edge=1200)
                     self.assertNotIn("見つかりません", str(raised.exception))
-                    self.assertEqual([p.name for p in opened], [arw_name])
+                    # ペアJPGが無いので、暗いシーン判定のサムネイル取得（1回目）と
+                    # 本デコード（2回目）でそれぞれ同じ実ファイルを開く＝計2回。
+                    self.assertEqual([p.name for p in opened], [arw_name, arw_name])
 
     def test_engine_missing_arw_still_errors(self):
         with tempfile.TemporaryDirectory() as directory:

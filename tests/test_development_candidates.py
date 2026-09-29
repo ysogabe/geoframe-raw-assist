@@ -86,7 +86,7 @@ class FakeDecoder:
             image = image * 0.02
         return np.clip(image, 0.0, 1.0).astype(np.float32)
 
-    def factory(self, path: Path, base: dict):
+    def factory(self, path: Path, base: dict, exif: dict | None = None):
         self.base = base
 
         @contextmanager
@@ -533,6 +533,51 @@ class CandidateOptimizerTests(unittest.TestCase):
                         self.assertEqual(kwargs["fbdd_noise_reduction"], fbdd, (category, noise))
                         self.assertEqual(kwargs["median_filter_passes"], median, (category, noise))
                         self.assertIs(kwargs["half_size"], True)
+
+    def test_production_decoder_dark_scene_uses_fixed_gain(self):
+        import rawpy
+
+        raw = self.fake_raw()
+        base = resolve_adjustments("neutral_recovery")
+        dark = {"f_number": 2.8, "exposure_time": 15.0, "iso": 3200}
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(
+                Path("/nonexistent/DSC00001.ARW"), base, dark
+            ) as decode:
+                decode("blend", "off", 0.3)
+        kwargs = raw.postprocess.call_args.kwargs
+        self.assertIs(kwargs["half_size"], True)
+        self.assertIs(kwargs["no_auto_bright"], True)
+        self.assertNotIn("auto_bright_thr", kwargs)
+        self.assertAlmostEqual(kwargs["bright"], 5.0 * 2.0**0.3, places=9)
+
+    def test_production_decoder_bright_scene_keeps_auto_bright(self):
+        import rawpy
+
+        raw = self.fake_raw()
+        base = resolve_adjustments("neutral_recovery")
+        bright = {"f_number": 8.0, "exposure_time": 1 / 250, "iso": 100}
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(
+                Path("/nonexistent/DSC00001.ARW"), base, bright
+            ) as decode:
+                decode("blend", "off", 0.0)
+        self.assertIs(raw.postprocess.call_args.kwargs["no_auto_bright"], False)
+
+    def test_generate_passes_pair_jpg_exif_to_default_decoder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "DSC00001.ARW").write_bytes(b"")
+            (root / "DSC00001.JPG").write_bytes(b"")
+            exif = {"f_number": 2.8, "exposure_time": 15.0, "iso": 3200}
+            decoder = FakeDecoder(make_scene(stars=False))
+            with (
+                mock.patch.object(config, "source_root", return_value=root),
+                mock.patch.object(candidates, "read_capture_exif", return_value=exif),
+                mock.patch.object(candidates, "open_raw_half_decoder", side_effect=decoder.factory) as opener,
+            ):
+                candidates.generate_development_candidates("DSC00001", "neutral_recovery", seed=1, budget=32)
+        self.assertEqual(opener.call_args.kwargs, {"exif": exif})
 
     def test_production_decoder_closes_raw_on_success_and_on_errors(self):
         import rawpy

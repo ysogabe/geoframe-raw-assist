@@ -177,7 +177,22 @@ DevelopedResult = {
 #### キャッシュキー（既存バグの解消）
 
 `params_hash` = `sha1(canonical JSON of { 解決後 adjustments, preset名, max_edge,
-rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォルダの解決済み絶対パス** })[:10]`
+rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォルダの解決済み絶対パス**,
+暗いシーンの固定倍率（該当時 5.0、非該当 null） })[:10]`
+
+- **暗いシーンのデコード**（2026-09 追補, Issue #50）。EV100 = log2(N²/t) − log2(ISO/100)
+  （N=F値, t=露光秒）が **6.0 以下**のシーンは、LibRaw の auto_bright が暗い画面を過剰に持ち上げて
+  星空・夜景の空を灰白色に飛ばすため、`no_auto_bright=True` の**固定倍率**
+  （`bright = 5.0 × 2^exposure`、`exp_shift=1.0`）でデコードし、レンズ補正はビネットだけを強制スキップ
+  （歪曲・TCA は従来どおり。`lens_correction.skipped` に `vignetting_forced_skip`）する。
+  それ以外のシーンは従来どおり auto_bright 有効（`auto_bright_thr=0.01`、`bright=2^exposure`）で不変。
+  EXIF はペアJPGから読み、F値・露光秒・ISO のどれかが欠けるときは RAW 埋め込みサムネイル
+  （JPEG のとき）の EXIF から読む。それでも読めなければ暗いシーン扱いにしない。
+  判定結果はレシピの `dark_scene: { ev100, dark_scene, bright_k, source }`
+  （`source` は `pair_jpg` / `raw_thumbnail` / null）に記録する。
+  現像候補（§候補生成）の縮小デコード代理も同じ判定・同じデコード方式を使う。
+  ブラケット合成（`/api/merge-bracket`）は元から `no_auto_bright=True` の独自パラメータなので対象外。
+  `ENGINE_VERSION` 17 / `RECIPE_VERSION` 11（レシピに `dark_scene` を追加）で現像・合成の既存キャッシュは無効になる。
 
 - **現像元フォルダのパスを必ず含める**（2026-08-18 追補）。`capture_id` はカメラの連番なので
   カードが違えば別の写真に同じ ID が付く。含めないと、別フォルダの同名 ID を同じプリセットで
@@ -307,7 +322,8 @@ body { capture_id:string, preset:string, seed?:number, budget?:number }
   ペアJPGから読む（JPGが無ければ EXIF なしで続行）。パスは `source_root` 直下の
   `<capture_id>.ARW` に限定し、`resolve()` 後の親が一致しないもの（シンボリックリンク等）は 404。
 - デコードは `rawpy` の `half_size=True`。デコード時パラメータは engine の
-  `_postprocess_params` をそのまま使い（`half_size` だけ差し替え）、`float32 [0,1]` へ変換して
+  `_postprocess_params` をそのまま使い（`half_size` だけ差し替え。暗いシーンは本番と同じ
+  固定倍率デコード）、`float32 [0,1]` へ変換して
   長辺 1280px に縮めた配列を `(highlight カテゴリ, noise_reduction, exposure)` をキーに
   LRU キャッシュ（最大24枚）する。同一キーは再デコードしない。
 - 評価は engine の後段関数そのもの（`_apply_shadow_lift_array` → 長辺640pxへ `_resize_array` →
@@ -801,6 +817,7 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
   `_apply_tone_array(rgb, adjustments, *, iso: float | None = None)`。`iso=None`（不明）は
   コアリング閾値 0.5/255・gain 減衰なしの扱い。`development_candidates.render_proxy(decoded, adjustments, iso: float | None = None)` も同様。
   `ENGINE_VERSION = 16` / `RECIPE_VERSION = 10`（レシピに `"iso": number | null` を追加）。
+  （2026-09-29 追補、Issue #50）暗いシーン判定の追加で `ENGINE_VERSION = 17` / `RECIPE_VERSION = 11`（レシピに `"dark_scene"` を追加）。
 
 ### `local_raw/bracket.py`（2026-08-20 追補）
 

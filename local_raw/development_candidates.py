@@ -29,6 +29,7 @@ auto_bright 圧縮・sharpness の輝度限定などが全て食い違った）�
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
 import re
@@ -188,7 +189,11 @@ def _class_index(value: float) -> int:
 
 
 @contextmanager
-def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[DecodeFn]:
+def open_raw_half_decoder(
+    source_path: Path,
+    base: dict[str, Any],
+    exif: dict[str, Any] | None = None,
+) -> Iterator[DecodeFn]:
     """ARW を1回だけ開き、``half_size`` 縮小デコードを返す関数を渡す。
 
     デコード時パラメータは engine の `_postprocess_params` をそのまま使い、
@@ -196,6 +201,9 @@ def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[D
 
     渡す関数には属性 ``iso``（RAW の撮影 ISO。取れなければ None）を付ける。
     後段の撮影時シャープ（`render_proxy`）が本番と同じ ISO 依存になるようにするため。
+
+    暗いシーン（EV100 <= 6）は engine と同じ判定（``exif`` → RAW 埋め込みサムネイル）で
+    固定倍率デコードにする。代理画像はレンズ補正を省略しているのでビネットの扱いは無関係。
     """
 
     import rawpy
@@ -205,6 +213,7 @@ def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[D
     except (rawpy.LibRawError, OSError) as error:
         raise DevelopmentCandidateError(f"ARWを開けません: {error}") from error
     base_highlight = float(base["highlight_recovery"])
+    dark_bright_k = engine.detect_dark_scene(exif, raw=raw)["bright_k"]
 
     def decode(category: str, noise_reduction: str, exposure: float) -> np.ndarray:
         adjustments = {
@@ -213,7 +222,7 @@ def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[D
             "highlight_recovery": representative_highlight(category, base_highlight),
             "noise_reduction": noise_reduction,
         }
-        params = engine._postprocess_params(raw, adjustments, False)
+        params = engine._postprocess_params(raw, adjustments, False, dark_bright_k)
         params["half_size"] = True
         try:
             rgb = raw.postprocess(**params)
@@ -969,7 +978,7 @@ def generate_development_candidates(
     arw_path, jpg_path = _resolve_source_paths(capture_id)
     exif = read_capture_exif(jpg_path) if jpg_path is not None else {}
     base = resolve_adjustments(preset)
-    factory = decoder_factory or open_raw_half_decoder
+    factory = decoder_factory or functools.partial(open_raw_half_decoder, exif=exif)
 
     with factory(arw_path, dict(base)) as decode:
         cache = DecodeCache(decode)
