@@ -197,7 +197,7 @@ export type State = {
   developStartedAt: number;
   previewResults: Record<CaptureId, DevelopedResult>;
   fullResults: Record<CaptureId, DevelopedResult>;
-  /** JPG代理評価による候補。対象capture_idと世代を併記して古い結果を表示しない。 */
+  /** RAW縮小デコード代理評価による候補。対象capture_idと世代を併記して古い結果を表示しない。 */
   developmentCandidates: DevelopmentCandidatesResponse | null;
   developmentCandidatesCaptureId: CaptureId | null;
   developmentCandidatesBusy: boolean;
@@ -715,7 +715,7 @@ export function reducer(state: State, action: Action): State {
         developmentCandidatesCaptureId: action.captureId,
         developmentCandidatesError: "",
         developmentCandidatesGeneration: action.generation,
-        notice: `${action.captureId}.JPG を代理評価しています…`,
+        notice: `${action.captureId}.ARW を縮小デコードして評価しています…`,
         noticeTone: "info",
       };
 

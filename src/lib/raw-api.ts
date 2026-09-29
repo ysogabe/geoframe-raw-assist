@@ -140,7 +140,7 @@ export type DevelopmentCandidatesOptions = {
 };
 
 /**
- * 縮小JPEGを一度だけ評価して、RAWを粒子ごとに再デコードしない現像候補を作る。
+ * RAWの縮小デコード（キャッシュ付き）を代理に、engineの後段関数で評価して現像候補を作る。所要時間は1枚あたり数秒〜15秒程度。
  * 返った調整値は選択時にスライダーへ反映するだけで、現像は別操作で実行する。
  */
 export async function generateDevelopmentCandidates(

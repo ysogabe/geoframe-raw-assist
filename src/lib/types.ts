@@ -290,7 +290,7 @@ export type DevelopedResult = {
 };
 
 // ---------------------------------------------------------------------------
-// POST /api/development-candidates — JPG代理評価による現像候補
+// POST /api/development-candidates — RAW縮小デコード代理による現像候補
 // ---------------------------------------------------------------------------
 
 export type DevelopmentCandidateStyle = "natural" | "stars" | "foreground" | "low_noise" | "social";
@@ -306,7 +306,10 @@ export type DevelopmentCandidateMetrics = {
   halo: number;
   color_saturation_clip: number;
   tonal_range: number;
+  /** 基準（natural＝プリセット値のまま）の代理画像との平均絶対差。 */
   source_deviation: number;
+  /** 基準の暗部（輝度下位25%）に相当する画素の平均輝度。 */
+  shadow_mean: number;
   star_count: number;
   star_halo: number;
   star_color_saturation: number;
@@ -317,7 +320,7 @@ export type DevelopmentCandidateMetrics = {
   detail_halo: number;
   color_clip: number;
   tone_range: number;
-  jpeg_deviation: number;
+  baseline_deviation: number;
 };
 
 export type StarSceneInfo = {
@@ -358,10 +361,16 @@ export type DevelopmentCandidatesResponse = {
     max_edge: number;
     width: number;
     height: number;
-    source: "jpeg";
+    source: "raw_half";
+    /** キャッシュに保持したデコード結果の長辺。 */
+    decode_edge: number;
+    /** 縮小デコードを実行した回数。 */
+    decodes: number;
   };
   star_scene: StarSceneInfo;
   candidates: DevelopmentCandidate[];
+  /** 基準より白飛び・黒つぶれ等が悪化したため返さなかった候補と、その理由。 */
+  rejected: { id: DevelopmentCandidateStyle; reason: string }[];
 };
 
 // ---------------------------------------------------------------------------

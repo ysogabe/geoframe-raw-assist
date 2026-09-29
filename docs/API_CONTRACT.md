@@ -292,30 +292,55 @@ body { capture_id:string, preset:string, seed?:number, budget?:number }
 
 `capture_id` は `DSC` + 5桁数字、`preset` は `GET /api/health` の既存プリセット名である。
 `seed` は 0 以上の32bit整数（省略時は `capture_id:preset` から導出）、`budget` は 32〜512 の整数（省略時 48）に
-限定する。型違い、範囲外、未知キーは 400、選択中フォルダに元JPGが無い場合は 404、
+限定する。型違い、範囲外、未知キーは 400、選択中フォルダに元ARWが無い場合は 404、
 その他の予期しない失敗は 500（共通のエラー形式）とする。
 
-このエンドポイントは **ARWを粒子ごとに再デコードしない**。現像元フォルダのペアJPGを
-EXIF向きに補正して安全に長辺640pxへ縮小した代理画像を一度だけ読み、8個の数値調整
-（`Adjustments` の `noise_reduction` 以外）を決定的な多目的PSOで探索する。各評価は
-白飛び・黒つぶれ・平坦部ノイズ・細部/ハロー・色飽和・階調・元JPEGとの差分を使い、
-非劣解（Pareto front）を明示的に求める。極端な組合せはスライダー範囲内でも候補から
-除外する。`noise_reduction` はISO/平坦部ノイズと候補スタイルから安全側に決める。
+このエンドポイントは **カメラJPGではなく ARW の縮小デコード**を代理画像にする（旧版の
+「JPG＋独自トーン式」は本番現像を予測できなかったため作り直した）。
+
+- ARW が無ければ 404（ペアJPGだけでは生成しない）。EXIF（ISO・露光時間・撮影時刻）は
+  ペアJPGから読む（JPGが無ければ EXIF なしで続行）。パスは `source_root` 直下の
+  `<capture_id>.ARW` に限定し、`resolve()` 後の親が一致しないもの（シンボリックリンク等）は 404。
+- デコードは `rawpy` の `half_size=True`。デコード時パラメータは engine の
+  `_postprocess_params` をそのまま使い（`half_size` だけ差し替え）、`float32 [0,1]` へ変換して
+  長辺 1280px に縮めた配列を `(highlight カテゴリ, noise_reduction, exposure)` をキーに
+  LRU キャッシュ（最大24枚）する。同一キーは再デコードしない。
+- 評価は engine の後段関数そのもの（`_apply_shadow_lift_array` → 長辺640pxへ `_resize_array` →
+  `_apply_tone_array`）を適用する。`develop_raw` の後段と同じ順序で、独自のトーン式は持たない。
+  **レンズ補正（`apply_lens_correction`）は代理では省略**する（幾何補正が中心のため）。
+  full-size デモザイクではないので、ノイズ・細部の絶対値は本番と厳密には一致しない。
+- **`highlight_recovery` は連続値として探索しない**。rawpy のデコード時に効く3段階
+  （`<=0` Clip / `<75` Blend / `>=75` ReconstructDefault、engine と同じ境界）をカテゴリとして
+  扱い、各カテゴリの代表値（0 / 50 / 85。プリセット値が同カテゴリならプリセット値）を返す。
+- `exposure` は 0.5EV 格子へスナップしてデコード時の `bright` に渡し、返す値もスナップ後。
+  `wb_temp` は探索せずプリセット値のまま返す。`noise_reduction` はスタイルごとに決め、その値で
+  デコードしたキャッシュで評価する。探索するのは exposure / shadow_lift / brightness /
+  contrast / saturation / sharpness と highlight カテゴリで、決定的な多目的PSO（Pareto front）で行う。
+- `natural` は**プリセット値そのもの**（基準画像）で PSO 予算は使わず、他スタイルに配分する。
+  指標の「基準との差」（`source_deviation`、別名 `baseline_deviation`）は、この基準画像との
+  平均絶対差である。star 系指標は基準側も候補と同じ関数・同じ条件で計算する。
+- **安全策**: 基準より `highlight_clip` / `shadow_clip` が 0.10（絶対値）以上悪化する候補は
+  返さない。`low_noise` は基準より `noise_flat` が悪化したら、`foreground` は基準の暗部
+  （輝度下位25%）の平均輝度が 0.005 以上明るくならなければ返さない。返さなかった候補は
+  `rejected: [{id, reason}]` に理由付きで入る（`natural` は常に返す）。
+- 所要時間は1枚あたり概ね3〜16秒（デコード回数に依存。`proxy.decodes` に実回数）。
 
 星空ゲートはEXIF（ISO・露光時間・撮影時刻）を補助信号にし、暗い背景の小さな高輝度点が
 複数ある場合だけ `star_scene.is_star_scene=true` になる。星候補はこの場合だけ返し、
 通常写真へ星最適化を強制しない。返却順は `natural` を先頭に、`stars`、`foreground`、
-`low_noise`、`social` の順で最大5件（画像特性に合わないスタイルは省略）とする。
+`low_noise`、`social` の順で最大5件（画像特性に合わないスタイル・安全策で落ちたスタイルは省略）とする。
 
 ```
 DevelopmentCandidatesResponse = {
   capture_id, preset, seed, budget,
-  proxy: { max_edge:number, width:number, height:number, source:"jpeg" },
+  proxy: { max_edge:number, width:number, height:number, source:"raw_half",
+           decode_edge:number, decodes:number },
   star_scene: { is_star_scene:boolean, star_count:number,
                 dark_background_ratio:number, bright_point_ratio:number,
                 exif_night:boolean, star_halo:number,
                 star_color_saturation:number },
-  candidates: DevelopmentCandidate[]
+  candidates: DevelopmentCandidate[],
+  rejected: { id:"stars"|"foreground"|"low_noise"|"social", reason:string }[]
 }
 DevelopmentCandidate = {
   id:"natural"|"stars"|"foreground"|"low_noise"|"social",

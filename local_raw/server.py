@@ -373,10 +373,11 @@ def handle_merge_bracket(req: RawAssistHandler, parsed: ParseResult) -> None:
 
 
 def handle_development_candidates(req: RawAssistHandler, parsed: ParseResult) -> None:
-    """`POST /api/development-candidates` → JPG proxy candidates.
+    """`POST /api/development-candidates` → RAW half-decode proxy candidates.
 
     Candidate generation is intentionally separate from ``raw-develop``: the
-    optimizer reads one safe, reduced JPEG and never decodes the ARW for each
+    optimizer half-size decodes the ARW into a small cache keyed by highlight
+    category / noise reduction / exposure grid and never runs a full develop per
     particle.  Keep request validation strict here so values such as ``true``
     do not silently become a seed or budget of ``1``.
     """

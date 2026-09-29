@@ -25,7 +25,7 @@ function CandidateMetrics({ values }: { values: DevelopmentCandidateMetrics }) {
       <div><dt>平坦部ノイズ</dt><dd>{metric(values.noise_flat)}</dd></div>
       <div><dt>細部</dt><dd>{metric(values.detail)}</dd></div>
       <div><dt>ハロー</dt><dd>{metric(values.halo)}</dd></div>
-      <div><dt>元JPGとの差</dt><dd>{metric(values.source_deviation)}</dd></div>
+      <div><dt>基準との差</dt><dd>{metric(values.source_deviation)}</dd></div>
     </dl>
   );
 }
@@ -43,7 +43,7 @@ export function DevelopmentCandidates({
       <div className="development-candidates-head">
         <div>
           <strong id="development-candidates-title">現像候補自動生成</strong>
-          <p>縮小JPEGの代理評価。候補を選んでも現像は始まりません。</p>
+          <p>RAWの縮小デコードによる代理評価。候補を選んでも現像は始まりません。</p>
         </div>
         <button
           type="button"

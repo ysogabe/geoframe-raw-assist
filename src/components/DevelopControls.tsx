@@ -27,7 +27,7 @@ type DevelopControlsProps = {
   hasFull: boolean;
   /** ブラケット合成の実行中。重いRAWデコードを同時に走らせないため現像側も止める。 */
   mergeBusy: boolean;
-  /** JPG代理評価による候補生成の状態。候補選択は現像を開始しない。 */
+  /** RAW縮小デコード代理評価による候補生成の状態。候補選択は現像を開始しない。 */
   developmentCandidates: DevelopmentCandidate[];
   developmentCandidatesBusy: boolean;
   developmentCandidatesError: string;
