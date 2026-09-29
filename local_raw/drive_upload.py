@@ -5,12 +5,16 @@
 方針:
 
 - 送る側の対象は `outputs/export/<batch_name>/` の**直下にあるファイル**のみ
-  （`manifest.json` を含む。`.tmp` は書き込み途中なので除外、サブディレクトリは対象外）。
+  （画像のみ。`manifest.json` は送らない。`.tmp` は書き込み途中なので除外、
+  サブディレクトリは対象外）。消費側（GeoFrame 本体）の Drive インデックスは画像 MIME
+  しか拾わず JSON は読まない上、manifest はローカルの `source_root` や現像レシピ・EXIF を
+  含む内部情報なので Drive には置かない。出所はローカルの
+  `outputs/export/<batch_name>/manifest.json` で引ける。
 - 置き先は Drive の `GeoFrame` フォルダ**そのものの中**で、バッチごとのサブフォルダは
   **作らない**。消費側（GeoFrame 本体アプリ）の Drive インデックス処理が `GeoFrame`
   フォルダを**非再帰**で走査するため、サブフォルダへ入れると一切認識されない。
 - 平置きにするとバッチをまたいでファイル名が衝突しうる（カメラ命名の
-  `DSC04431.JPG` や、全バッチが持つ `manifest.json`）。そこで Drive 上の名前は
+  `DSC04431.JPG`）。そこで Drive 上の名前は
   `<batch_name>-<元のファイル名>`（例 `26_08_hiuchi-DSC04431.JPG`）にする。
 - **同名ファイルは既アップロード済みとみなしてスキップ**する。上書きも別名追加もしない。
   判定は Drive 上の名前、つまり**プレフィックス込み**で行う。部分失敗からの再実行が
@@ -49,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .export import export_dir_for
+from .export import MANIFEST_NAME, export_dir_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -588,14 +592,19 @@ def _file_size(path: Path) -> int:
 def _batch_files(export_dir: Path) -> list[Path]:
     """`export_dir` 直下のアップロード対象を名前順で返す。
 
-    `manifest.json` は**含む**（GeoFrame 側が出所を復元するのに要る）。書き込み途中の
-    `.tmp` は除外し、サブディレクトリは辿らない。
+    `manifest.json` は**含めない**。消費側は画像 MIME しか索引せず、manifest はローカルの
+    パス・現像レシピ・EXIF を含む内部情報で Drive に置く理由が無い（出所はローカルの
+    `outputs/export/<batch>/manifest.json` で引ける）。書き込み途中の `.tmp` も除外し、
+    サブディレクトリは辿らない。
     """
     resolved = export_dir.resolve()
     files = [
         path
         for path in resolved.iterdir()
-        if path.is_file() and not path.name.endswith(".tmp") and path.parent == resolved
+        if path.is_file()
+        and path.name != MANIFEST_NAME
+        and not path.name.endswith(".tmp")
+        and path.parent == resolved
     ]
     return sorted(files, key=lambda path: path.name)
 
