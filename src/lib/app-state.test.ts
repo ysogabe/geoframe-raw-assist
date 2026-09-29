@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   currentDevelopmentCandidates,
+  currentDevelopmentCandidatesResponse,
   initialState,
   reducer,
   type Action,
@@ -300,6 +301,41 @@ describe("currentDevelopmentCandidates", () => {
   it("候補の世代が現在のフォルダ世代と違えば空", () => {
     const state: State = { ...stateShowingCandidates(), sourceFolderGeneration: 1 };
     expect(currentDevelopmentCandidates(state, "A1")).toEqual([]);
+  });
+});
+
+describe("currentDevelopmentCandidatesResponse", () => {
+  const rejected = [{ id: "foreground", reason: "白飛びが基準より3.2pt増えるため除外" }];
+  const starScene = { is_star_scene: true, star_count: 12 };
+  function shownWithExtras(): State {
+    const shown = stateShowingCandidates();
+    return {
+      ...shown,
+      developmentCandidates: {
+        ...shown.developmentCandidates!,
+        rejected,
+        star_scene: starScene,
+      } as unknown as DevelopmentCandidatesResponse,
+    };
+  }
+
+  it("一致時は rejected / star_scene を含む応答を返す", () => {
+    const res = currentDevelopmentCandidatesResponse(shownWithExtras(), "A1");
+    expect(res?.rejected).toEqual(rejected);
+    expect(res?.star_scene).toEqual(starScene);
+    expect(res?.candidates).toHaveLength(2);
+  });
+
+  it("captureId が null なら null", () => {
+    expect(currentDevelopmentCandidatesResponse(shownWithExtras(), null)).toBeNull();
+  });
+
+  it("capture_id / preset / 世代の不一致で null", () => {
+    const s = shownWithExtras();
+    expect(currentDevelopmentCandidatesResponse(s, "A2")).toBeNull();
+    expect(currentDevelopmentCandidatesResponse({ ...s, presetName: "shadow_rescue" }, "A1")).toBeNull();
+    expect(currentDevelopmentCandidatesResponse({ ...s, developmentCandidatesCaptureId: "A2" }, "A1")).toBeNull();
+    expect(currentDevelopmentCandidatesResponse({ ...s, sourceFolderGeneration: 1 }, "A1")).toBeNull();
   });
 });
 
