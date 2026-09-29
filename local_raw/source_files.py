@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 
 KINDS = ("ARW", "JPG")
-_ENTRY_PATTERN = re.compile(r"^(DSC\d{5})\.(ARW|JPG)$", re.IGNORECASE)
+_ENTRY_PATTERN = re.compile(r"^(DSC\d{5})\.((?i:ARW|JPG))$")
 
 
 def _entries(root: Path) -> list[tuple[str, str, str]]:

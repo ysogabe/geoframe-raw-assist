@@ -38,6 +38,35 @@ class FindCaptureFileTest(unittest.TestCase):
             self.assertIsNone(source_files.find_capture_file(root, "DSC00001", "PNG"))
             self.assertIsNone(source_files.find_capture_file(root / "nope", "DSC00001", "ARW"))
 
+    def test_lowercase_stem_is_rejected_everywhere(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _touch(root, "dsc12345.jpg", "dsc12345.arw", "DSC12347.arw", "DSC12346.jpg")
+            self.assertEqual(sorted(source_files.list_capture_files(root, "JPG")), ["DSC12346"])
+            self.assertEqual(sorted(source_files.list_capture_files(root, "ARW")), ["DSC12347"])
+            self.assertEqual(
+                source_files.find_capture_file(root, "DSC12347", "ARW").name, "DSC12347.arw"
+            )
+            self.assertIsNone(source_files.find_capture_file(root, "DSC12345", "JPG"))
+            self.assertIsNone(source_files.find_capture_file(root, "dsc12345", "ARW"))
+            self.assertEqual(sorted(source_files.source_entry_names(root)), ["DSC12346.jpg", "DSC12347.arw"])
+
+    def test_lowercase_stem_only_yields_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _touch(root, "dsc12345.jpg", "dsc12345.arw")
+            self.assertEqual(source_files.list_capture_files(root, "JPG"), {})
+            self.assertEqual(source_files.list_capture_files(root, "ARW"), {})
+            self.assertEqual(source_files.source_entry_names(root), [])
+
+    def test_uppercase_stem_lowercase_extension_is_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _touch(root, "DSC12345.arw", "DSC12345.jpg")
+            self.assertEqual(list(source_files.list_capture_files(root, "ARW")), ["DSC12345"])
+            self.assertEqual(list(source_files.list_capture_files(root, "JPG")), ["DSC12345"])
+            self.assertEqual(source_files.source_entry_names(root), ["DSC12345.arw", "DSC12345.jpg"])
+
     def test_duplicate_case_variants_prefer_canonical_then_lexical(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
