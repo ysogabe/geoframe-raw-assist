@@ -32,14 +32,25 @@ export function summarizeStarScene(scene: StarSceneInfo): StarSceneSummary {
     ? `${(Math.min(1, Math.max(0, scene.bright_point_ratio)) * 100).toFixed(2)}%`
     : "—";
   const count = Number.isFinite(scene.star_count) ? `${Math.round(scene.star_count)}個` : "—";
+  // 点/画素 → 「1万画素あたり n 点」。旧 API 応答（欠落）は非有限扱いで「—」。
+  const density = Number.isFinite(scene.star_point_density)
+    ? `1万画素あたり ${(Math.max(0, scene.star_point_density) * 10000).toFixed(1)}点`
+    : "—";
+  const exif =
+    scene.exif_state === "night"
+      ? "長秒・暗い（星空向け）"
+      : scene.exif_state === "daylight"
+        ? "星空向けではない"
+        : "不明";
   return {
     isStarScene: scene.is_star_scene,
     verdict: scene.is_star_scene ? "星空として評価" : "星空ではないと判定",
     facts: [
+      { label: "撮影条件（EXIF）", value: exif },
+      { label: "点光源の密度", value: density },
       { label: "暗い背景の割合", value: dark },
       { label: "明るい部分の割合", value: bright },
       { label: "星の数", value: count },
-      { label: "EXIFの夜判定", value: scene.exif_night ? "夜" : "夜ではない" },
     ],
   };
 }

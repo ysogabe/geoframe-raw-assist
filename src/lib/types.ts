@@ -328,7 +328,10 @@ export type StarSceneInfo = {
   star_count: number;
   dark_background_ratio: number;
   bright_point_ratio: number;
+  /** 点光源の密度（点/画素）。 */
+  star_point_density: number;
   exif_night: boolean;
+  exif_state: "night" | "daylight" | "unknown";
   star_halo: number;
   star_color_saturation: number;
 };

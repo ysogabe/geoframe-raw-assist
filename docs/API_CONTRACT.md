@@ -349,8 +349,13 @@ body { capture_id:string, preset:string, seed?:number, budget?:number }
   `rejected: [{id, reason}]` に理由付きで入る（`natural` は常に返す）。
 - 所要時間は1枚あたり概ね3〜16秒（デコード回数に依存。`proxy.decodes` に実回数）。
 
-星空ゲートはEXIF（ISO・露光時間・撮影時刻）を補助信号にし、暗い背景の小さな高輝度点が
-複数ある場合だけ `star_scene.is_star_scene=true` になる。星候補はこの場合だけ返し、
+星空ゲートは **EXIF を主信号**にする。露光時間 >= 2秒 かつ EV100 <= −2（`exif_state:"night"`）のとき、
+代理画像（gray − ガウシアンぼかし）の局所コントラストで数えた小さな点光源の密度が 0.0008 点/画素以上
+（長辺640pxで約220点）で、輝度0.85以上の大面積光源が2%以下なら `star_scene.is_star_scene=true`
+（背景の暗さは問わないので天の川が広がる星空も判定できる）。露光時間 < 2秒、または EV100 > −2 と
+分かる写真（`exif_state:"daylight"`）は画像に依らず星空にしない。EXIF が無い・露光時間かEV100が不明
+（`exif_state:"unknown"`）のときは安全側の厳しい画像条件（暗い背景 >= 0.72、点密度 >= 0.002、
+明部の合計面積 <= 0.5%）をすべて満たす場合だけ星空とする。星候補はこの場合だけ返し、
 通常写真へ星最適化を強制しない。返却順は `natural` を先頭に、`stars`、`foreground`、
 `low_noise`、`social` の順で最大5件（画像特性に合わないスタイル・安全策で落ちたスタイルは省略）とする。
 
@@ -361,7 +366,8 @@ DevelopmentCandidatesResponse = {
            decode_edge:number, decodes:number },
   star_scene: { is_star_scene:boolean, star_count:number,
                 dark_background_ratio:number, bright_point_ratio:number,
-                exif_night:boolean, star_halo:number,
+                star_point_density:number, exif_night:boolean,
+                exif_state:"night"|"daylight"|"unknown", star_halo:number,
                 star_color_saturation:number },
   candidates: DevelopmentCandidate[],
   rejected: { id:"stars"|"foreground"|"low_noise"|"social", reason:string }[]

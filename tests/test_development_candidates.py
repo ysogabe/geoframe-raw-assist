@@ -27,6 +27,9 @@ def make_scene(*, stars: bool, noisy: bool = False) -> np.ndarray:
     rng = np.random.default_rng(12)
     if stars:
         image = np.full((320, 480, 3), 0.04, dtype=np.float32)
+        # 星空判定は「点光源が多数あること」を要求するので、格子状の白い星を敷き詰める
+        # （20x30=600 点。密度 0.0039 は EXIF あり/なし両方のしきい値を超える）。
+        image[8::16, 8::16] = 0.9
         for y, x, value in (
             (50, 60, (1.0, 0.96, 0.9)),
             (140, 250, (0.94, 0.98, 1.0)),
@@ -105,11 +108,17 @@ class CandidateOptimizerTests(unittest.TestCase):
         budget: int = 32,
         preset: str = "neutral_recovery",
         capture_id: str = "DSC00001",
+        exif: dict | None = None,
     ) -> dict:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "DSC00001.ARW").write_bytes(b"")
-            with mock.patch.object(config, "source_root", return_value=root):
+            if exif is not None:
+                # ペア JPG があるときだけ EXIF が読まれる（read_capture_exif は差し替える）。
+                (root / "DSC00001.JPG").write_bytes(b"")
+            with mock.patch.object(config, "source_root", return_value=root), mock.patch.object(
+                candidates, "read_capture_exif", return_value=dict(exif or {})
+            ):
                 return candidates.generate_development_candidates(
                     capture_id, preset, seed=seed, budget=budget, decoder_factory=decoder.factory
                 )
@@ -405,15 +414,15 @@ class CandidateOptimizerTests(unittest.TestCase):
 
     def test_star_color_saturation_is_the_mean_over_stars_not_a_sum(self):
         # 40個の星のうち10個だけ白飛び。合計にすると1.0に張り付くが、平均なら 10/40。
-        measured = candidates._star_measurements(make_star_field(clipped=10, unclipped=30))
-        self.assertTrue(measured["is_star_scene"])
+        # 星の指標は候補評価と同じ evaluate_gate=False 経路で測る（判定に依らない）。
+        measured = candidates._star_measurements(make_star_field(clipped=10, unclipped=30), evaluate_gate=False)
         self.assertEqual(measured["star_count"], 40)
         self.assertAlmostEqual(measured["star_color_saturation"], 0.25, places=6)
 
     def test_star_color_saturation_spans_zero_to_one_with_the_clipped_share(self):
-        none_clipped = candidates._star_measurements(make_star_field(clipped=0, unclipped=40))
-        all_clipped = candidates._star_measurements(make_star_field(clipped=40, unclipped=0))
-        few_stars = candidates._star_measurements(make_star_field(clipped=3, unclipped=9))
+        none_clipped = candidates._star_measurements(make_star_field(clipped=0, unclipped=40), evaluate_gate=False)
+        all_clipped = candidates._star_measurements(make_star_field(clipped=40, unclipped=0), evaluate_gate=False)
+        few_stars = candidates._star_measurements(make_star_field(clipped=3, unclipped=9), evaluate_gate=False)
         self.assertEqual(none_clipped["star_color_saturation"], 0.0)
         self.assertEqual(all_clipped["star_color_saturation"], 1.0)
         self.assertAlmostEqual(few_stars["star_color_saturation"], 0.25, places=6)
@@ -653,24 +662,25 @@ class CandidateOptimizerTests(unittest.TestCase):
         self.assertEqual(cache.decode_count, 4)
         self.assertEqual(calls, [0.0, 0.5, 1.0, 0.5])
 
-    def test_star_gate_rejects_many_small_points_by_total_bright_area(self):
-        def points(count: int) -> np.ndarray:
+    def test_star_gate_without_exif_rejects_large_total_bright_area(self):
+        def blobs(width: int, height: int) -> np.ndarray:
             image = np.full((320, 480, 3), 0.04, dtype=np.float32)
-            for index in range(count):
-                y = 15 + 30 * (index // 10)
-                x = 15 + 45 * (index % 10)
-                image[y : y + 3, x : x + 3] = 1.0  # 9画素（点の面積上限 69 以下）
+            for index in range(350):
+                y = 10 + 22 * (index // 25)
+                x = 10 + 18 * (index % 25)
+                image[y : y + height, x : x + width] = 1.0
             return image
 
+        # EXIF 無しは暗背景 + 点密度に加えて明部の合計面積 <= MAX_STAR_BRIGHT_RATIO を求める。
         # 点は小さく暗背景でも、明部の合計面積が上限を超えたら星空ではない。
-        many = candidates.detect_star_scene(points(100))
-        self.assertEqual(many["star_count"], 100)
+        many = candidates.detect_star_scene(blobs(3, 3))
+        self.assertEqual(many["star_count"], 350)
         self.assertGreater(many["dark_background_ratio"], 0.9)
-        self.assertGreater(many["bright_point_ratio"], 0.005)
+        self.assertGreater(many["bright_point_ratio"], candidates.MAX_STAR_BRIGHT_RATIO)
         self.assertFalse(many["is_star_scene"])
-        # 同じ形で明部の合計面積だけ上限内なら星空と判定される（対照）。
-        few = candidates.detect_star_scene(points(50))
-        self.assertLessEqual(few["bright_point_ratio"], 0.005)
+        # 同じ点数で明部の合計面積だけ上限内なら星空と判定される（対照）。
+        few = candidates.detect_star_scene(blobs(2, 1))
+        self.assertLessEqual(few["bright_point_ratio"], candidates.MAX_STAR_BRIGHT_RATIO)
         self.assertTrue(few["is_star_scene"])
 
     def test_exposure_grid_snaps_to_half_ev(self):
@@ -860,3 +870,117 @@ class CandidateServerHandlerTests(unittest.TestCase):
             request = self.post({"capture_id": "DSC00001", "preset": "neutral_recovery"})
         self.assertEqual(request.status, 200)
         generate.assert_called_once_with("DSC00001", "neutral_recovery", seed=None, budget=None)
+
+
+NIGHT_EXIF = {"exposure_time": 20.0, "f_number": 2.8, "iso": 6400}  # EV100 ≈ −7.4
+HANDHELD_NIGHT_EXIF = {"exposure_time": 1 / 15, "f_number": 5.6, "iso": 3200}  # EV100 ≈ +3.9
+BRACKET_EXIF = {"exposure_time": 10.0, "f_number": 8.0, "iso": 100}  # 三脚の長秒。EV100 ≈ +2.7
+
+
+def make_sky(points: int, *, background: float = 0.04, patch: tuple[int, int] | None = None) -> np.ndarray:
+    """背景に1画素の星を格子状（先頭から points 個）に置く。patch=(高さ, 幅) で大面積の白い光源も置く。"""
+
+    image = np.full((320, 480, 3), background, dtype=np.float32)
+    # 背景が中間調でもわずかな勾配を持たせる（天の川のように一様ではない空）。
+    image += np.linspace(0.0, 0.05, 480, dtype=np.float32)[None, :, None]
+    for index in range(points):
+        image[8 + 16 * (index // 30), 8 + 16 * (index % 30)] = 0.95
+    if patch is not None:
+        image[100 : 100 + patch[0], 200 : 200 + patch[1]] = 1.0
+    return np.clip(image, 0.0, 1.0)
+
+
+class StarSceneGateTests(unittest.TestCase):
+    """星空判定（#46）: EXIF（長秒・低EV100）を主信号に、画像は点光源の密度で確かめる。"""
+
+    def gate(self, image: np.ndarray, exif: dict | None) -> dict:
+        return candidates.detect_star_scene(image, exif)
+
+    def test_long_exposure_with_many_points_is_a_star_scene(self):
+        measured = self.gate(make_sky(400), NIGHT_EXIF)
+        self.assertTrue(measured["is_star_scene"])
+        self.assertEqual(measured["exif_state"], "night")
+        self.assertTrue(measured["exif_night"])
+        self.assertGreater(measured["star_point_density"], candidates.STAR_MIN_POINT_DENSITY)
+
+    def test_milky_way_with_midtone_background_is_a_star_scene(self):
+        # 背景が中間調（暗い背景の割合 ≈ 0）でも、点が多数あれば星空。
+        image = make_sky(400, background=0.35)
+        measured = self.gate(image, NIGHT_EXIF)
+        self.assertLess(measured["dark_background_ratio"], 0.01)
+        self.assertTrue(measured["is_star_scene"])
+        # EXIF が無ければ、暗背景でない画像は安全側で星空と扱わない。
+        self.assertFalse(self.gate(image, None)["is_star_scene"])
+
+    def test_handheld_short_exposure_night_scene_is_not_a_star_scene(self):
+        # 短秒なら点が多数あっても（街灯・ライトアップ・ノイズ）星空ではない。
+        measured = self.gate(make_sky(400), HANDHELD_NIGHT_EXIF)
+        self.assertEqual(measured["exif_state"], "daylight")
+        self.assertFalse(measured["is_star_scene"])
+        self.assertEqual(measured["star_point_density"], 0.0)
+
+    def test_long_exposure_with_few_points_is_not_a_star_scene(self):
+        for points in (0, 5, 60):
+            measured = self.gate(make_sky(points), NIGHT_EXIF)
+            self.assertFalse(measured["is_star_scene"], points)
+
+    def test_bright_long_exposure_bracket_is_not_a_star_scene(self):
+        # 長秒でも EV100 が高い（明るい風景のブラケット）なら、点が多くても星空ではない。
+        measured = self.gate(make_sky(400), BRACKET_EXIF)
+        self.assertEqual(measured["exif_state"], "daylight")
+        self.assertFalse(measured["is_star_scene"])
+
+    def test_large_light_source_blocks_the_gate_even_with_long_exposure(self):
+        # 月・街灯・ライトアップのような大面積の光源（輝度0.85以上が2%超）は星空にしない。
+        image = make_sky(400, patch=(60, 80))
+        self.assertGreater(float(np.mean(image.mean(axis=2) >= candidates.STAR_BIG_LIGHT_LEVEL)), candidates.STAR_MAX_BIG_LIGHT_RATIO)
+        self.assertFalse(self.gate(image, NIGHT_EXIF)["is_star_scene"])
+        # 面積が上限内の光源（月程度）なら星空のまま。
+        self.assertTrue(self.gate(make_sky(400, patch=(20, 30)), NIGHT_EXIF)["is_star_scene"])
+
+    def test_without_exif_a_dark_sky_with_dense_points_is_a_star_scene(self):
+        measured = self.gate(make_sky(400), None)
+        self.assertEqual(measured["exif_state"], "unknown")
+        self.assertFalse(measured["exif_night"])
+        self.assertTrue(measured["is_star_scene"])
+        # 点が少ない暗い画像（暗いアーチ越しのライトアップ建築など）は EXIF 無しでは判定しない。
+        self.assertFalse(self.gate(make_sky(40), None)["is_star_scene"])
+        # 露光時間かEV100が欠けている場合も EXIF 無しと同じ厳しい条件になる。
+        self.assertTrue(self.gate(make_sky(400), {"exposure_time": 20.0})["is_star_scene"])
+        self.assertFalse(self.gate(make_sky(40), {"exposure_time": 20.0})["is_star_scene"])
+        for garbage in ({"exposure_time": "abc"}, {"exposure_time": 0}, {"exposure_time": float("nan")}):
+            self.assertEqual(self.gate(make_sky(40), garbage)["exif_state"], "unknown")
+
+    def test_exposure_time_boundary(self):
+        base = {"f_number": 1.4, "iso": 6400}
+        at_limit = self.gate(make_sky(400), {**base, "exposure_time": candidates.STAR_MIN_EXPOSURE_SEC})
+        below = self.gate(make_sky(400), {**base, "exposure_time": candidates.STAR_MIN_EXPOSURE_SEC - 0.01})
+        self.assertTrue(at_limit["is_star_scene"])
+        self.assertFalse(below["is_star_scene"])
+
+    def test_ev100_boundary(self):
+        # EV100 = log2(N²/t) − log2(ISO/100)。N=4, t=4s なら ISO1600 でちょうど −2.0。
+        at_limit = {"exposure_time": 4.0, "f_number": 4.0, "iso": 1600}
+        self.assertEqual(engine.ev100(at_limit), candidates.STAR_MAX_EV100)
+        self.assertTrue(self.gate(make_sky(400), at_limit)["is_star_scene"])
+        brighter = {**at_limit, "iso": 800}  # EV100 = −1.0
+        self.assertFalse(self.gate(make_sky(400), brighter)["is_star_scene"])
+
+    def test_point_density_boundary(self):
+        area = 320 * 480
+        minimum = int(np.ceil(candidates.STAR_MIN_POINT_DENSITY * area))
+        self.assertTrue(self.gate(make_sky(minimum + 5), NIGHT_EXIF)["is_star_scene"])
+        self.assertFalse(self.gate(make_sky(minimum - 5), NIGHT_EXIF)["is_star_scene"])
+
+    def test_generate_offers_stars_only_when_exif_and_points_agree(self):
+        star_scene = make_sky(400, background=0.35)
+        with_exif = self.generate_with(star_scene, NIGHT_EXIF)
+        self.assertTrue(with_exif["star_scene"]["is_star_scene"])
+        self.assertIn("stars", [item["id"] for item in with_exif["candidates"]] + [item["id"] for item in with_exif["rejected"]])
+        handheld = self.generate_with(star_scene, HANDHELD_NIGHT_EXIF)
+        self.assertFalse(handheld["star_scene"]["is_star_scene"])
+        self.assertNotIn("stars", [item["id"] for item in handheld["candidates"]] + [item["id"] for item in handheld["rejected"]])
+
+    def generate_with(self, scene: np.ndarray, exif: dict) -> dict:
+        return CandidateOptimizerTests().generate(FakeDecoder(scene), exif=exif)
+

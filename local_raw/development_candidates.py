@@ -72,7 +72,33 @@ DECODE_EDGE = 1280
 DECODE_CACHE_LIMIT = 24
 #: exposure の探索格子（EV）。デコード時の bright に渡す値なので粗いほどデコード回数が減る。
 EXPOSURE_GRID = 0.5
+#: 星空判定（#46）。主信号は EXIF（長秒かつ低EV100）、画像側は「点光源が多数ある」ことの確認。
+#: 実データ（星空10枚 / image_work 約1040組）での分布に基づく:
+#:   星空10枚は露光10〜30s・EV100 −8.4〜−6.4。image_work の長秒（三脚ブラケット）は
+#:   露光1〜10s・EV100 +0.3〜+3.6、夜の手持ちは露光 ≤ 1/8s・EV100 ≥ +1.9。
+STAR_MIN_EXPOSURE_SEC = 2.0
+#: これ以下が「星空の暗さ」。星空は ≤ −6.4、最も暗い非星空（長秒ブラケット）は +0.3。
+#: 薄明・月明かりの星空も拾えるよう余裕を持たせつつ、ブラケットとは 2EV 以上離す。
+STAR_MAX_EV100 = -2.0
+#: 代理画像（長辺 ≤ 640px）上の局所ピーク（星候補）の最小密度（点数/画素数）。
+#: 星空10枚は 0.0026〜0.013、長秒ブラケットの風景は最大 0.0003。中間の対数中点付近。
+STAR_MIN_POINT_DENSITY = 0.0008
+#: EXIF が無い（露光時間かEV100が分からない）とき用の厳しい条件。暗い背景の割合と
+#: 星密度の両方を求める（旧来は暗背景 0.72 と点 3 個で通っていたので誤判定しやすかった）。
+STAR_NO_EXIF_MIN_DARK_FRACTION = 0.72
+STAR_NO_EXIF_MIN_POINT_DENSITY = 0.002
 MAX_STAR_BRIGHT_RATIO = 0.005
+#: 大面積の光源（月・街灯・ライトアップ・空の白飛び）の上限。輝度 0.85 以上の画素の割合。
+#: 星空10枚は最大 0.0064（天の川の明部）。天の川は広がっても 0.85 には届かない。
+STAR_MAX_BIG_LIGHT_RATIO = 0.02
+STAR_BIG_LIGHT_LEVEL = 0.85
+#: 局所コントラスト検出: gray − ガウシアンぼかし(σ)。差が STAR_PEAK_LOW 以上の連結領域のうち、
+#: 面積が上限以下で最大差が STAR_PEAK_HIGH 以上のものを「点」として数える。
+STAR_LOCAL_SIGMA = 3.0
+STAR_PEAK_LOW = 0.04
+STAR_PEAK_HIGH = 0.08
+STAR_POINT_MAX_AREA_RATIO = 0.00011
+STAR_POINT_MIN_AREA_CAP = 4
 
 #: highlight_recovery のカテゴリ（engine `_postprocess_params` の3段階と一致させる）。
 HIGHLIGHT_CATEGORIES: tuple[str, ...] = ("clip", "blend", "reconstruct")
@@ -314,10 +340,73 @@ def _connected_bright_components(mask: np.ndarray) -> list[tuple[int, int, int, 
     return components
 
 
-def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) -> dict[str, Any]:
+def _point_light_count(gray: np.ndarray) -> int:
+    """局所コントラストで「小さな点光源」の数を数える（星の候補）。
+
+    gray − ガウシアンぼかしが STAR_PEAK_LOW 以上の連結領域のうち、面積が上限
+    （画素数 × STAR_POINT_MAX_AREA_RATIO）以下で領域内の最大差が STAR_PEAK_HIGH 以上のもの。
+    絶対輝度に依らないので、背景が中間調の天の川でも星を数えられる。
+    """
+
+    height, width = gray.shape
+    if cv2 is not None:
+        blurred = cv2.GaussianBlur(gray, (0, 0), STAR_LOCAL_SIGMA)
+    else:
+        blurred = _blur(np.repeat(gray[:, :, None], 3, axis=2), STAR_LOCAL_SIGMA)[:, :, 0]
+    diff = gray - blurred
+    max_area = max(STAR_POINT_MIN_AREA_CAP, int(round(height * width * STAR_POINT_MAX_AREA_RATIO)))
+    count = 0
+    for x, y, component_width, component_height, area in _connected_bright_components(diff >= STAR_PEAK_LOW):
+        if area > max_area:
+            continue
+        if float(diff[y : y + component_height, x : x + component_width].max()) >= STAR_PEAK_HIGH:
+            count += 1
+    return count
+
+
+def _exif_night_state(exif: dict[str, Any]) -> str:
+    """EXIF から "night"（長秒かつ暗い）/ "daylight"（そうではないと確定）/ "unknown" を返す。"""
+
+    try:
+        exposure_time = float(exif.get("exposure_time"))
+    except (TypeError, ValueError):
+        return "unknown"
+    if not math.isfinite(exposure_time) or exposure_time <= 0:
+        return "unknown"
+    if exposure_time < STAR_MIN_EXPOSURE_SEC:
+        return "daylight"
+    scene_ev = engine.ev100(exif)
+    if scene_ev is None:
+        return "unknown"
+    return "night" if scene_ev <= STAR_MAX_EV100 else "daylight"
+
+
+def _star_measurements(
+    array: np.ndarray,
+    exif: dict[str, Any] | None = None,
+    *,
+    evaluate_gate: bool = True,
+) -> dict[str, Any]:
+    """星空判定と星の指標（数・ハロ・星色の白飛び）を返す。
+
+    判定（``is_star_scene``）は EXIF を主信号にする。
+
+    * EXIF で「露光 >= STAR_MIN_EXPOSURE_SEC かつ EV100 <= STAR_MAX_EV100」（night）:
+      点光源の密度が STAR_MIN_POINT_DENSITY 以上で、大面積の光源
+      （輝度 STAR_BIG_LIGHT_LEVEL 以上の画素が STAR_MAX_BIG_LIGHT_RATIO 超）が無ければ星空。
+      背景の暗さは問わない（天の川が画面全体に広がる星空も判定できる）。
+    * EXIF で短秒・明るいと分かる（daylight）: 画像に依らず星空ではない（夜景・ライトアップ）。
+    * EXIF が無い・露光時間かEV100が不明（unknown）: 安全側に厳しい画像条件だけで判定する。
+      暗い背景 >= STAR_NO_EXIF_MIN_DARK_FRACTION、点密度 >= STAR_NO_EXIF_MIN_POINT_DENSITY、
+      明部の合計面積 <= MAX_STAR_BRIGHT_RATIO をすべて満たすとき。
+
+    ``evaluate_gate=False`` は候補評価用で、判定を行わず星の指標だけを測る。
+    """
+
     rgb = _normalise_rgb(array)
     gray = np.dot(rgb, np.array([0.2126, 0.7152, 0.0722], dtype=np.float32))
     dark_fraction = float(np.mean(gray < 0.20))
+    # 星の指標用の点（明るい小連結成分）。判定とは独立で、既存の最適化目標の基準になる。
     # A high percentile avoids making a dim city skyline a collection of stars.
     threshold = max(0.58, float(np.percentile(gray, 99.35)))
     bright = gray >= threshold
@@ -328,43 +417,26 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
     points = [component for component in components if 1 <= component[4] <= max_point_area]
     point_count = len(points)
 
-    exif = exif or {}
-    iso = exif.get("iso")
-    exposure_time = exif.get("exposure_time")
-    exif_night = False
-    try:
-        exif_night |= float(iso) >= 800
-    except (TypeError, ValueError):
-        pass
-    try:
-        exif_night |= float(exposure_time) >= 0.5
-    except (TypeError, ValueError):
-        pass
-    captured_at = str(exif.get("captured_at") or "")
-    if "T" in captured_at:
-        try:
-            hour = int(captured_at.split("T", 1)[1][:2])
-            exif_night |= hour >= 20 or hour < 5
-        except (TypeError, ValueError):
-            pass
-
-    # Stars need a dark background and multiple small isolated points.  EXIF is
-    # a supporting signal, never a reason to force star optimization on a
-    # regular daytime photo.  Very dark synthetic images are allowed without
-    # EXIF, which makes proxy tests and exported JPEGs useful too.
-    # A sparse bright-point pattern is useful for stars, while a larger bright
-    # area usually describes lamps, buildings, or a city night scene.  Cap the
-    # total bright area so those light sources cannot enable star optimization.
-    visual_gate = dark_fraction >= 0.56 and point_count >= 3 and bright_ratio <= MAX_STAR_BRIGHT_RATIO
-    is_star_scene = visual_gate and (exif_night or dark_fraction >= 0.72)
+    exif_state = _exif_night_state(exif or {})
+    point_density = 0.0
+    is_star_scene = False
+    if evaluate_gate and exif_state != "daylight":
+        big_light_ratio = float(np.mean(gray >= STAR_BIG_LIGHT_LEVEL))
+        if exif_state == "night":
+            if big_light_ratio <= STAR_MAX_BIG_LIGHT_RATIO:
+                point_density = _point_light_count(gray) / float(height * width)
+                is_star_scene = point_density >= STAR_MIN_POINT_DENSITY
+        elif dark_fraction >= STAR_NO_EXIF_MIN_DARK_FRACTION and bright_ratio <= MAX_STAR_BRIGHT_RATIO:
+            point_density = _point_light_count(gray) / float(height * width)
+            is_star_scene = point_density >= STAR_NO_EXIF_MIN_POINT_DENSITY
 
     halo = 0.0
     # 星の色の指標なので、検出した星（点）の領域だけで測る（画像全体は含めない）。
     color_clip = 0.0
-    # A daytime/noisy image can contain thousands of tiny bright components.
-    # They are useful for rejecting the star gate, but iterating over each one
-    # for halo statistics would make a proxy evaluation needlessly expensive.
-    if visual_gate and points:
+    # A daytime/noisy image can contain thousands of tiny bright components, so
+    # the ring statistics are only measured for star scenes (or when the caller
+    # already decided to optimise for stars).
+    if (is_star_scene or not evaluate_gate) and points:
         ring_values: list[float] = []
         point_clip_ratios: list[float] = []
         for x, y, component_width, component_height, _ in points:
@@ -393,9 +465,11 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
     return {
         "is_star_scene": bool(is_star_scene),
         "star_count": int(point_count),
+        "star_point_density": round(point_density, 6),
         "dark_background_ratio": round(dark_fraction, 6),
         "bright_point_ratio": round(bright_ratio, 6),
-        "exif_night": bool(exif_night),
+        "exif_night": exif_state == "night",
+        "exif_state": exif_state,
         "star_halo": round(float(np.clip(halo, 0.0, 1.0)), 6),
         "star_color_saturation": round(float(np.clip(color_clip, 0.0, 1.0)), 6),
     }
@@ -492,7 +566,7 @@ def _image_metrics(
 
     # The baseline is measured with exactly the same star function/gate, so the
     # "did stars increase" comparison is not a tautology against a zero count.
-    star = _star_measurements(transformed, exif) if star_gate else {
+    star = _star_measurements(transformed, exif, evaluate_gate=False) if star_gate else {
         "star_count": 0,
         "star_halo": 0.0,
         "star_color_saturation": 0.0,
