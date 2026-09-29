@@ -992,6 +992,11 @@ class DarkSceneTests(unittest.TestCase):
             del missing[key]
             self.assertIsNone(engine.ev100(missing))
 
+    def test_ev100_overflow_is_none(self):
+        # f_number**2 が浮動小数の範囲を超えても例外にせず、判定不能（None）を返す。
+        self.assertIsNone(engine.ev100({"f_number": 1e200, "exposure_time": 1.0, "iso": 100}))
+        self.assertFalse(engine.detect_dark_scene({"f_number": 1e200, "exposure_time": 1.0, "iso": 100})["dark_scene"])
+
     def test_dark_scene_threshold_boundary(self):
         self.assertAlmostEqual(engine.ev100(self.exif_for_ev100(6.0)), 6.0)
         self.assertEqual(engine.dark_scene_bright_k(self.exif_for_ev100(6.0)), 5.0)
