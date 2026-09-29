@@ -1,0 +1,43 @@
+{
+  "description": "現像候補自動生成の基準ケース。root はフォルダ名の別名で、実パスは実行時に --root KEY=DIR で渡す（絶対パスは書かない）。",
+  "roots_hint": {
+    "image_work": "昼夜ミックスのARW/JPGペア（例: /Volumes/KIOXIA/image_work）",
+    "stars": "星空写真11組（例: <repo>/work/raw。ARWの拡張子が小文字でも可）"
+  },
+  "sets": [
+    {
+      "root": "image_work",
+      "cases": [
+        "DSC04267:neutral_recovery",
+        "DSC04294:neutral_recovery",
+        "DSC02849:neutral_recovery",
+        "DSC03075:neutral_recovery",
+        "DSC02813:neutral_recovery",
+        "DSC02754:neutral_recovery",
+        "DSC03177:neutral_recovery",
+        "DSC02947:neutral_recovery",
+        "DSC03203:neutral_recovery",
+        "DSC03218:neutral_recovery",
+        "DSC03791:neutral_recovery",
+        "DSC03029:neutral_recovery",
+        "DSC03203:nightscape"
+      ]
+    },
+    {
+      "root": "stars",
+      "cases": [
+        "DSC07402:nightscape",
+        "DSC07404:nightscape",
+        "DSC07405:nightscape",
+        "DSC07407:nightscape",
+        "DSC07408:nightscape",
+        "DSC07412:nightscape",
+        "DSC07415:nightscape",
+        "DSC07416:nightscape",
+        "DSC07419:nightscape",
+        "DSC07422:nightscape",
+        "DSC07423:nightscape"
+      ]
+    }
+  ]
+}

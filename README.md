@@ -93,6 +93,24 @@ npm run develop:raw -- DSC02943 --preset nightscape
 
 候補を選択しただけで元のJPG/ARWが変更されたり、現像が勝手に始まったりすることはありません。
 
+#### 候補生成の評価（チューニング用）
+
+`scripts/evaluate_candidates.py` は、各候補の調整値で**実RAW現像**（full デコード → レンズ補正 → engine 後段）を行い、
+候補生成と同じ指標で代理 vs 実RAW のずれ・壊れた候補・スタイルの狙い達成などを集計します
+（`scripts/evaluate_raw.py` がプリセットのガードレール評価なのに対し、こちらは候補生成のチューニング前後比較用）。
+現像元フォルダ・アプリ設定・`outputs/` の通常成果物には書き込みません。出力は `outputs/eval_candidates/<日時>/`
+（`summary.json` / `summary.md` / `cases/` / `frames/`、`--contact-sheets` で `contact_sheets/`）。1ケース約40秒です。
+
+```bash
+# 基準ケース集（scripts/eval_cases/candidates_baseline.json）。root キーの実フォルダは --root で渡す
+.venv/bin/python scripts/evaluate_candidates.py \
+  --cases-file scripts/eval_cases/candidates_baseline.json \
+  --root image_work=/Volumes/KIOXIA/image_work --root stars=<星空ARW/JPGのフォルダ> --contact-sheets
+
+# 単発ケース
+.venv/bin/python scripts/evaluate_candidates.py --source-root <フォルダ> --case DSC02849:neutral_recovery
+```
+
 将来はHDR、連写の選好学習、パノラマ、参照プリセットへの対応を予定しています。
 
 ## 生成物の構成
