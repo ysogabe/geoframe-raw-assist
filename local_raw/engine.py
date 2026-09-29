@@ -755,7 +755,7 @@ def _array_to_image(rgb: np.ndarray) -> Image.Image:
     return Image.fromarray(np.rint(working * 255.0).astype(np.uint8), mode="RGB")
 
 
-def _resolve_save_kwargs(source_jpg: Path, width: int, height: int) -> tuple[dict[str, Any], bool]:
+def _resolve_save_kwargs(source_jpg: Path | None, width: int, height: int) -> tuple[dict[str, Any], bool]:
     """JPEG保存オプションを組み立てる。ペアJPGがあれば EXIF 継承を試みる。
 
     `build_inherited_exif` の失敗（`exif.tobytes()` が投げる `struct.error` を含む、
@@ -770,7 +770,7 @@ def _resolve_save_kwargs(source_jpg: Path, width: int, height: int) -> tuple[dic
         "icc_profile": SRGB_ICC_BYTES,
     }
     exif_inherited = False
-    if source_jpg.is_file():
+    if source_jpg is not None and source_jpg.is_file():
         try:
             save_kwargs["exif"] = build_inherited_exif(source_jpg, width, height)
             exif_inherited = True
@@ -881,8 +881,15 @@ def develop_raw(
     if source_path.parent != source_root or not source_path.is_file():
         raise RawDevelopmentError(f"ARWが見つかりません: {capture_id}.ARW")
 
-    source_jpg = source_files.find_capture_file(source_root, capture_id, "JPG") or source_root / f"{capture_id}.JPG"
-    capture_exif = read_capture_exif(source_jpg) if source_jpg.is_file() else {}
+    # ペアJPGは候補側（development_candidates._resolve_source_paths）と同じ基準で採用する:
+    # resolve() 後の親が source_root と一致し実在するものだけ。フォルダ外を指す symlink 等は
+    # EXIF 読み取りにも EXIF 継承にも使わない（判定はサムネイル EXIF へフォールバック）。
+    source_jpg: Path | None = (
+        source_files.find_capture_file(source_root, capture_id, "JPG") or source_root / f"{capture_id}.JPG"
+    ).resolve()
+    if source_jpg.parent != source_root or not source_jpg.is_file():
+        source_jpg = None
+    capture_exif = read_capture_exif(source_jpg) if source_jpg is not None else {}
 
     # レンズ解決は RAW デコード（10〜20秒）の前に済ませる。
     # params_hash がレンズ補正の適用有無を含むため、キャッシュ判定より前に必要。

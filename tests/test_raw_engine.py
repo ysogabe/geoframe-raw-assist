@@ -1081,6 +1081,14 @@ class DarkSceneTests(unittest.TestCase):
         self.assertFalse(info["dark_scene"])
         self.assertIsNone(info["bright_k"])
 
+    def test_bitmap_thumbnail_is_ignored_even_if_data_is_jpeg_bytes(self):
+        # 形式チェックを外すと EXIF 付き JPEG バイト列が読めて暗いシーンと判定されてしまう。
+        jpeg_thumb = self.thumb_with_exif(2.8, 15.0, 3200)
+        raw = mock.MagicMock()
+        raw.extract_thumb.return_value = SimpleNamespace(format=rawpy.ThumbFormat.BITMAP, data=jpeg_thumb.data)
+        self.assertEqual(engine._read_thumbnail_exif(raw, None), {})
+        self.assertFalse(engine.detect_dark_scene({}, raw=raw)["dark_scene"])
+
     def test_unreadable_thumbnail_is_not_dark(self):
         bad_cases = {
             "bitmap": SimpleNamespace(format=rawpy.ThumbFormat.BITMAP, data=np.zeros((2, 2, 3), np.uint8)),
@@ -1105,8 +1113,14 @@ class DarkSceneTests(unittest.TestCase):
 
     # --- develop_raw の配線 --------------------------------------------------
 
-    def run_develop_raw(self, *, exif: dict | None, thumb=None) -> tuple[mock.MagicMock, mock.MagicMock, dict]:
-        """exif が None ならペアJPGなし。戻り値: (postprocess params 記録, lens mock, recipe)。"""
+    def run_develop_raw(
+        self, *, exif: dict | None, thumb=None, jpg_outside: bool = False,
+        exif_reader: mock.MagicMock | None = None, base: Path | None = None,
+    ) -> tuple[mock.MagicMock, mock.MagicMock, dict]:
+        """exif が None ならペアJPGなし。jpg_outside なら JPG は現像元フォルダ外を指す symlink。
+
+        戻り値: (postprocess params 記録, lens mock, recipe)。exif_reader を渡すと read_capture_exif の代わりに使う。
+        """
 
         class FakeRaw:
             camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
@@ -1128,9 +1142,14 @@ class DarkSceneTests(unittest.TestCase):
                 return False
 
         fake = FakeRaw()
-        with tempfile.TemporaryDirectory() as directory:
+        with contextlib.ExitStack() as tmp:
+            # base 指定時は同じ作業フォルダを使い回す（source_root が params_hash に入るため、
+            # 呼び出し間でハッシュを比較したいテスト用）。
+            directory = str(base) if base is not None else tmp.enter_context(tempfile.TemporaryDirectory())
             root = Path(directory) / "src"
-            root.mkdir()
+            root.mkdir(exist_ok=True)
+            for old_jpg in root.glob("*.JPG"):
+                old_jpg.unlink()
             (root / "DSC00001.ARW").write_bytes(b"")
             patches = [
                 mock.patch.object(engine.config, "source_root", return_value=root),
@@ -1139,8 +1158,15 @@ class DarkSceneTests(unittest.TestCase):
                 mock.patch.object(engine.rawpy, "imread", return_value=fake),
             ]
             if exif is not None:
-                (root / "DSC00001.JPG").write_bytes(b"")
-                patches.append(mock.patch.object(engine, "read_capture_exif", return_value=exif))
+                if jpg_outside:
+                    outside = Path(directory) / "outside.JPG"
+                    outside.write_bytes(b"")
+                    (root / "DSC00001.JPG").symlink_to(outside)
+                else:
+                    (root / "DSC00001.JPG").write_bytes(b"")
+                reader = exif_reader if exif_reader is not None else mock.MagicMock()
+                reader.return_value = exif
+                patches.append(mock.patch.object(engine, "read_capture_exif", reader))
             with contextlib.ExitStack() as stack:
                 for patch in patches:
                     stack.enter_context(patch)
@@ -1183,6 +1209,39 @@ class DarkSceneTests(unittest.TestCase):
         self.assertIs(postprocess.call_args.kwargs["no_auto_bright"], True)
         self.assertIs(lens.call_args.kwargs["force_skip_vignetting"], True)
         self.assertEqual(recipe["dark_scene"]["source"], "raw_thumbnail")
+
+    def test_develop_raw_passes_bright_k_to_cache_key(self):
+        # 他条件は同一で暗い/明るいだけ違う → params_hash が変わる（develop_raw が倍率を落とすと同一になる）。
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, _, dark = self.run_develop_raw(exif=self.exif_for_ev100(3.0), base=base)
+            _, _, bright = self.run_develop_raw(exif=self.exif_for_ev100(12.0), base=base)
+        self.assertEqual(dark["adjustments"], bright["adjustments"])
+        self.assertNotEqual(dark["params_hash"], bright["params_hash"])
+
+    def test_develop_raw_ignores_pair_jpg_outside_source_root(self):
+        reader = mock.MagicMock()
+        with mock.patch.object(engine, "_resolve_save_kwargs", wraps=engine._resolve_save_kwargs) as save_kwargs:
+            postprocess, _, recipe = self.run_develop_raw(
+                exif=self.exif_for_ev100(3.0),
+                thumb=self.thumb_with_exif(8.0, 1 / 250, 100),
+                jpg_outside=True,
+                exif_reader=reader,
+            )
+        reader.assert_not_called()
+        self.assertIsNone(save_kwargs.call_args.args[0])
+        # ペアJPG（暗い）は無視され、サムネイル（明るい）で判定される。
+        self.assertEqual(recipe["dark_scene"]["source"], "raw_thumbnail")
+        self.assertFalse(recipe["dark_scene"]["dark_scene"])
+        self.assertIs(postprocess.call_args.kwargs["no_auto_bright"], False)
+
+    def test_develop_raw_uses_regular_pair_jpg(self):
+        reader = mock.MagicMock()
+        with mock.patch.object(engine, "_resolve_save_kwargs", wraps=engine._resolve_save_kwargs) as save_kwargs:
+            _, _, recipe = self.run_develop_raw(exif=self.exif_for_ev100(3.0), exif_reader=reader)
+        reader.assert_called_once()
+        self.assertEqual(save_kwargs.call_args.args[0].name, "DSC00001.JPG")
+        self.assertEqual(recipe["dark_scene"]["source"], "pair_jpg")
 
     def test_develop_raw_without_any_exif_keeps_legacy_decode(self):
         postprocess, lens, recipe = self.run_develop_raw(exif=None, thumb=None)
