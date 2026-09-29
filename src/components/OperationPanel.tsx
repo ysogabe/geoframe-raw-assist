@@ -33,6 +33,7 @@ import type {
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
 import { BracketMerge } from "./BracketMerge";
+import { ProgressiveImage } from "./ProgressiveImage";
 
 type OperationPanelProps = {
   analysis: Analysis;
@@ -362,7 +363,9 @@ export function OperationPanel({
           </ul>
 
           <div className="selected-preview operation-preview">
-            {photo ? <img src={assetUrl(photo.thumb)} alt={`選択中 ${captureId}`} decoding="async" /> : null}
+            {photo ? (
+              <ProgressiveImage thumbSrc={assetUrl(photo.thumb)} fullSrc={sourceJpgUrl(captureId)} alt={`選択中 ${captureId}`} />
+            ) : null}
             {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
             <div className="filename">{captureId}.JPG</div>
             {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
