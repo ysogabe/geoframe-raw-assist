@@ -1,16 +1,19 @@
 """現像エンジンの検証（サンプル画像に依存しない範囲）。"""
 
+import fractions
+import json
 import os
 import struct
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
 import rawpy
-from PIL import Image
+from PIL import Image, TiffImagePlugin
 
 from local_raw import engine
 from local_raw.engine import (
@@ -621,11 +624,15 @@ class PostDecodeChainTests(unittest.TestCase):
         adjustments = resolve_adjustments(
             "landscape_clear", {"shadow_lift": 35, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3, "sharpness": 1.4}
         )
-        expected = _apply_tone_array(
-            _resize_array(_apply_shadow_lift_array(rgb, 35.0), 600), adjustments
-        )
-        np.testing.assert_array_equal(engine.apply_post_decode_chain(rgb, adjustments, 600), expected)
-        self.assertEqual(max(expected.shape[:2]), 600)
+        for iso in (None, 3200.0):
+            with self.subTest(iso=iso):
+                expected = _apply_tone_array(
+                    _resize_array(_apply_shadow_lift_array(rgb, 35.0), 600), adjustments, iso=iso
+                )
+                np.testing.assert_array_equal(
+                    engine.apply_post_decode_chain(rgb, adjustments, 600, iso=iso), expected
+                )
+                self.assertEqual(max(expected.shape[:2]), 600)
 
     def test_develop_raw_uses_the_shared_chain(self):
         class FakeRaw:
@@ -659,6 +666,296 @@ class PostDecodeChainTests(unittest.TestCase):
         self.assertEqual(rgb.dtype, np.float32)
         self.assertEqual(adjustments, resolve_adjustments("neutral_recovery"))
         self.assertEqual(max_edge, 1200)
+        # FakeRaw に other が無くペアJPGも無いので ISO は不明。
+        self.assertIsNone(chain.call_args.kwargs["iso"])
+
+    def test_develop_raw_passes_raw_iso_to_the_chain_and_recipe(self):
+        class FakeRaw:
+            camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+            other = SimpleNamespace(iso_speed=200.0)
+
+            def __init__(self):
+                self.params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def postprocess(self, **kwargs):
+                self.params = kwargs
+                return np.full((40, 60, 3), 30000, dtype=np.uint16)
+
+        raw = FakeRaw()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "src"
+            root.mkdir()
+            (root / "DSC00001.ARW").write_bytes(b"")
+            out_root = Path(directory) / "out"
+            with (
+                mock.patch.object(engine.config, "source_root", return_value=root),
+                mock.patch.object(engine, "OUTPUT_ROOT", out_root),
+                mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
+                mock.patch.object(engine.rawpy, "imread", return_value=raw),
+                mock.patch.object(
+                    engine, "apply_post_decode_chain", wraps=engine.apply_post_decode_chain
+                ) as chain,
+            ):
+                result = develop_raw("DSC00001", "neutral_recovery", max_edge=1200)
+                recipe = json.loads(
+                    (out_root / result["recipe_filename"]).read_text(encoding="utf-8")
+                )
+        self.assertEqual(chain.call_args.kwargs["iso"], 200.0)
+        self.assertEqual(recipe["iso"], 200.0)
+        self.assertEqual(recipe["recipe_version"], engine.RECIPE_VERSION)
+        # neutral_recovery の noise_reduction は light なので、ISO200 では FBDD Off。
+        self.assertEqual(resolve_adjustments("neutral_recovery")["noise_reduction"], "light")
+        self.assertEqual(raw.params["fbdd_noise_reduction"], rawpy.FBDDNoiseReductionMode.Off)
+
+    def test_develop_raw_falls_back_to_exif_iso_for_sharpening_only(self):
+        class FakeRaw:
+            camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+
+            def __init__(self):
+                self.params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def postprocess(self, **kwargs):
+                self.params = kwargs
+                return np.full((40, 60, 3), 30000, dtype=np.uint16)
+
+        raw = FakeRaw()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "src"
+            root.mkdir()
+            (root / "DSC00001.ARW").write_bytes(b"")
+            Image.new("RGB", (8, 8)).save(root / "DSC00001.JPG")
+            out_root = Path(directory) / "out"
+            with (
+                mock.patch.object(engine.config, "source_root", return_value=root),
+                mock.patch.object(engine, "OUTPUT_ROOT", out_root),
+                mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
+                mock.patch.object(engine.rawpy, "imread", return_value=raw),
+                mock.patch.object(engine, "read_capture_exif", return_value={"iso": 200}),
+                mock.patch.object(
+                    engine, "apply_post_decode_chain", wraps=engine.apply_post_decode_chain
+                ) as chain,
+            ):
+                result = develop_raw("DSC00001", "neutral_recovery", max_edge=1200)
+                recipe = json.loads(
+                    (out_root / result["recipe_filename"]).read_text(encoding="utf-8")
+                )
+        self.assertEqual(chain.call_args.kwargs["iso"], 200.0)
+        self.assertEqual(recipe["iso"], 200.0)
+        # FBDD の判定は RAW の ISO のみ。RAW の ISO 不明なら Light のまま。
+        self.assertEqual(resolve_adjustments("neutral_recovery")["noise_reduction"], "light")
+        self.assertEqual(raw.params["fbdd_noise_reduction"], rawpy.FBDDNoiseReductionMode.Light)
+
+
+class CoerceIsoTests(unittest.TestCase):
+    def test_accepted_values(self):
+        cases = [
+            (np.float32(100), 100.0),
+            (np.uint16(200), 200.0),
+            (TiffImagePlugin.IFDRational(400, 1), 400.0),
+            ((800.0,), 800.0),
+            (fractions.Fraction(1600, 1), 1600.0),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=repr(value)):
+                self.assertEqual(engine._coerce_iso(value), expected)
+
+    def test_rejected_values(self):
+        cases = [
+            True,
+            mock.MagicMock(),
+            float("nan"),
+            float("inf"),
+            TiffImagePlugin.IFDRational(1, 0),
+            -100,
+            "100",
+            np.array(100),
+            [],
+            None,
+            0,
+        ]
+        for value in cases:
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(engine._coerce_iso(value))
+
+
+def _neutral_tone(sharpness: float) -> dict:
+    """トーン前段（brightness/contrast/saturation）を恒等にした調整値。"""
+    return resolve_adjustments(
+        DEFAULT_PRESET,
+        {"brightness": 1.0, "contrast": 1.0, "saturation": 1.0, "sharpness": sharpness},
+    )
+
+
+def _reference_usm(source: np.ndarray, sigma: float, gain: float, threshold: float) -> np.ndarray:
+    """手計算の輝度限定USM（コアリング付き）。実装とは独立に組み立てる。"""
+    luma = source[..., 0] * 0.2126 + source[..., 1] * 0.7152 + source[..., 2] * 0.0722
+    blurred = engine.cv2.GaussianBlur(luma, (0, 0), sigmaX=sigma)
+    detail = luma - blurred
+    detail = np.sign(detail) * np.maximum(np.abs(detail) - threshold, 0.0)
+    return np.clip(source + detail[..., None] * gain, 0.0, 1.0)
+
+
+def _textured(height: int, width: int, seed: int = 0) -> np.ndarray:
+    """クリップしない中間調（0.3〜0.7）のランダムテクスチャ。"""
+    rng = np.random.default_rng(seed)
+    base = rng.uniform(0.3, 0.7, (height, width, 1)).astype(np.float32)
+    tint = np.array([1.0, 0.95, 0.9], dtype=np.float32)
+    return (base * tint).astype(np.float32)
+
+
+def _laplacian_energy(rgb: np.ndarray) -> float:
+    luma = (rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722).astype(np.float32)
+    return float(engine.cv2.Laplacian(luma, engine.cv2.CV_32F).var())
+
+
+class CaptureSharpeningTests(unittest.TestCase):
+    """撮影時シャープ（ENGINE_VERSION 16）: 出力サイズ・スライダー・ISO 依存。"""
+
+    def assert_matches_usm(self, source, adjustments, *, iso, sigma, gain, threshold):
+        toned = _apply_tone_array(source, adjustments, iso=iso)
+        expected = _reference_usm(source, sigma, gain, threshold)
+        np.testing.assert_allclose(toned, expected, rtol=0.0, atol=2e-6)
+        return toned
+
+    def test_base_gain_depends_on_output_long_edge(self):
+        cases = {
+            1600: (0.6, 0.5),
+            2000: (0.6, 0.5),
+            3000: (0.7, 0.6),
+            4000: (0.8, 0.7),
+            6000: (0.8, 0.7),
+        }
+        for long_edge, (sigma, gain) in cases.items():
+            with self.subTest(long_edge=long_edge):
+                source = _textured(6, long_edge, seed=long_edge)
+                self.assert_matches_usm(
+                    source, _neutral_tone(1.0), iso=None, sigma=sigma, gain=gain, threshold=0.5 / 255.0
+                )
+                # 縦長でも長辺で決まる。
+                portrait = np.ascontiguousarray(source.transpose(1, 0, 2))
+                self.assert_matches_usm(
+                    portrait, _neutral_tone(1.0), iso=None, sigma=sigma, gain=gain, threshold=0.5 / 255.0
+                )
+
+    def test_sharpness_one_is_no_longer_a_noop(self):
+        source = _textured(8, 1600)
+        toned = _apply_tone_array(source, _neutral_tone(1.0))
+        self.assertGreater(_laplacian_energy(toned), _laplacian_energy(source) * 1.2)
+
+    def test_slider_multiplier_is_clamped_at_the_upper_limit(self):
+        sigma, gain, _ = engine._capture_sharpen_params(4000, 1.6, None)
+        self.assertAlmostEqual(sigma, 0.8)
+        # 0.7 × 1.9 = 1.33 → 上限 1.2
+        self.assertAlmostEqual(gain, 1.2)
+        _, gain_small, _ = engine._capture_sharpen_params(1600, 1.6, None)
+        self.assertAlmostEqual(gain_small, 0.5 * 1.9)
+        source = _textured(6, 4000, seed=1)
+        self.assert_matches_usm(
+            source, _neutral_tone(1.6), iso=None, sigma=0.8, gain=1.2, threshold=0.5 / 255.0
+        )
+
+    def test_low_sharpness_is_a_weaker_sharpen_not_a_blur(self):
+        _, gain, _ = engine._capture_sharpen_params(4000, 0.8, None)
+        self.assertAlmostEqual(gain, 0.7 * 0.7)
+        source = _textured(6, 4000, seed=2)
+        toned = self.assert_matches_usm(
+            source, _neutral_tone(0.8), iso=None, sigma=0.8, gain=0.49, threshold=0.5 / 255.0
+        )
+        # ぼかしなら高周波エネルギーが入力を下回る。弱いシャープなので上回る。
+        self.assertGreater(_laplacian_energy(toned), _laplacian_energy(source))
+        stronger = _apply_tone_array(source, _neutral_tone(1.0))
+        self.assertLess(_laplacian_energy(toned), _laplacian_energy(stronger))
+
+    def test_iso_controls_coring_threshold_and_gain(self):
+        cases = {
+            # iso: (gain at 1600px, threshold)
+            None: (0.5, 0.5 / 255.0),
+            100.0: (0.5, 0.0),
+            400.0: (0.5, 0.0),
+            1000.0: (0.5, 0.5 / 255.0),
+            1600.0: (0.5, 1.0 / 255.0),
+            2400.0: (0.375, 1.0 / 255.0),
+            3200.0: (0.25, 1.0 / 255.0),
+            12800.0: (0.25, 1.0 / 255.0),
+        }
+        for iso, (gain, threshold) in cases.items():
+            with self.subTest(iso=iso):
+                sigma, actual_gain, actual_threshold = engine._capture_sharpen_params(1600, 1.0, iso)
+                self.assertAlmostEqual(sigma, 0.6)
+                self.assertAlmostEqual(actual_gain, gain)
+                self.assertAlmostEqual(actual_threshold, threshold)
+
+    def test_iso_is_applied_in_the_tone_array(self):
+        source = _textured(6, 1600, seed=3)
+        for iso, gain, threshold in (
+            (100.0, 0.5, 0.0),
+            (1600.0, 0.5, 1.0 / 255.0),
+            (3200.0, 0.25, 1.0 / 255.0),
+            (None, 0.5, 0.5 / 255.0),
+        ):
+            with self.subTest(iso=iso):
+                self.assert_matches_usm(
+                    source, _neutral_tone(1.0), iso=iso, sigma=0.6, gain=gain, threshold=threshold
+                )
+
+    def test_apply_tone_wrapper_keeps_unknown_iso(self):
+        source = _textured(6, 1600, seed=4)
+        image = Image.fromarray(np.rint(source * 255.0).astype(np.uint8), mode="RGB")
+        rgb = np.asarray(image, dtype=np.float32) / 255.0
+        expected = np.rint(_apply_tone_array(rgb, _neutral_tone(1.0), iso=None) * 255.0)
+        np.testing.assert_array_equal(
+            np.asarray(engine._apply_tone(image, _neutral_tone(1.0))), expected.astype(np.uint8)
+        )
+
+
+class FbddIsoAdaptationTests(unittest.TestCase):
+    """noise_reduction="light" の FBDD は ISO<800 で Off、それ以外（不明含む）は Light。"""
+
+    class FakeRaw:
+        camera_whitebalance = [2.0, 1.0, 1.5, 1.0]
+
+        def __init__(self, iso=None):
+            if iso is not None:
+                self.other = SimpleNamespace(iso_speed=iso)
+
+    def fbdd(self, noise_reduction, iso):
+        adjustments = resolve_adjustments(DEFAULT_PRESET, {"noise_reduction": noise_reduction})
+        params = engine._postprocess_params(self.FakeRaw(iso), adjustments, False)
+        return params["fbdd_noise_reduction"], params["median_filter_passes"]
+
+    def test_raw_iso_reads_other_iso_speed_safely(self):
+        self.assertEqual(engine._raw_iso(self.FakeRaw(100.0)), 100.0)
+        self.assertIsNone(engine._raw_iso(self.FakeRaw()))
+        self.assertIsNone(engine._raw_iso(self.FakeRaw(0.0)))
+        self.assertIsNone(engine._raw_iso(SimpleNamespace(other=SimpleNamespace())))
+        self.assertIsNone(engine._raw_iso(mock.MagicMock()))
+
+    def test_light_is_off_at_low_iso_and_light_otherwise(self):
+        mode = rawpy.FBDDNoiseReductionMode
+        self.assertEqual(self.fbdd("light", 100.0), (mode.Off, 0))
+        self.assertEqual(self.fbdd("light", 799.0), (mode.Off, 0))
+        self.assertEqual(self.fbdd("light", 800.0), (mode.Light, 0))
+        self.assertEqual(self.fbdd("light", 3200.0), (mode.Light, 0))
+        self.assertEqual(self.fbdd("light", None), (mode.Light, 0))
+
+    def test_full_and_off_ignore_iso(self):
+        mode = rawpy.FBDDNoiseReductionMode
+        for iso in (100.0, 3200.0, None):
+            with self.subTest(iso=iso):
+                self.assertEqual(self.fbdd("full", iso), (mode.Full, 1))
+                self.assertEqual(self.fbdd("off", iso), (mode.Off, 0))
 
 
 if __name__ == "__main__":

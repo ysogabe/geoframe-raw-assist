@@ -193,6 +193,9 @@ def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[D
 
     デコード時パラメータは engine の `_postprocess_params` をそのまま使い、
     ``half_size`` だけ True に差し替える（wb_temp・auto_bright・向き補正も engine と同じ）。
+
+    渡す関数には属性 ``iso``（RAW の撮影 ISO。取れなければ None）を付ける。
+    後段の撮影時シャープ（`render_proxy`）が本番と同じ ISO 依存になるようにするため。
     """
 
     import rawpy
@@ -217,6 +220,8 @@ def open_raw_half_decoder(source_path: Path, base: dict[str, Any]) -> Iterator[D
         except (rawpy.LibRawError, OSError) as error:
             raise DevelopmentCandidateError(f"ARWの縮小デコードに失敗しました: {error}") from error
         return engine._resize_array(engine._decode_16bit_to_float01(rgb), DECODE_EDGE)
+
+    decode.iso = engine._raw_iso(raw)  # type: ignore[attr-defined]
 
     try:
         yield decode
@@ -249,14 +254,18 @@ class DecodeCache:
         return array
 
 
-def render_proxy(decoded: np.ndarray, adjustments: dict[str, Any]) -> np.ndarray:
+def render_proxy(
+    decoded: np.ndarray,
+    adjustments: dict[str, Any],
+    iso: float | None = None,
+) -> np.ndarray:
     """デコード済み配列へ engine の後段（shadow_lift → resize → tone）を適用する。
 
     ``engine.develop_raw`` の後段と同じ関数（`engine.apply_post_decode_chain`）。
-    レンズ補正は省略している。
+    レンズ補正は省略している。`iso` は撮影時シャープの ISO 依存に使う（不明なら None）。
     """
 
-    return engine.apply_post_decode_chain(decoded, adjustments, MAX_PROXY_EDGE)
+    return engine.apply_post_decode_chain(decoded, adjustments, MAX_PROXY_EDGE, iso=iso)
 
 
 def _connected_bright_components(mask: np.ndarray) -> list[tuple[int, int, int, int, int]]:
@@ -582,13 +591,24 @@ def _adjustments_from_vector(vector: Sequence[float], base: dict[str, Any], nois
     return result
 
 
+# シャープネスの探索上限。原寸（長辺 >= 4000px）の撮影時シャープは
+# gain = SHARPEN_GAIN_LARGE * (1 + (s - 1) * SHARPEN_SLIDER_SLOPE) で、これが
+# SHARPEN_GAIN_MAX に達する s = 1 + (GAIN_MAX / GAIN_LARGE - 1) / SLOPE (≈ 1.476) 以上は
+# 上限に張り付いて本番出力に差が出ない。それ以上を探索しても無駄なので、境界の少し
+# 手前（1.47）で打ち切る。
+_SHARPNESS_SEARCH_MAX = 1.47
+assert _SHARPNESS_SEARCH_MAX <= 1.0 + (
+    engine.SHARPEN_GAIN_MAX / engine.SHARPEN_GAIN_LARGE - 1.0
+) / engine.SHARPEN_SLIDER_SLOPE
+
+
 def _safe_vector(vector: Sequence[float]) -> bool:
     """Reject combinations that are technically in range but visibly extreme."""
 
     values = {key: float(vector[index]) for index, key in enumerate(SEARCH_KEYS)}
     if abs(values["exposure"]) > 1.85:
         return False
-    if values["saturation"] > 1.42 or values["sharpness"] > 1.54:
+    if values["saturation"] > 1.42 or values["sharpness"] > _SHARPNESS_SEARCH_MAX:
         return False
     if values["shadow_lift"] > 96 and values["brightness"] > 1.30:
         return False
@@ -783,11 +803,19 @@ def _validate_request(capture_id: str, preset: str, seed: int | None, budget: in
 class _Evaluator:
     """デコードキャッシュ経由で調整値を評価する（同一調整値はメモ化）。"""
 
-    def __init__(self, cache: DecodeCache, exif: dict[str, Any], base: dict[str, Any], star_gate: bool) -> None:
+    def __init__(
+        self,
+        cache: DecodeCache,
+        exif: dict[str, Any],
+        base: dict[str, Any],
+        star_gate: bool,
+        iso: float | None = None,
+    ) -> None:
         self.cache = cache
         self.exif = exif
         self.base = base
         self.star_gate = star_gate
+        self.iso = iso
         self._memo: dict[tuple[Any, ...], dict[str, Any]] = {}
         self.image = self.render(base)
         gray = np.sum(self.image * np.array([0.2126, 0.7152, 0.0722], dtype=np.float32), axis=2)
@@ -800,7 +828,7 @@ class _Evaluator:
             str(adjustments["noise_reduction"]),
             float(adjustments["exposure"]),
         )
-        return render_proxy(decoded, adjustments)
+        return render_proxy(decoded, adjustments, iso=self.iso)
 
     def evaluate(self, adjustments: dict[str, Any], star_gate: bool) -> dict[str, Any]:
         key = (star_gate, *(adjustments[name] for name in sorted(adjustments)))
@@ -944,11 +972,15 @@ def generate_development_candidates(
 
     with factory(arw_path, dict(base)) as decode:
         cache = DecodeCache(decode)
+        # 撮影 ISO は RAW（デコーダの属性）→ ペアJPGの EXIF の順に取る（engine.develop_raw と同じ）。
+        iso = engine._coerce_iso(getattr(decode, "iso", None))
+        if iso is None:
+            iso = engine._coerce_iso(exif.get("iso"))
         # 基準（natural）= プリセット値のまま同じ代理パイプラインで作った画像。
-        baseline_evaluator = _Evaluator(cache, exif, base, star_gate=False)
+        baseline_evaluator = _Evaluator(cache, exif, base, star_gate=False, iso=iso)
         star = detect_star_scene(baseline_evaluator.image, exif)
         # star 系指標は基準側も候補と同じ関数・同じ条件で計算する（トートロジーの解消）。
-        evaluator = _Evaluator(cache, exif, base, star_gate=bool(star["is_star_scene"]))
+        evaluator = _Evaluator(cache, exif, base, star_gate=bool(star["is_star_scene"]), iso=iso)
         base_metrics = evaluator.metrics
         styles = _candidate_style_ids(evaluator.image, exif, star)
         search_styles = [style for style in styles if style != "natural"]

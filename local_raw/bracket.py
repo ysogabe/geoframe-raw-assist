@@ -68,7 +68,10 @@ from .engine import (
     _apply_shadow_lift_array,
     _apply_tone_array,
     _array_to_image,
+    _coerce_iso,
     _decode_16bit_to_float01,
+    _fbdd_mode_for,
+    _raw_iso,
     _resize_array,
     _relative_path,
     _resolve_save_kwargs,
@@ -189,18 +192,10 @@ def _merge_postprocess_params(
       合成では使わない。ハイライトの階調は「暗いフレーム」が持っている。
 
     デモザイク・色空間・ビット深度（AHD / sRGB / 16bit）と、`wb_temp` /
-    `noise_reduction` の解釈は既存の現像と揃える。
+    `noise_reduction` の解釈（`"light"` の ISO 適応を含む。`engine._fbdd_mode_for`）は
+    既存の現像と揃える。
     """
-    noise_reduction = adjustments["noise_reduction"]
-    if noise_reduction == "full":
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Full
-        median_passes = 1
-    elif noise_reduction == "light":
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Light
-        median_passes = 0
-    else:
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Off
-        median_passes = 0
+    fbdd_mode, median_passes = _fbdd_mode_for(adjustments["noise_reduction"], _raw_iso(raw))
 
     params: dict[str, Any] = {
         "output_color": rawpy.ColorSpace.sRGB,
@@ -232,15 +227,21 @@ def _decode_frame(
     source_path: Path,
     adjustments: dict[str, Any],
     preview: bool,
+    metadata: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """1フレームを露出差を保ったままデコードし `(H, W, 3)` float32 を返す。
 
     合成段だけを rawpy 無しで検証できるよう、**モジュール関数として切り出している**
     （`tests/test_bracket.py` はここを差し替える）。`merge_bracket` の中に
     `rawpy.imread` を直接書かないこと。
+
+    `metadata` に dict を渡すと、RAW から読んだ撮影 ISO を `metadata["iso"]` に
+    書き込む（取れなければ None）。戻り値の型を変えずに後段へ ISO を渡すため。
     """
     try:
         with rawpy.imread(str(source_path)) as raw:
+            if metadata is not None:
+                metadata["iso"] = _raw_iso(raw)
             rgb = raw.postprocess(**_merge_postprocess_params(raw, adjustments, preview))
     except (rawpy.LibRawError, OSError) as error:
         # 例外の詳細（`[Errno 13] ... '/Users/.../DSC04510.ARW'` のように内部の絶対パスを
@@ -742,10 +743,20 @@ def merge_bracket(
     )
     decoded_frames: list[np.ndarray] = []
     frame_records: list[dict[str, Any]] = []
-    for capture_id, source_path, lens_resolution in zip(
-        normalized_ids, source_paths, lens_resolutions
+    # 撮影時シャープの ISO 依存には**先頭フレーム**の ISO を使う（EXIF 継承と同じ基準）。
+    # 既知の制約: FBDD（`_merge_postprocess_params`）はフレームごとの RAW ISO で決まるが、
+    # シャープは先頭フレームの ISO で決まる。Auto ISO のブラケットで ISO 800 をまたぐと、
+    # フレーム間で FBDD の有無が分かれうる（挙動は変えない）。
+    first_frame_iso: float | None = None
+    for index, (capture_id, source_path, lens_resolution) in enumerate(
+        zip(normalized_ids, source_paths, lens_resolutions)
     ):
-        rgb = _decode_frame(source_path, resolved, preview)
+        frame_metadata: dict[str, Any] = {}
+        rgb = _decode_frame(source_path, resolved, preview, metadata=frame_metadata)
+        if index == 0:
+            first_frame_iso = _coerce_iso(frame_metadata.get("iso"))
+            if first_frame_iso is None:
+                first_frame_iso = _coerce_iso(capture_exifs[0].get("iso"))
         decoded_frames.append(np.ascontiguousarray(rgb))
         frame_records.append(
             {
@@ -787,7 +798,7 @@ def merge_bracket(
     # --- 5. リサイズ → 6. shadow_lift → トーン調整（各1回だけ） ---
     merged = _resize_array(merged, effective_max_edge)
     merged = _apply_shadow_lift_array(merged, float(resolved["shadow_lift"]))
-    merged = _apply_tone_array(merged, resolved)
+    merged = _apply_tone_array(merged, resolved, iso=first_frame_iso)
     image = _array_to_image(merged)
 
     # --- 7. 保存（EXIF は先頭フレームから継承） ---

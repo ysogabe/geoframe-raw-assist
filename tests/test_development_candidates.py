@@ -224,9 +224,63 @@ class CandidateOptimizerTests(unittest.TestCase):
         adjustments = resolve_adjustments(
             "landscape_clear", {"shadow_lift": 40, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3, "sharpness": 1.4}
         )
-        expected = engine.apply_post_decode_chain(decoded, adjustments, candidates.MAX_PROXY_EDGE)
-        np.testing.assert_array_equal(candidates.render_proxy(decoded, adjustments), expected)
-        self.assertEqual(max(expected.shape[:2]), candidates.MAX_PROXY_EDGE)
+        for iso in (None, 3200.0):
+            with self.subTest(iso=iso):
+                expected = engine.apply_post_decode_chain(
+                    decoded, adjustments, candidates.MAX_PROXY_EDGE, iso=iso
+                )
+                np.testing.assert_array_equal(
+                    candidates.render_proxy(decoded, adjustments, iso=iso), expected
+                )
+                self.assertEqual(max(expected.shape[:2]), candidates.MAX_PROXY_EDGE)
+
+    def test_raw_iso_reaches_render_proxy(self):
+        """デコーダの ``iso`` 属性（RAW の ISO）が代理画像の後段まで渡る。"""
+        scene = make_scene(stars=False)
+
+        def factory(path, base):
+            @contextmanager
+            def opened():
+                def decode(category, noise_reduction, exposure):
+                    return scene
+
+                decode.iso = 250.0
+                yield decode
+
+            return opened()
+
+        seen: list = []
+        real_render = candidates.render_proxy
+
+        def render(decoded, adjustments, iso=None):
+            seen.append(iso)
+            return real_render(decoded, adjustments, iso=iso)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "DSC00001.ARW").write_bytes(b"")
+            with (
+                mock.patch.object(config, "source_root", return_value=root),
+                mock.patch.object(candidates, "render_proxy", side_effect=render),
+            ):
+                candidates.generate_development_candidates(
+                    "DSC00001", "neutral_recovery", seed=7, budget=32, decoder_factory=factory
+                )
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {250.0})
+
+    def test_unknown_iso_reaches_render_proxy_as_none(self):
+        seen: list = []
+        real_render = candidates.render_proxy
+
+        def render(decoded, adjustments, iso=None):
+            seen.append(iso)
+            return real_render(decoded, adjustments, iso=iso)
+
+        with mock.patch.object(candidates, "render_proxy", side_effect=render):
+            self.generate(FakeDecoder(make_scene(stars=False)))
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {None})
 
     def test_baseline_deviation_is_against_natural_not_camera_jpg(self):
         decoder = FakeDecoder(make_scene(stars=False))
@@ -433,6 +487,26 @@ class CandidateOptimizerTests(unittest.TestCase):
         self.assertEqual(kwargs["exp_shift"], 1.0)
         self.assertIs(kwargs["no_auto_bright"], False)
 
+    def test_production_decoder_exposes_raw_iso_and_adapts_fbdd(self):
+        import rawpy
+
+        raw = self.fake_raw()
+        raw.other = SimpleNamespace(iso_speed=100.0)
+        base = resolve_adjustments("neutral_recovery")
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(Path("/nonexistent/DSC00001.ARW"), base) as decode:
+                self.assertEqual(decode.iso, 100.0)
+                decode("blend", "light", 0.0)
+        self.assertEqual(
+            raw.postprocess.call_args.kwargs["fbdd_noise_reduction"], rawpy.FBDDNoiseReductionMode.Off
+        )
+
+        # MagicMock の other.iso_speed（数値ではない）は ISO 不明として扱う。
+        raw = self.fake_raw()
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(Path("/nonexistent/DSC00001.ARW"), base) as decode:
+                self.assertIsNone(decode.iso)
+
     def test_production_decoder_maps_categories_and_noise_reduction(self):
         import rawpy
 
@@ -622,8 +696,8 @@ class CandidateOptimizerTests(unittest.TestCase):
         base = resolve_adjustments("neutral_recovery")
         real_render = candidates.render_proxy
 
-        def render(decoded, adjustments):
-            image = real_render(decoded, adjustments)
+        def render(decoded, adjustments, iso=None):
+            image = real_render(decoded, adjustments, iso=iso)
             return image if adjustments == base else np.ones_like(image)
 
         with mock.patch.object(candidates, "render_proxy", side_effect=render):
