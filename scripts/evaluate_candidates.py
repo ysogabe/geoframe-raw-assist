@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import statistics
 import sys
 import time
@@ -45,7 +46,7 @@ from typing import Any, Iterable, Sequence
 from unittest import mock
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ``python scripts/evaluate_candidates.py`` は ``scripts/`` を sys.path の先頭に置くため、
 # リポジトリ直下の local_raw を import できるようにする（evaluate_raw.py と同じ流儀）。
@@ -58,6 +59,8 @@ from local_raw.lens import apply_lens_correction, probe_lens  # noqa: E402
 from local_raw.presets import DEFAULT_PRESET, PRESETS  # noqa: E402
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
+#: root キー名はケースキー（= 出力ファイル名）に入るため、安全な文字だけを許す。
+ROOT_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 DEFAULT_ROOT_KEY = "default"
 DEFAULT_OUT_PARENT = PROJECT_ROOT / "outputs" / "eval_candidates"
 
@@ -89,9 +92,18 @@ FRAME_EDGE = 480
 # ---------------------------------------------------------------------------
 
 
+def validate_root_key(key: str) -> str:
+    """root キー名を検証する（英数字・``_``・``-`` のみ。ファイル名に使うため）。"""
+
+    if not isinstance(key, str) or not ROOT_KEY_PATTERN.fullmatch(key):
+        raise ValueError(f"root キー名は英数字・_・- だけで指定してください: {key!r}")
+    return key
+
+
 def parse_case_spec(spec: str, root: str = DEFAULT_ROOT_KEY) -> dict[str, str]:
     """``DSC02849:neutral_recovery`` → ``{"root", "capture_id", "preset"}``（プリセット省略可）。"""
 
+    validate_root_key(root)
     parts = [part.strip() for part in str(spec).split(":")]
     if len(parts) == 1:
         capture_id, preset = parts[0], DEFAULT_PRESET
@@ -122,6 +134,7 @@ def load_cases_file(path: Path) -> list[dict[str, str]]:
         specs = entry.get("cases") if isinstance(entry, dict) else None
         if not isinstance(root, str) or not root or not isinstance(specs, list):
             raise ValueError("sets の各要素には root（文字列）と cases（配列）が必要です。")
+        validate_root_key(root)
         cases.extend(parse_case_spec(spec, root) for spec in specs)
     return cases
 
@@ -136,7 +149,7 @@ def parse_root_args(root_args: Sequence[str] | None, source_root: Path | None) -
         key, sep, value = str(item).partition("=")
         if not sep or not key.strip() or not value.strip():
             raise ValueError(f"--root は キー=パス の形式で指定してください: {item!r}")
-        roots[key.strip()] = Path(value.strip()).expanduser().resolve()
+        roots[validate_root_key(key.strip())] = Path(value.strip()).expanduser().resolve()
     return roots
 
 
@@ -452,14 +465,18 @@ def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_summary(records: Sequence[dict[str, Any]], errors: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
-    """評価レコード群から summary.json の内容を作る。"""
+def build_summary(records: Sequence[dict[str, Any]], errors: Sequence[dict[str, Any]] | None = ()) -> dict[str, Any]:
+    """評価レコード群から summary.json の内容を作る。
+
+    ``errors`` が None のときは「エラー件数は不明」（元の summary が無い再集計）を表し、
+    ``summary["errors"]`` も None にする（0件と区別する）。
+    """
 
     ok = [r for r in records if _natural(r) is not None]
     return {
         "cases": len(records),
         "cases_with_raw_metrics": len(ok),
-        "errors": list(errors),
+        "errors": None if errors is None else list(errors),
         "candidates_total": sum(len(r["candidates"]) for r in records),
         "proxy_vs_raw": compare_proxy_vs_raw(ok),
         "broken_candidates": find_broken_candidates(ok),
@@ -487,7 +504,7 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
     lines += [
         f"- ケース数: {summary['cases']}（実RAW指標あり {summary['cases_with_raw_metrics']}）",
         f"- 候補総数: {summary['candidates_total']}",
-        f"- エラー: {len(summary['errors'])}",
+        f"- エラー: {'不明（再集計のため）' if summary['errors'] is None else len(summary['errors'])}",
         "",
         "## 代理 vs 実RAW",
         "",
@@ -570,7 +587,9 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
         lines.append(
             f"| {label} | {d['n']} | {_fmt(d['mean'], 1)} | {_fmt(d['median'], 1)} | {_fmt(d['p90'], 1)} | {_fmt(d['min'], 1)} | {_fmt(d['max'], 1)} |"
         )
-    if summary["errors"]:
+    if summary["errors"] is None:
+        lines += ["", "## エラー", "", "不明（元の summary.json が無い再集計のため）"]
+    elif summary["errors"]:
         lines += ["", "## エラー", ""]
         lines += [f"- {e['case']}: {e['error']}" for e in summary["errors"]]
     return "\n".join(lines) + "\n"
@@ -604,7 +623,50 @@ def save_frame(rgb: np.ndarray, path: Path, edge: int = FRAME_EDGE) -> None:
 
 
 def case_key(case: dict[str, str]) -> str:
-    return f"{case['capture_id']}__{case['preset']}"
+    """ケースの識別子（case JSON / frames / コンタクトシートのファイル名）。root を含めて衝突を避ける。"""
+
+    return f"{validate_root_key(case['root'])}__{case['capture_id']}__{case['preset']}"
+
+
+def save_pair_frame(jpg_path: Path, dest: Path, edge: int = FRAME_EDGE) -> None:
+    """カメラ JPG を EXIF の向きを反映して縮小保存する（実RAW側のフレームと向きを揃える）。"""
+
+    with Image.open(jpg_path) as pair:
+        pair = ImageOps.exif_transpose(pair)
+        pair = pair.convert("RGB")
+        pair.thumbnail((edge, edge))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pair.save(dest, "JPEG", quality=90)
+
+
+#: --force で消す出力ディレクトリ・ファイル（--out 配下のこれらだけ。他は消さない）。
+OUT_SUBDIRS: tuple[str, ...] = ("cases", "frames", "contact_sheets")
+OUT_FILES: tuple[str, ...] = ("summary.json", "summary.md")
+
+
+def prepare_out_dir(out_dir: Path, force: bool) -> None:
+    """通常実行の出力先を準備する。既存の cases/*.json があれば、古い結果が混ざらないよう停止。
+
+    ``force`` のときだけ ``cases/`` ``frames/`` ``contact_sheets/`` と summary.* を消す。
+    """
+
+    existing = sorted((out_dir / "cases").glob("*.json")) if (out_dir / "cases").is_dir() else []
+    if existing and not force:
+        raise SystemExit(
+            f"出力先に既存の cases/*.json があります（{len(existing)}件）: {out_dir}\n"
+            "古い結果が混ざるため停止しました。別の --out を指定するか、--force で"
+            " cases/ frames/ contact_sheets/ と summary.* を消して再実行してください。"
+        )
+    if force:
+        for name in OUT_SUBDIRS:
+            target = out_dir / name
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+        for name in OUT_FILES:
+            (out_dir / name).unlink(missing_ok=True)
+    (out_dir / "cases").mkdir(parents=True, exist_ok=True)
 
 
 def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str, Any]:
@@ -629,11 +691,7 @@ def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str
 
     frames_dir = out_dir / "frames"
     if jpg_path is not None:
-        with Image.open(jpg_path) as pair:
-            pair = pair.convert("RGB")
-            pair.thumbnail((FRAME_EDGE, FRAME_EDGE))
-            frames_dir.mkdir(parents=True, exist_ok=True)
-            pair.save(frames_dir / f"{key}__jpg.jpg", "JPEG", quality=90)
+        save_pair_frame(jpg_path, frames_dir / f"{key}__jpg.jpg")
 
     is_star = bool(result["star_scene"]["is_star_scene"])
     candidates = [dict(c) for c in result["candidates"]]
@@ -770,6 +828,25 @@ def _load_records(out_dir: Path) -> list[dict[str, Any]]:
     return [json.loads(p.read_text(encoding="utf-8")) for p in sorted((out_dir / "cases").glob("*.json"))]
 
 
+def load_previous_run_info(out_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+    """再集計用に、元の summary.json の meta と errors を引き継ぐ。
+
+    summary.json が無い/壊れているときは meta は最小限、errors は None（不明）を返す。
+    """
+
+    try:
+        payload = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        meta = payload["meta"]
+        errors = payload["summary"]["errors"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"aggregated_from": str(out_dir)}, None
+    if not isinstance(meta, dict):
+        meta = {}
+    if errors is not None and not isinstance(errors, list):
+        errors = None
+    return dict(meta), errors
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="現像候補自動生成を、実RAW現像との比較で評価します。")
     parser.add_argument("--source-root", type=Path, help="root キー default のフォルダ（--case 用の既定）")
@@ -778,6 +855,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--cases-file", type=Path, help="ケース定義 JSON（scripts/eval_cases/*.json）")
     parser.add_argument("--out", type=Path, help="出力先（既定: outputs/eval_candidates/<timestamp>）")
     parser.add_argument("--contact-sheets", action="store_true", help="写真ごとの一覧画像を作る")
+    parser.add_argument("--force", action="store_true", help="--out に既存の cases/*.json があっても、cases/ frames/ contact_sheets/ と summary.* を消して実行する")
     parser.add_argument("--aggregate-only", action="store_true", help="--out の cases/*.json から summary（と一覧）だけ作り直す")
     args = parser.parse_args(argv)
 
@@ -791,7 +869,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.contact_sheets:
             for record in records:
                 build_contact_sheet(record, out_dir)
-        _write_summary(out_dir, records, [], {"aggregated_from": str(out_dir)})
+        meta, errors = load_previous_run_info(out_dir)
+        meta["aggregated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _write_summary(out_dir, records, errors, meta)
         print(f"summary を更新しました: {out_dir}")
         return
 
@@ -807,7 +887,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit(str(error)) from error
 
     out_dir = (args.out or DEFAULT_OUT_PARENT / time.strftime("%Y%m%d-%H%M%S")).expanduser().resolve()
-    (out_dir / "cases").mkdir(parents=True, exist_ok=True)
+    prepare_out_dir(out_dir, args.force)
     meta = {
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "engine_version": engine.ENGINE_VERSION,

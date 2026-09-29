@@ -100,6 +100,8 @@ npm run develop:raw -- DSC02943 --preset nightscape
 （`scripts/evaluate_raw.py` がプリセットのガードレール評価なのに対し、こちらは候補生成のチューニング前後比較用）。
 現像元フォルダ・アプリ設定・`outputs/` の通常成果物には書き込みません。出力は `outputs/eval_candidates/<日時>/`
 （`summary.json` / `summary.md` / `cases/` / `frames/`、`--contact-sheets` で `contact_sheets/`）。1ケース約40秒です。
+`--out` に既存の結果があると古い結果が混ざらないよう停止します（`--force` でその出力先の結果だけ消して再実行）。
+`--aggregate-only --out <dir>` は既存の `cases/` から集計だけやり直し、元の実行時情報とエラー件数を引き継ぎます。
 
 ```bash
 # 基準ケース集（scripts/eval_cases/candidates_baseline.json）。root キーの実フォルダは --root で渡す

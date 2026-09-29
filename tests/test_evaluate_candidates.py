@@ -3,16 +3,22 @@
 実データには依存しない（合成レコードと一時ディレクトリのみ）。
 """
 
+import contextlib
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import numpy as np
+from PIL import Image
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import evaluate_candidates as ec  # noqa: E402
+from local_raw import engine  # noqa: E402
 
 
 def _metrics(**overrides):
@@ -174,6 +180,218 @@ class JudgementTests(unittest.TestCase):
         self.assertEqual(summary["exposure_non_natural"], {"+0.0": 1, "+1.0": 1})
         self.assertEqual(summary["candidate_count_histogram"], {"3": 1})
         self.assertIn("代理 vs 実RAW", ec.render_markdown(summary))
+
+
+class RootKeyTests(unittest.TestCase):
+    def test_case_key_includes_root(self):
+        a = ec.parse_case_spec("DSC00001:nightscape", "a")
+        b = ec.parse_case_spec("DSC00001:nightscape", "b")
+        self.assertEqual(ec.case_key(a), "a__DSC00001__nightscape")
+        self.assertNotEqual(ec.case_key(a), ec.case_key(b))
+        self.assertEqual(ec.case_key(ec.parse_case_spec("DSC00001")), "default__DSC00001__neutral_recovery")
+
+    def test_same_capture_in_two_roots_do_not_collide_in_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            keys = {ec.case_key(ec.parse_case_spec("DSC00001", root)) for root in ("a", "b")}
+            self.assertEqual(len(keys), 2)
+            for key in keys:
+                (out / "cases").mkdir(exist_ok=True)
+                (out / "cases" / f"{key}.json").write_text("{}")
+            self.assertEqual(len(list((out / "cases").glob("*.json"))), 2)
+
+    def test_root_key_validation(self):
+        for good in ("default", "image_work", "stars-2", "A1"):
+            self.assertEqual(ec.validate_root_key(good), good)
+        for bad in ("", "a/b", "a b", "../x", "a.b", "日本語"):
+            with self.assertRaises(ValueError, msg=bad):
+                ec.validate_root_key(bad)
+            with self.assertRaises(ValueError, msg=bad):
+                ec.parse_case_spec("DSC00001", bad)
+            with self.assertRaises(ValueError, msg=bad):
+                ec.parse_root_args([f"{bad}=/tmp"], None)
+
+    def test_cases_file_rejects_bad_root_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.json"
+            path.write_text(json.dumps({"sets": [{"root": "a/b", "cases": ["DSC00001"]}]}))
+            with self.assertRaises(ValueError):
+                ec.load_cases_file(path)
+
+
+def _write_case(out, key="a__DSC00001__neutral_recovery"):
+    record = _record(key, _cand("natural"))
+    (out / "cases").mkdir(parents=True, exist_ok=True)
+    (out / "cases" / f"{key}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+class AggregateOnlyTests(unittest.TestCase):
+    def test_meta_and_errors_carried_over(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            _write_case(out)
+            meta = {"started_at": "2026-01-01 00:00:00", "engine_version": "v9", "roots": {"a": "/x"}}
+            errors = [{"case": "a__DSC00002__neutral_recovery", "error": "boom"}]
+            ec._write_summary(out, [json.loads(p.read_text()) for p in (out / "cases").glob("*.json")], errors, meta)
+            ec.main(["--aggregate-only", "--out", str(out)])
+            data = json.loads((out / "summary.json").read_text())
+            self.assertEqual(data["meta"]["started_at"], "2026-01-01 00:00:00")
+            self.assertEqual(data["meta"]["engine_version"], "v9")
+            self.assertEqual(data["meta"]["roots"], {"a": "/x"})
+            self.assertIn("aggregated_at", data["meta"])
+            self.assertEqual(data["summary"]["errors"], errors)
+            self.assertIn("エラー: 1", (out / "summary.md").read_text())
+
+    def test_missing_summary_means_errors_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            _write_case(out)
+            ec.main(["--aggregate-only", "--out", str(out)])
+            data = json.loads((out / "summary.json").read_text())
+            self.assertIsNone(data["summary"]["errors"])
+            self.assertIn("aggregated_at", data["meta"])
+            md = (out / "summary.md").read_text()
+            self.assertIn("エラー: 不明（再集計のため）", md)
+            self.assertNotIn("エラー: 0", md)
+
+    def test_broken_summary_is_treated_as_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "summary.json").write_text("{not json")
+            self.assertIsNone(ec.load_previous_run_info(out)[1])
+
+    def test_zero_errors_still_rendered_as_zero(self):
+        summary = ec.build_summary([], [])
+        self.assertIn("エラー: 0", ec.render_markdown(summary))
+
+
+class PrepareOutDirTests(unittest.TestCase):
+    def test_existing_cases_stop_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            _write_case(out)
+            with self.assertRaises(SystemExit):
+                ec.prepare_out_dir(out, force=False)
+            self.assertTrue(any((out / "cases").glob("*.json")))
+
+    def test_fresh_dir_is_ok_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "new"
+            ec.prepare_out_dir(out, force=False)
+            self.assertTrue((out / "cases").is_dir())
+
+    def test_force_removes_only_known_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            _write_case(out)
+            for sub in ("frames", "contact_sheets"):
+                (out / sub).mkdir()
+                (out / sub / "x.jpg").write_bytes(b"x")
+            (out / "summary.json").write_text("{}")
+            (out / "summary.md").write_text("x")
+            (out / "keep_dir").mkdir()
+            (out / "keep_dir" / "f.txt").write_text("k")
+            (out / "notes.txt").write_text("k")
+            ec.prepare_out_dir(out, force=True)
+            self.assertEqual(list((out / "cases").iterdir()), [])
+            self.assertFalse((out / "frames").exists())
+            self.assertFalse((out / "contact_sheets").exists())
+            self.assertFalse((out / "summary.json").exists())
+            self.assertFalse((out / "summary.md").exists())
+            self.assertTrue((out / "keep_dir" / "f.txt").is_file())
+            self.assertTrue((out / "notes.txt").is_file())
+
+
+class PairFrameTests(unittest.TestCase):
+    def test_exif_orientation_is_applied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dest = Path(tmp) / "p.jpg", Path(tmp) / "out" / "f.jpg"
+            image = Image.new("RGB", (60, 40), (200, 100, 50))
+            exif = Image.Exif()
+            exif[0x0112] = 6  # 90度回転して表示する向き
+            image.save(src, "JPEG", exif=exif)
+            ec.save_pair_frame(src, dest)
+            with Image.open(dest) as frame:
+                self.assertEqual(frame.size, (40, 60))  # 横長 60x40 → 縦長 40x60
+
+    def test_no_orientation_keeps_size_and_shrinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dest = Path(tmp) / "p.jpg", Path(tmp) / "f.jpg"
+            Image.new("RGB", (1200, 800)).save(src, "JPEG")
+            ec.save_pair_frame(src, dest)
+            with Image.open(dest) as frame:
+                self.assertEqual(frame.size, (ec.FRAME_EDGE, 320))
+
+
+class DevelopParityTests(unittest.TestCase):
+    """develop_real_array が engine.develop_raw と同じ関数を同じ順序・同じ引数で呼ぶこと。"""
+
+    class FakeRaw:
+        camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def postprocess(self, **kwargs):
+            return np.full((40, 60, 3), 30000, dtype=np.uint16)
+
+    def _recorded(self, calls):
+        """engine の各段を wraps で記録する patch 群。lens は ec 側の import 名も差し替える。"""
+
+        def wrap(target, name, label):
+            original = getattr(target, name)
+
+            def recorder(*args, **kwargs):
+                calls.append((label, args[1:] if label != "decode16" else ()))
+                return original(*args, **kwargs)
+
+            return mock.patch.object(target, name, side_effect=recorder)
+
+        return [
+            wrap(engine, "_postprocess_params", "postprocess_params"),
+            wrap(engine, "_decode_16bit_to_float01", "decode16"),
+            wrap(engine, "apply_lens_correction", "lens"),
+            wrap(ec, "apply_lens_correction", "lens"),
+            wrap(engine, "apply_post_decode_chain", "chain"),
+        ]
+
+    def _run(self, runner):
+        calls: list = []
+        with contextlib.ExitStack() as stack:
+            for patch in self._recorded(calls):
+                stack.enter_context(patch)
+            runner()
+        return calls
+
+    def test_call_order_is_fixed(self):
+        adjustments = engine.resolve_adjustments("neutral_recovery")
+        calls = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({})))
+        self.assertEqual([c[0] for c in calls], ["postprocess_params", "decode16", "lens", "chain"])
+        self.assertEqual(calls[0][1], (adjustments, True))  # preview 相当（full デコード）
+        self.assertEqual(calls[3][1], (adjustments, engine.PREVIEW_MAX_EDGE))
+
+    def test_same_calls_as_engine_develop_raw(self):
+        adjustments = engine.resolve_adjustments("neutral_recovery")
+        mine = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({})))
+
+        def run_engine():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "src"
+                root.mkdir()
+                (root / "DSC00001.ARW").write_bytes(b"")
+                with (
+                    mock.patch.object(engine.config, "source_root", return_value=root),
+                    mock.patch.object(engine, "OUTPUT_ROOT", Path(directory) / "out"),
+                    mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
+                    mock.patch.object(engine.rawpy, "imread", return_value=self.FakeRaw()),
+                ):
+                    engine.develop_raw("DSC00001", "neutral_recovery", preview=True)
+
+        theirs = self._run(run_engine)
+        self.assertEqual(mine, theirs)
 
 
 if __name__ == "__main__":
