@@ -5,9 +5,12 @@ import { assetUrl } from "../lib/raw-api";
 import type { Analysis, CaptureId, GroupInfo } from "../lib/types";
 
 // 帯が固定されてから、さらにこれだけ（px）スクロールしたらコンパクト表示へ倒す。
-// 戻すのは帯が固定を外れたとき（下の sentinel が見えたとき）。入る/出るの閾値を
-// ずらしておくことで、境目で止まったときに表示が行き来しない。
-const COMPACT_ENTER_OFFSET = 24;
+// 戻すのは帯が固定を外れたとき（下の sentinel が見えたとき）。
+// 縮むと文書の高さが「通常表示とコンパクト表示の高さの差」ぶん減り、ページ下端付近では
+// スクロール位置がその分クランプされて戻される。入る閾値がその差より小さいと、クランプで
+// 判定が戻って通常表示に復帰 → 高さが戻る → …と縮小/復帰を繰り返してチカチカする。
+// なので入る閾値は差（約 85px）より十分大きく取る。
+const COMPACT_ENTER_OFFSET = 140;
 
 type GroupStripProps = {
   analysis: Analysis;

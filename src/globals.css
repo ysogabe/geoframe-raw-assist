@@ -231,9 +231,9 @@ img { display: block; max-width: 100%; }
 .media-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 13px; }
 .media-heading h2, .controls-heading h2 { margin: 5px 0 0; font-family: Georgia, "Yu Mincho", serif; font-size: 21px; font-weight: 500; }
 /* 選択写真はカード幅いっぱい。ただし縦位置写真で 3:2 の箱が画面より高くならないよう、
-   固定帯の下に収まる高さで頭打ちにする（幅は 100% のまま、余白は contain の背景色）。
+   固定帯の下に収まる高さで頭打ちにする。帯の実寸(--strip-h)は引かない: コンパクト切替で帯が縮むと写真の高さ＝文書の高さが動き、コンパクト判定に跳ね返ってチカチカするため、通常表示の帯を見込んだ固定値にする（幅は 100% のまま、余白は contain の背景色）。
    .selected-preview の共通定義は他画面でも使うので、ここは operation 系にだけ効かせる。 */
-.selected-preview.operation-preview { width: 100%; height: auto; aspect-ratio: 3 / 2; max-height: calc(100vh - var(--strip-h, 0px) - 48px); }
+.selected-preview.operation-preview { width: 100%; height: auto; aspect-ratio: 3 / 2; max-height: calc(100vh - 200px); }
 .operation-preview > img { object-fit: contain; background: #171d1b; }
 .controls-heading { padding-bottom: 13px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .controls-heading h2 { font-size: 18px; }
