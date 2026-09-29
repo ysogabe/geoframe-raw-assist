@@ -41,7 +41,7 @@ from typing import Any, ContextManager, Literal
 import numpy as np
 from PIL import Image, ImageFilter
 
-from . import config, engine
+from . import config, engine, source_files
 from .exif import read_capture_exif
 from .presets import (
     ADJUSTMENT_RANGES,
@@ -906,10 +906,14 @@ def _optimise_style(
 
 def _resolve_source_paths(capture_id: str) -> tuple[Path, Path | None]:
     source_root = config.source_root().resolve()
-    arw_path = (source_root / f"{capture_id}.ARW").resolve()
+    arw_path = (
+        source_files.find_capture_file(source_root, capture_id, "ARW") or source_root / f"{capture_id}.ARW"
+    ).resolve()
     if arw_path.parent != source_root or not arw_path.is_file():
         raise DevelopmentCandidateNotFound(f"元ARWが見つかりません: {capture_id}.ARW")
-    jpg_path = (source_root / f"{capture_id}.JPG").resolve()
+    jpg_path = (
+        source_files.find_capture_file(source_root, capture_id, "JPG") or source_root / f"{capture_id}.JPG"
+    ).resolve()
     if jpg_path.parent != source_root or not jpg_path.is_file():
         jpg_path = None
     return arw_path, jpg_path

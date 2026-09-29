@@ -31,7 +31,7 @@ import numpy as np
 import rawpy
 from PIL import Image
 
-from . import config
+from . import config, source_files
 from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
 from .lens import _all_finite, apply_lens_correction, probe_lens
 from .presets import (
@@ -627,11 +627,13 @@ def develop_raw(
     # 現像元フォルダは1リクエストにつき1回だけ解決し、パス組み立て・トラバーサル検査・
     # params_hash の全てで同じ値を使う（途中で切り替わってもリクエスト内では一貫させる）。
     source_root = config.source_root().resolve()
-    source_path = (source_root / f"{capture_id}.ARW").resolve()
+    source_path = (
+        source_files.find_capture_file(source_root, capture_id, "ARW") or source_root / f"{capture_id}.ARW"
+    ).resolve()
     if source_path.parent != source_root or not source_path.is_file():
         raise RawDevelopmentError(f"ARWが見つかりません: {capture_id}.ARW")
 
-    source_jpg = source_root / f"{capture_id}.JPG"
+    source_jpg = source_files.find_capture_file(source_root, capture_id, "JPG") or source_root / f"{capture_id}.JPG"
     capture_exif = read_capture_exif(source_jpg) if source_jpg.is_file() else {}
 
     # レンズ解決は RAW デコード（10〜20秒）の前に済ませる。
