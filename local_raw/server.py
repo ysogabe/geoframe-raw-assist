@@ -11,7 +11,7 @@ from urllib.parse import ParseResult, quote, unquote, urlparse
 
 import rawpy
 
-from . import analysis, config
+from . import analysis, config, source_files
 
 
 HOST = "127.0.0.1"
@@ -242,7 +242,10 @@ def handle_source_jpg(req: RawAssistHandler, parsed: ParseResult) -> None:
         req._json(HTTPStatus.BAD_REQUEST, {"error": "無効なJPGファイル名です。"})
         return
     source_root = config.source_root().resolve()
-    requested_path = (source_root / filename).resolve()
+    # URL は `DSC12345.JPG` 固定だが、実ファイルの拡張子は `.jpg` 等でもよい。
+    requested_path = (
+        source_files.find_capture_file(source_root, filename[:8], "JPG") or source_root / filename
+    ).resolve()
     if requested_path.parent != source_root or not requested_path.is_file():
         req._json(HTTPStatus.NOT_FOUND, {"error": "元JPGが見つかりません。"})
         return

@@ -32,7 +32,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from . import config
+from . import config, source_files
 
 # OpenCV spawns its own worker pool. Combined with our ThreadPoolExecutor that
 # oversubscribes the CPU badly, so keep cv2 single threaded and let the
@@ -161,8 +161,9 @@ def scan_pairs(source_root: Path | None = None) -> tuple[dict[str, Any], list[Pa
     ARW file found (that is what the user would copy off the card).
     """
     root = source_root if source_root is not None else config.source_root()
-    jpg_paths = sorted(root.glob("DSC*.JPG")) if root.is_dir() else []
-    arw_paths = sorted(root.glob("DSC*.ARW")) if root.is_dir() else []
+    # 拡張子の大文字小文字は問わない（`source_files` 参照）。
+    jpg_paths = list(source_files.list_capture_files(root, "JPG").values()) if root.is_dir() else []
+    arw_paths = list(source_files.list_capture_files(root, "ARW").values()) if root.is_dir() else []
 
     jpg_stems = {path.stem for path in jpg_paths}
     arw_stems = {path.stem for path in arw_paths}
@@ -193,7 +194,7 @@ def _source_signature(source_root: Path | None = None) -> str:
     similarly shaped folder would silently reuse another folder's analysis.
     """
     root = (source_root if source_root is not None else config.source_root()).resolve()
-    names = sorted(path.name for path in root.glob("DSC*.[JA][PR][GW]")) if root.is_dir() else []
+    names = source_files.source_entry_names(root) if root.is_dir() else []
     payload = "\n".join([str(root), *names])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 

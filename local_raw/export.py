@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import config, source_files
 from .engine import CAPTURE_ID_PATTERN, OUTPUT_ROOT, PROJECT_ROOT
 
 EXPORT_ROOT = PROJECT_ROOT / "outputs" / "export"
@@ -305,6 +305,12 @@ def _resolve_within(root: Path, filename: str) -> Path | None:
     return candidate
 
 
+def _resolve_capture_source(root: Path, capture_id: str, kind: str) -> Path | None:
+    """`root` 直下の `capture_id` の元ファイルを実エントリ名（拡張子の大文字小文字不問）で解決する。"""
+    found = source_files.find_capture_file(root, capture_id, kind)
+    return _resolve_within(root, found.name if found else f"{capture_id}.{kind}")
+
+
 def _copy(source: Path, destination: Path) -> None:
     """`shutil.copy2` でメタデータごとコピーする（tmp + `os.replace` でアトミック）。"""
     temporary = destination.with_name(f"{destination.name}.tmp")
@@ -353,8 +359,8 @@ def export_batch(batch_name: Any, items: Any) -> dict[str, Any]:
         if variant not in VARIANTS:
             raise ValueError("variant は camera_jpg / developed / merged を指定してください。")
 
-        source_jpg = _resolve_within(source_root, f"{capture_id}.JPG")
-        source_arw = _resolve_within(source_root, f"{capture_id}.ARW")
+        source_jpg = _resolve_capture_source(source_root, capture_id, "JPG")
+        source_arw = _resolve_capture_source(source_root, capture_id, "ARW")
         recipe: dict[str, Any] | None = None
 
         if variant == "camera_jpg":

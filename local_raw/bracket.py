@@ -56,7 +56,7 @@ import numpy as np
 import rawpy
 from PIL import Image
 
-from . import config
+from . import config, source_files
 from .engine import (
     DEFAULT_MAX_EDGE,
     ENGINE_VERSION,
@@ -654,12 +654,17 @@ def merge_bracket(
     source_root = config.source_root().resolve()
     source_paths: list[Path] = []
     for capture_id in normalized_ids:
-        source_path = (source_root / f"{capture_id}.ARW").resolve()
+        source_path = (
+            source_files.find_capture_file(source_root, capture_id, "ARW") or source_root / f"{capture_id}.ARW"
+        ).resolve()
         if source_path.parent != source_root or not source_path.is_file():
             raise RawDevelopmentError(f"ARWが見つかりません: {capture_id}.ARW")
         source_paths.append(source_path)
 
-    source_jpgs = [source_root / f"{capture_id}.JPG" for capture_id in normalized_ids]
+    source_jpgs = [
+        source_files.find_capture_file(source_root, capture_id, "JPG") or source_root / f"{capture_id}.JPG"
+        for capture_id in normalized_ids
+    ]
     capture_exifs = [
         read_capture_exif(path) if path.is_file() else {} for path in source_jpgs
     ]
