@@ -612,5 +612,54 @@ class ResolveSaveKwargsTests(unittest.TestCase):
         self.assertEqual(save_kwargs["exif"], b"exif-bytes")
 
 
+class PostDecodeChainTests(unittest.TestCase):
+    """デコード後の後段（shadow_lift → resize → tone）を1関数にまとめた `apply_post_decode_chain`。"""
+
+    def test_chain_is_shadow_lift_then_resize_then_tone(self):
+        rng = np.random.default_rng(1)
+        rgb = rng.uniform(0.0, 1.0, (900, 1200, 3)).astype(np.float32)
+        adjustments = resolve_adjustments(
+            "landscape_clear", {"shadow_lift": 35, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3, "sharpness": 1.4}
+        )
+        expected = _apply_tone_array(
+            _resize_array(_apply_shadow_lift_array(rgb, 35.0), 600), adjustments
+        )
+        np.testing.assert_array_equal(engine.apply_post_decode_chain(rgb, adjustments, 600), expected)
+        self.assertEqual(max(expected.shape[:2]), 600)
+
+    def test_develop_raw_uses_the_shared_chain(self):
+        class FakeRaw:
+            camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def postprocess(self, **kwargs):
+                return np.full((40, 60, 3), 30000, dtype=np.uint16)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "src"
+            root.mkdir()
+            (root / "DSC00001.ARW").write_bytes(b"")
+            with (
+                mock.patch.object(engine.config, "source_root", return_value=root),
+                mock.patch.object(engine, "OUTPUT_ROOT", Path(directory) / "out"),
+                mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
+                mock.patch.object(engine.rawpy, "imread", return_value=FakeRaw()),
+                mock.patch.object(
+                    engine, "apply_post_decode_chain", wraps=engine.apply_post_decode_chain
+                ) as chain,
+            ):
+                develop_raw("DSC00001", "neutral_recovery", max_edge=1200)
+        chain.assert_called_once()
+        rgb, adjustments, max_edge = chain.call_args.args
+        self.assertEqual(rgb.dtype, np.float32)
+        self.assertEqual(adjustments, resolve_adjustments("neutral_recovery"))
+        self.assertEqual(max_edge, 1200)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ import type {
   Analysis,
   CaptureId,
   DevelopedResult,
+  DevelopmentCandidate,
   GroupInfo,
   HealthResponse,
   MergedResult,
@@ -79,6 +80,11 @@ type OperationPanelProps = {
   mergeMode: DevelopMode | null;
   /** どのグループであれ合成が走っているか。重い処理の同時実行を止めるのに使う。 */
   mergeBusy: boolean;
+  developmentCandidates: DevelopmentCandidate[];
+  developmentCandidatesBusy: boolean;
+  developmentCandidatesError: string;
+  onGenerateCandidates: () => void;
+  onApplyCandidate: (candidate: DevelopmentCandidate) => void;
   mergeElapsedLabel: string;
   mergeBlockReason: string | null;
   mergePreviewResult: MergedResult | undefined;
@@ -134,6 +140,11 @@ export function OperationPanel({
   onMerge,
   mergeMode,
   mergeBusy,
+  developmentCandidates,
+  developmentCandidatesBusy,
+  developmentCandidatesError,
+  onGenerateCandidates,
+  onApplyCandidate,
   mergeElapsedLabel,
   mergeBlockReason,
   mergePreviewResult,
@@ -450,6 +461,11 @@ export function OperationPanel({
             hasPreview={Boolean(previewResult)}
             hasFull={Boolean(fullResult)}
             mergeBusy={mergeBusy}
+            developmentCandidates={developmentCandidates}
+            developmentCandidatesBusy={developmentCandidatesBusy}
+            developmentCandidatesError={developmentCandidatesError}
+            onGenerateCandidates={onGenerateCandidates}
+            onApplyCandidate={onApplyCandidate}
           />
           <p className="safety-note">元のJPG / ARWは変更されません（{groupKindLabel(group.kind)}）</p>
         </aside>

@@ -7,6 +7,7 @@ import {
   developedGroupIds,
   effectiveAdjustments,
   groupMergeResultOf,
+  currentDevelopmentCandidates,
   heroCaptureOf,
   initialState,
   isBracketGroup,
@@ -32,6 +33,7 @@ import {
   getDriveUploadState,
   getHealth,
   getSourceFolder,
+  generateDevelopmentCandidates,
   importToPhotos,
   isEndpointUnavailable,
   isSourceFolderApiError,
@@ -45,7 +47,7 @@ import {
   SOURCE_FOLDER_UNAVAILABLE,
   sourceFolderErrorMessage,
 } from "./lib/format";
-import type { Adjustments, ExportItem } from "./lib/types";
+import type { Adjustments, DevelopmentCandidate, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
@@ -264,7 +266,10 @@ export default function Home() {
   // ブラケット合成の導線は bracket グループ（または exposure_bracket の理由付き）にだけ出す。
   const isBracket = group ? isBracketGroup(group) : false;
   const mergeFrames = useMemo(() => (group ? mergeFramesOf(state, group) : []), [state, group]);
-  const mergeBlock = mergeBlockReason(mergeFrames);
+  // 候補生成中は RAW デコードが重なるので合成を始めさせない（現像ボタンと同じく busy 扱い）。
+  const mergeBlock =
+    mergeBlockReason(mergeFrames) ??
+    (state.developmentCandidatesBusy ? "現像候補の生成が終わるまで合成は開始できません。" : null);
   // 表示に回す合成もグループの関門を通す。属さない合成は「まだ本合成していない」扱いに
   // なり、タイルはプレースホルダ・採用チップは disabled になる。古い他グループの合成を
   // 見せて採用させるより、無いことにする方が安全。
@@ -427,11 +432,45 @@ export default function Home() {
     }
   }
 
+  async function runDevelopmentCandidates() {
+    if (!group || !captureId) return;
+    if (state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。", tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) {
+      dispatch({ type: "notice/set", message: "プリセットを取得できていません。", tone: "error" });
+      return;
+    }
+    const generation = state.sourceFolderGeneration;
+    dispatch({ type: "candidates/start", captureId, generation });
+    try {
+      const response = await generateDevelopmentCandidates(captureId, preset.name);
+      dispatch({ type: "candidates/ok", captureId, response, generation });
+    } catch (error) {
+      dispatch({
+        type: "candidates/fail",
+        captureId,
+        generation,
+        message: isEndpointUnavailable(error)
+          ? "現像候補機能を準備中です。しばらくしてからお試しください。"
+          : messageOf(error, "現像候補の生成に失敗しました。"),
+      });
+    }
+  }
+
+  function applyDevelopmentCandidate(candidate: DevelopmentCandidate) {
+    if (!captureId) return;
+    dispatch({ type: "candidates/apply", candidate, captureId });
+  }
+
   async function runMerge(mode: DevelopMode) {
     if (!group || !isBracketGroup(group)) return;
     // 合成はフレーム数ぶんのRAWデコードで数十秒かかる。ボタンは実行中に無効化しているが、
     // 多重起動はコストが大きいのでここでも弾く。
-    if (state.developMode || state.mergeMode) return;
+    if (state.developMode || state.mergeMode || state.developmentCandidatesBusy) return;
     if (state.engineStatus !== "ready") {
       dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください", tone: "error" });
       return;
@@ -712,6 +751,13 @@ export default function Home() {
               mergeBlockReason={mergeBlock}
               mergePreviewResult={mergePreviewResult}
               mergeFullResult={mergeFullResult}
+              developmentCandidates={currentDevelopmentCandidates(state, captureId)}
+              developmentCandidatesBusy={state.developmentCandidatesBusy}
+              developmentCandidatesError={
+                state.developmentCandidatesCaptureId === captureId ? state.developmentCandidatesError : ""
+              }
+              onGenerateCandidates={() => void runDevelopmentCandidates()}
+              onApplyCandidate={applyDevelopmentCandidate}
               viewing={viewing}
               onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
               onOpenViewer={(gallery) => dispatch({ type: "viewer/open", gallery })}

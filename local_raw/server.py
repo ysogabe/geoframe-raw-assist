@@ -372,6 +372,63 @@ def handle_merge_bracket(req: RawAssistHandler, parsed: ParseResult) -> None:
         _fail(req, "合成処理に失敗しました。", error)
 
 
+def handle_development_candidates(req: RawAssistHandler, parsed: ParseResult) -> None:
+    """`POST /api/development-candidates` → RAW half-decode proxy candidates.
+
+    Candidate generation is intentionally separate from ``raw-develop``: the
+    optimizer half-size decodes the ARW into a small cache keyed by highlight
+    category / noise reduction / exposure grid and never runs a full develop per
+    particle.  Keep request validation strict here so values such as ``true``
+    do not silently become a seed or budget of ``1``.
+    """
+    try:
+        from .development_candidates import (
+            DevelopmentCandidateError,
+            DevelopmentCandidateNotFound,
+            generate_development_candidates,
+        )
+    except Exception as error:
+        _fail(req, "現像候補生成機能を読み込めません。", error)
+        return
+
+    try:
+        payload = _request_payload(req)
+        unknown = sorted(set(payload) - {"capture_id", "preset", "seed", "budget"})
+        if unknown:
+            raise ValueError(f"未対応の項目です: {', '.join(unknown)}")
+        capture_id = payload.get("capture_id")
+        preset = payload.get("preset")
+        if not isinstance(capture_id, str) or not capture_id:
+            raise ValueError("capture_id は文字列で指定してください。")
+        if not isinstance(preset, str) or not preset:
+            raise ValueError("preset は文字列で指定してください。")
+        seed = payload.get("seed")
+        budget = payload.get("budget")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValueError("seed は整数で指定してください。")
+        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int)):
+            raise ValueError("budget は整数で指定してください。")
+        result = generate_development_candidates(
+            capture_id,
+            preset,
+            seed=seed,
+            budget=budget,
+        )
+        req._json(HTTPStatus.OK, result)
+    except DevelopmentCandidateNotFound as error:
+        req._json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+    except (
+        DevelopmentCandidateError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        json.JSONDecodeError,
+    ) as error:
+        req._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+    except Exception as error:
+        _fail(req, "現像候補の生成に失敗しました。", error)
+
+
 def handle_export(req: RawAssistHandler, parsed: ParseResult) -> None:
     try:
         from .export import export_batch
@@ -458,6 +515,7 @@ GET_PREFIX: list[tuple[str, Handler]] = [
 POST_ROUTES: dict[str, Handler] = {
     "/api/raw-develop": handle_raw_develop,
     "/api/merge-bracket": handle_merge_bracket,
+    "/api/development-candidates": handle_development_candidates,
     "/api/source-folder": handle_set_source_folder,
     "/api/analyze": handle_analyze,
     "/api/export": handle_export,

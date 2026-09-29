@@ -4,6 +4,7 @@ import type {
   AnalyzeResponse,
   CaptureId,
   DevelopedResult,
+  DevelopmentCandidatesResponse,
   DriveUploadStartResponse,
   DriveUploadState,
   ExportItem,
@@ -131,6 +132,30 @@ export async function developRaw(
   if (options.force) body.force = true;
   if (typeof options.maxEdge === "number") body.max_edge = options.maxEdge;
   return (await postJson("/api/raw-develop", body, "RAW現像に失敗しました。")) as DevelopedResult;
+}
+
+export type DevelopmentCandidatesOptions = {
+  seed?: number;
+  budget?: number;
+};
+
+/**
+ * RAWの縮小デコード（キャッシュ付き）を代理に、engineの後段関数で評価して現像候補を作る。所要時間は1枚あたり数秒〜15秒程度。
+ * 返った調整値は選択時にスライダーへ反映するだけで、現像は別操作で実行する。
+ */
+export async function generateDevelopmentCandidates(
+  captureId: CaptureId,
+  preset: PresetName,
+  options: DevelopmentCandidatesOptions = {},
+): Promise<DevelopmentCandidatesResponse> {
+  const body: Record<string, unknown> = { capture_id: captureId, preset };
+  if (typeof options.seed === "number") body.seed = options.seed;
+  if (typeof options.budget === "number") body.budget = options.budget;
+  return (await postJson(
+    "/api/development-candidates",
+    body,
+    "現像候補の生成に失敗しました。",
+  )) as DevelopmentCandidatesResponse;
 }
 
 /**

@@ -5,6 +5,8 @@ import type {
   AnalysisProgress,
   AnalysisResponse,
   CaptureId,
+  DevelopmentCandidate,
+  DevelopmentCandidatesResponse,
   DevelopedResult,
   DriveUploadState,
   ExportResponse,
@@ -195,6 +197,12 @@ export type State = {
   developStartedAt: number;
   previewResults: Record<CaptureId, DevelopedResult>;
   fullResults: Record<CaptureId, DevelopedResult>;
+  /** RAW縮小デコード代理評価による候補。対象capture_idと世代を併記して古い結果を表示しない。 */
+  developmentCandidates: DevelopmentCandidatesResponse | null;
+  developmentCandidatesCaptureId: CaptureId | null;
+  developmentCandidatesBusy: boolean;
+  developmentCandidatesError: string;
+  developmentCandidatesGeneration: number;
   /**
    * ブラケット合成の状態は **グループ単位** で持つ（capture_id 単位ではない）。
    * 合成は複数フレームの産物であり、どの 1 枚にも属さないため。
@@ -247,6 +255,11 @@ export const initialState: State = {
   developStartedAt: 0,
   previewResults: {},
   fullResults: {},
+  developmentCandidates: null,
+  developmentCandidatesCaptureId: null,
+  developmentCandidatesBusy: false,
+  developmentCandidatesError: "",
+  developmentCandidatesGeneration: 0,
   mergeSelections: {},
   mergePreviewResults: {},
   mergeFullResults: {},
@@ -297,6 +310,11 @@ export type Action =
   | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number }
   /** 失敗には generation を持たせない（後述: 通知だけは必ず出す）。 */
   | { type: "develop/fail"; message: string }
+  | { type: "candidates/start"; captureId: CaptureId; generation: number }
+  | { type: "candidates/ok"; captureId: CaptureId; response: DevelopmentCandidatesResponse; generation: number }
+  | { type: "candidates/fail"; captureId: CaptureId; message: string; generation: number }
+  /** `captureId` は候補を表示していた写真（現在の写真と応答の capture_id を照合する）。 */
+  | { type: "candidates/apply"; candidate: DevelopmentCandidate; captureId: CaptureId }
   | { type: "merge/toggleFrame"; groupId: number; captureId: CaptureId }
   | { type: "merge/resetFrames"; groupId: number }
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
@@ -417,13 +435,16 @@ export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "health/ok": {
       const group = state.analysis?.groups.find((item) => item.id === state.selectedGroupId);
+      const presetName = presetFor(action.health, state.presetName)
+        ? state.presetName
+        : suggestPreset(action.health, group);
       return {
         ...state,
         health: action.health,
         engineStatus: "ready",
-        presetName: presetFor(action.health, state.presetName)
-          ? state.presetName
-          : suggestPreset(action.health, group),
+        presetName,
+        // プリセットが変わったら別プリセット向けの候補は捨てる（生成中の busy/captureId は触らない）。
+        ...(presetName === state.presetName ? {} : clearedCandidateResult()),
       };
     }
 
@@ -532,6 +553,9 @@ export function reducer(state: State, action: Action): State {
         selectedGroupId: action.groupId,
         presetName: suggestPreset(state.health, group),
         overrides: {},
+        // 別グループ・別プリセットの候補を持ち越さない。生成中（busy）の応答は
+        // captureId を残して受け取るが、表示・適用時に capture_id / preset を照合する。
+        ...clearedCandidateResult(),
         // 表示カーソルはグループ単位なのでここでは触らない。前に見ていた面のまま戻る。
       };
     }
@@ -629,7 +653,14 @@ export function reducer(state: State, action: Action): State {
       };
 
     case "preset/change":
-      return { ...state, presetName: action.presetName, overrides: {} };
+      return {
+        ...state,
+        presetName: action.presetName,
+        overrides: {},
+        developmentCandidates: null,
+        developmentCandidatesCaptureId: null,
+        developmentCandidatesError: "",
+      };
 
     case "adjust/change":
       return { ...state, overrides: { ...state.overrides, [action.key]: action.value } };
@@ -683,6 +714,77 @@ export function reducer(state: State, action: Action): State {
 
     case "develop/fail":
       return { ...state, developMode: null, developingCapture: null, notice: action.message, noticeTone: "error" };
+
+    case "candidates/start":
+      return {
+        ...state,
+        developmentCandidates: null,
+        developmentCandidatesBusy: true,
+        developmentCandidatesCaptureId: action.captureId,
+        developmentCandidatesError: "",
+        developmentCandidatesGeneration: action.generation,
+        notice: `${action.captureId}.ARW を縮小デコードして評価しています…`,
+        noticeTone: "info",
+      };
+
+    case "candidates/ok":
+      // フォルダ切替後に届いた古い代理評価を新しい capture_id と混ぜない。
+      // 同じ世代で将来リクエストを重複させても、後発写真の busy/error を先発写真の
+      // 応答で上書きしないよう、start 時点の capture_id も照合する。
+      if (
+        action.generation !== state.sourceFolderGeneration ||
+        action.captureId !== state.developmentCandidatesCaptureId
+      ) return state;
+      return {
+        ...state,
+        developmentCandidates: action.response,
+        developmentCandidatesCaptureId: action.captureId,
+        developmentCandidatesBusy: false,
+        developmentCandidatesError: "",
+        notice: `${action.captureId} の現像候補を作成しました。候補を選んでから現像してください。`,
+        noticeTone: "info",
+      };
+
+    case "candidates/fail":
+      if (
+        action.generation !== state.sourceFolderGeneration ||
+        action.captureId !== state.developmentCandidatesCaptureId
+      ) return state;
+      return {
+        ...state,
+        developmentCandidates: null,
+        developmentCandidatesBusy: false,
+        developmentCandidatesError: action.message,
+        notice: action.message,
+        noticeTone: "error",
+      };
+
+    case "candidates/apply": {
+      // 表示中の候補と同じ照合を適用の直前にもかける（別の写真・別プリセットの調整値を
+      // 今のスライダーへ入れない）。候補は表示中の応答から id で引き直す。
+      const shown = currentDevelopmentCandidates(state, action.captureId).find(
+        (item) => item.id === action.candidate.id,
+      );
+      if (!shown) {
+        return {
+          ...state,
+          notice: "現在の写真・プリセットの候補ではないため、調整値は反映しませんでした。",
+          noticeTone: "error",
+        };
+      }
+      const preset = activePreset(state);
+      const overrides: Partial<Adjustments> = {};
+      for (const key of Object.keys(shown.adjustments) as (keyof Adjustments)[]) {
+        const value = shown.adjustments[key];
+        if (!preset || value !== preset.adjustments[key]) Object.assign(overrides, { [key]: value });
+      }
+      return {
+        ...state,
+        overrides,
+        notice: `「${shown.label}」の調整値をスライダーへ反映しました。現像はまだ実行していません。`,
+        noticeTone: "info",
+      };
+    }
 
     case "merge/toggleFrame": {
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);
@@ -983,6 +1085,29 @@ export function isMergedAccepted(state: State, groupId: number, leadCaptureId: C
 export function photoOf(analysis: Analysis | null, captureId: CaptureId | undefined): PhotoInfo | null {
   if (!analysis || !captureId) return null;
   return analysis.photos[captureId] ?? null;
+}
+
+/** 候補結果のクリア（busy / captureId / generation は触らない）。 */
+function clearedCandidateResult(): Pick<State, "developmentCandidates" | "developmentCandidatesError"> {
+  return { developmentCandidates: null, developmentCandidatesError: "" };
+}
+
+/**
+ * `captureId` の写真について表示・適用してよい候補。応答の capture_id / preset が
+ * 現在の撮影・プリセットと一致し、かつ現在のフォルダ世代の応答のときだけ返す。
+ */
+export function currentDevelopmentCandidates(state: State, captureId: CaptureId | null): DevelopmentCandidate[] {
+  const response = state.developmentCandidates;
+  if (!response || !captureId) return [];
+  if (
+    response.capture_id !== captureId ||
+    response.preset !== state.presetName ||
+    state.developmentCandidatesCaptureId !== captureId ||
+    state.developmentCandidatesGeneration !== state.sourceFolderGeneration
+  ) {
+    return [];
+  }
+  return response.candidates;
 }
 
 export function activePreset(state: State): PresetInfo | null {

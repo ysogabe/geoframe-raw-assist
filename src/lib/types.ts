@@ -290,6 +290,90 @@ export type DevelopedResult = {
 };
 
 // ---------------------------------------------------------------------------
+// POST /api/development-candidates — RAW縮小デコード代理による現像候補
+// ---------------------------------------------------------------------------
+
+export type DevelopmentCandidateStyle = "natural" | "stars" | "foreground" | "low_noise" | "social";
+
+/** 候補選択の比較に使う代理評価値（0..1、star_count は検出数）。 */
+export type DevelopmentCandidateMetrics = {
+  highlight_clip: number;
+  shadow_clip: number;
+  noise_flat: number;
+  source_noise_flat: number;
+  detail: number;
+  source_detail: number;
+  halo: number;
+  color_saturation_clip: number;
+  tonal_range: number;
+  /** 基準（natural＝プリセット値のまま）の代理画像との平均絶対差。 */
+  source_deviation: number;
+  /** 基準の暗部（輝度下位25%）に相当する画素の平均輝度。 */
+  shadow_mean: number;
+  star_count: number;
+  star_halo: number;
+  star_color_saturation: number;
+  /** 互換・表示用の長い別名。サーバは同じ値を返す。 */
+  highlight_clipping: number;
+  shadow_crushing: number;
+  flat_region_noise: number;
+  detail_halo: number;
+  color_clip: number;
+  tone_range: number;
+  baseline_deviation: number;
+};
+
+export type StarSceneInfo = {
+  is_star_scene: boolean;
+  star_count: number;
+  dark_background_ratio: number;
+  bright_point_ratio: number;
+  exif_night: boolean;
+  star_halo: number;
+  star_color_saturation: number;
+};
+
+export type DevelopmentCandidate = {
+  id: DevelopmentCandidateStyle;
+  label: string;
+  description: string;
+  adjustments: Adjustments;
+  metrics: DevelopmentCandidateMetrics;
+  score: number;
+  reasons: string[];
+};
+
+export type DevelopmentCandidatesRequest = {
+  capture_id: CaptureId;
+  preset: PresetName;
+  /** 省略時は capture_id:preset の安定SHA-256由来。 */
+  seed?: number;
+  /** 32〜512。省略時48。 */
+  budget?: number;
+};
+
+export type DevelopmentCandidatesResponse = {
+  capture_id: CaptureId;
+  preset: PresetName;
+  seed: number;
+  budget: number;
+  proxy: {
+    max_edge: number;
+    width: number;
+    height: number;
+    source: "raw_half";
+    /** キャッシュに保持したデコード結果の長辺。 */
+    decode_edge: number;
+    /** 縮小デコードを実行した回数。 */
+    decodes: number;
+  };
+  star_scene: StarSceneInfo;
+  candidates: DevelopmentCandidate[];
+  /** 基準より白飛び・黒つぶれ等が悪化したため返さなかった候補と、その理由。 */
+  rejected: { id: DevelopmentCandidateStyle; reason: string }[];
+};
+
+// ---------------------------------------------------------------------------
 // POST /api/export
 // ---------------------------------------------------------------------------
 
