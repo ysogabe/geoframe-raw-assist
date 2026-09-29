@@ -463,10 +463,16 @@ class SkipExistingTests(DriveUploadTestCase):
 
     消費側（GeoFrame 本体アプリ）の Drive インデックスが `GeoFrame` を**非再帰**で
     走査するのでサブフォルダは作れず、平置きにするとバッチ間で
-    `DSC00001.JPG` / `manifest.json` が衝突するため、名前側で分ける。
+    `DSC00001.JPG` が衝突するため、名前側で分ける。
+    fixture には `manifest.json` を置いたままにし、Drive へ送られないことも合わせて見る。
     """
 
-    FILES = {"DSC00001.JPG": b"a" * 10, "DSC00002.JPG": b"b" * 20, "manifest.json": b"{}"}
+    FILES = {
+        "DSC00001.JPG": b"a" * 10,
+        "DSC00002.JPG": b"b" * 20,
+        "DSC00003.JPG": b"c" * 30,
+        "manifest.json": b"{}",
+    }
 
     @staticmethod
     def prefixed(*names, batch=BATCH):
@@ -481,7 +487,7 @@ class SkipExistingTests(DriveUploadTestCase):
         self.assertEqual(result["skipped"], [])
         self.assertEqual(
             [upload["name"] for upload in drive.uploads],
-            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "manifest.json"),
+            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "DSC00003.JPG"),
         )
 
     def test_existing_names_are_skipped_and_not_uploaded(self):
@@ -502,19 +508,19 @@ class SkipExistingTests(DriveUploadTestCase):
         self.make_batch(files=self.FILES)
         drive = FakeDrive(
             listing_pages=[
-                {"files": [{"name": f"{BATCH}-DSC00001.JPG"}, {"name": f"{BATCH}-manifest.json"}]}
+                {"files": [{"name": f"{BATCH}-DSC00001.JPG"}, {"name": f"{BATCH}-DSC00002.JPG"}]}
             ]
         )
         result, progress, _ = self.run_upload(drive=drive)
 
-        self.assertEqual(result["skipped"], ["DSC00001.JPG", "manifest.json"])
-        self.assertEqual(progress.snapshot()["skipped"], ["DSC00001.JPG", "manifest.json"])
+        self.assertEqual(result["skipped"], ["DSC00001.JPG", "DSC00002.JPG"])
+        self.assertEqual(progress.snapshot()["skipped"], ["DSC00001.JPG", "DSC00002.JPG"])
 
     def test_the_same_name_from_another_batch_does_not_cause_a_skip(self):
-        """平置きの肝。別バッチの `DSC00001.JPG` / `manifest.json` と衝突しないこと。
+        """平置きの肝。別バッチの `DSC00001.JPG` と衝突しないこと。
 
-        プレフィックスが無ければ、カメラ命名のファイルも全バッチが持つ
-        `manifest.json` も先着のバッチに食われて二度と上がらなくなる。
+        プレフィックスが無ければ、カメラ命名のファイルが先着のバッチに食われて
+        二度と上がらなくなる。
         """
         self.make_batch(files=self.FILES)
         drive = FakeDrive(
@@ -522,10 +528,8 @@ class SkipExistingTests(DriveUploadTestCase):
                 {
                     "files": [
                         {"name": "other_trip-DSC00001.JPG"},
-                        {"name": "other_trip-manifest.json"},
                         # プレフィックス無しの素の名前（旧版が上げた残骸）にも引っかからない。
                         {"name": "DSC00001.JPG"},
-                        {"name": "manifest.json"},
                         # 旧版が作ったバッチ名のフォルダが同じ一覧に混ざっても無害。
                         {"name": BATCH},
                     ]
@@ -538,7 +542,7 @@ class SkipExistingTests(DriveUploadTestCase):
         self.assertEqual(result["uploaded"], 3)
         self.assertEqual(
             [upload["name"] for upload in drive.uploads],
-            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "manifest.json"),
+            self.prefixed("DSC00001.JPG", "DSC00002.JPG", "DSC00003.JPG"),
         )
 
     def test_a_partial_rerun_only_sends_what_is_still_missing(self):
@@ -557,7 +561,7 @@ class SkipExistingTests(DriveUploadTestCase):
         result, progress, drive = self.run_upload(drive=drive)
 
         self.assertEqual(
-            [upload["name"] for upload in drive.uploads], self.prefixed("manifest.json")
+            [upload["name"] for upload in drive.uploads], self.prefixed("DSC00003.JPG")
         )
         self.assertEqual(result["uploaded"], 1)
         self.assertEqual(result["skipped"], ["DSC00001.JPG", "DSC00002.JPG"])
@@ -653,13 +657,13 @@ class SkipExistingTests(DriveUploadTestCase):
 
 
 class BatchFilesTests(DriveUploadTestCase):
-    def test_collects_direct_files_in_name_order_including_the_manifest(self):
+    def test_collects_direct_files_in_name_order_excluding_the_manifest(self):
         directory = self.make_batch(
             files={"DSC00002.JPG": b"b", "manifest.json": b"{}", "DSC00001.JPG": b"a"}
         )
         self.assertEqual(
             [path.name for path in drive_upload._batch_files(directory)],
-            ["DSC00001.JPG", "DSC00002.JPG", "manifest.json"],
+            ["DSC00001.JPG", "DSC00002.JPG"],
         )
 
     def test_temporary_files_and_subdirectories_are_excluded(self):
@@ -716,7 +720,7 @@ class ProgressTests(DriveUploadTestCase):
         self.assertEqual(progress.snapshot()["skipped"], ["DSC00001.JPG"])
 
     def test_a_run_reaches_the_totals_and_walks_the_stages(self):
-        self.make_batch(files={"DSC00001.JPG": b"a" * 7, "manifest.json": b"{}"})
+        self.make_batch(files={"DSC00001.JPG": b"a" * 7, "DSC00002.JPG": b"b" * 2, "manifest.json": b"{}"})
         _, progress, _ = self.run_upload()
 
         snapshot = progress.snapshot()
