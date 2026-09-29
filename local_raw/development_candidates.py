@@ -252,12 +252,11 @@ class DecodeCache:
 def render_proxy(decoded: np.ndarray, adjustments: dict[str, Any]) -> np.ndarray:
     """デコード済み配列へ engine の後段（shadow_lift → resize → tone）を適用する。
 
-    ``engine.develop_raw`` の後段と同じ関数・同じ順序。レンズ補正は省略している。
+    ``engine.develop_raw`` の後段と同じ関数（`engine.apply_post_decode_chain`）。
+    レンズ補正は省略している。
     """
 
-    lifted = engine._apply_shadow_lift_array(decoded, float(adjustments["shadow_lift"]))
-    small = engine._resize_array(lifted, MAX_PROXY_EDGE)
-    return engine._apply_tone_array(small, adjustments)
+    return engine.apply_post_decode_chain(decoded, adjustments, MAX_PROXY_EDGE)
 
 
 def _connected_bright_components(mask: np.ndarray) -> list[tuple[int, int, int, int, int]]:
@@ -342,12 +341,14 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
     is_star_scene = visual_gate and (exif_night or dark_fraction >= 0.72)
 
     halo = 0.0
-    color_clip = float(np.mean(np.max(rgb, axis=2) >= 0.995))
+    # 星の色の指標なので、検出した星（点）の領域だけで測る（画像全体は含めない）。
+    color_clip = 0.0
     # A daytime/noisy image can contain thousands of tiny bright components.
     # They are useful for rejecting the star gate, but iterating over each one
     # for halo statistics would make a proxy evaluation needlessly expensive.
     if visual_gate and points:
         ring_values: list[float] = []
+        point_clip_ratios: list[float] = []
         for x, y, component_width, component_height, _ in points:
             pad = max(2, int(max(component_width, component_height) * 2))
             left, top = max(0, x - pad), max(0, y - pad)
@@ -362,7 +363,12 @@ def _star_measurements(array: np.ndarray, exif: dict[str, Any] | None = None) ->
             if np.any(ring):
                 ring_values.append(float(np.mean(region[ring])))
             if core.size:
-                color_clip += float(np.mean(np.max(rgb[y : y + component_height, x : x + component_width], axis=2) >= 0.995))
+                point_clip_ratios.append(
+                    float(np.mean(np.max(rgb[y : y + component_height, x : x + component_width], axis=2) >= 0.995))
+                )
+        # 星ごとの白飛び割合の平均（合計にすると星が多いだけで1.0に張り付く）。
+        if point_clip_ratios:
+            color_clip = float(np.mean(point_clip_ratios))
         if ring_values:
             halo = float(np.clip(np.mean(ring_values) / max(threshold, 0.01), 0.0, 1.0))
 
@@ -967,9 +973,11 @@ def generate_development_candidates(
                 target = _style_target(base, style)
                 vector = _vector_from_adjustments(adjustments) * 0.55 + target * 0.45
                 moved = _adjustments_from_vector(vector, base, adjustments["noise_reduction"])
-                moved_metrics = evaluator.evaluate(moved, style == "stars")
-                if _guard_failure(style, moved_metrics, base_metrics) is None:
-                    adjustments, metrics = moved, moved_metrics
+                # 採用する値（スナップ後）が探索時と同じ安全チェックを満たす場合だけ移動を採る。
+                if _safe_vector(_vector_from_adjustments(moved)):
+                    moved_metrics = evaluator.evaluate(moved, style == "stars")
+                    if _guard_failure(style, moved_metrics, base_metrics) is None:
+                        adjustments, metrics = moved, moved_metrics
             if failure is not None:
                 rejected.append({"id": style, "reason": failure})
                 continue

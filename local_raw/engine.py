@@ -470,6 +470,23 @@ def _apply_tone(image: Image.Image, adjustments: dict[str, Any]) -> Image.Image:
     return Image.fromarray(np.rint(toned * 255.0).astype(np.uint8), mode="RGB")
 
 
+def apply_post_decode_chain(
+    rgb: np.ndarray,
+    adjustments: dict[str, Any],
+    max_edge: int,
+) -> np.ndarray:
+    """デコード（＋レンズ補正）後の後段: shadow_lift → リサイズ → トーン。
+
+    `develop_raw` と現像候補生成の代理画像（`development_candidates.render_proxy`）が
+    同じ関数を呼ぶことで、代理と本番の後段が構造的にずれないようにする。
+    入力は [0,1] の float32 RGB。
+    """
+
+    rgb = _apply_shadow_lift_array(rgb, float(adjustments["shadow_lift"]))
+    rgb = _resize_array(rgb, max_edge)
+    return _apply_tone_array(rgb, adjustments)
+
+
 def _decode_16bit_to_float01(rgb: np.ndarray) -> np.ndarray:
     """rawpy の16bit整数出力を float32 0..1 へ変換する。
 
@@ -669,9 +686,7 @@ def develop_raw(
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
 
     # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
-    rgb = _apply_shadow_lift_array(rgb, float(resolved["shadow_lift"]))
-    rgb = _resize_array(rgb, effective_max_edge)
-    rgb = _apply_tone_array(rgb, resolved)
+    rgb = apply_post_decode_chain(rgb, resolved, effective_max_edge)
     image = _array_to_image(rgb)
 
     save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, image.width, image.height)

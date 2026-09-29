@@ -42,12 +42,32 @@ def make_scene(*, stars: bool, noisy: bool = False) -> np.ndarray:
     return np.clip(image, 0.0, 1.0)
 
 
+def make_star_field(*, clipped: int, unclipped: int) -> np.ndarray:
+    """暗い背景に1画素の星を格子状に置く（白飛びした星 clipped 個・していない星 unclipped 個）。"""
+
+    image = np.full((320, 480, 3), 0.04, dtype=np.float32)
+    total = clipped + unclipped
+    for index in range(total):
+        y = 30 + 55 * (index // 8)
+        x = 30 + 55 * (index % 8)
+        image[y, x] = (1.0, 1.0, 1.0) if index < clipped else (0.8, 0.8, 0.8)
+    return image
+
+
 class FakeDecoder:
     """Deterministic stand-in for ``open_raw_half_decoder``."""
 
-    def __init__(self, scene: np.ndarray, *, worsen_full_nr: bool = False) -> None:
+    def __init__(
+        self,
+        scene: np.ndarray,
+        *,
+        worsen_full_nr: bool = False,
+        break_noise_reduction: str | None = None,
+    ) -> None:
         self.scene = scene
         self.worsen_full_nr = worsen_full_nr
+        # 指定した noise_reduction のデコードだけ、黒つぶれした画像を返す。
+        self.break_noise_reduction = break_noise_reduction
         self.calls: list[tuple[str, str, float]] = []
         self.base: dict | None = None
 
@@ -62,6 +82,8 @@ class FakeDecoder:
             # 実RAWで見られた「低ノイズ設定がむしろノイズを悪化させる」ケースの再現。
             rng = np.random.default_rng(5)
             image = image + rng.normal(0.0, 0.25, image.shape).astype(np.float32)
+        if self.break_noise_reduction is not None and noise_reduction == self.break_noise_reduction:
+            image = image * 0.02
         return np.clip(image, 0.0, 1.0).astype(np.float32)
 
     def factory(self, path: Path, base: dict):
@@ -196,16 +218,13 @@ class CandidateOptimizerTests(unittest.TestCase):
         self.generate(decoder, preset="sunset_glow")  # exposure -0.1 は格子外
         self.assertIn(("blend", "light", -0.1), decoder.calls)
 
-    def test_render_proxy_matches_engine_postprocess_chain(self):
+    def test_render_proxy_matches_engine_post_decode_chain(self):
         rng = np.random.default_rng(3)
         decoded = rng.uniform(0.0, 1.0, (1300, 1000, 3)).astype(np.float32)
         adjustments = resolve_adjustments(
             "landscape_clear", {"shadow_lift": 40, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3, "sharpness": 1.4}
         )
-        expected = engine._apply_tone_array(
-            engine._resize_array(engine._apply_shadow_lift_array(decoded, 40.0), candidates.MAX_PROXY_EDGE),
-            adjustments,
-        )
+        expected = engine.apply_post_decode_chain(decoded, adjustments, candidates.MAX_PROXY_EDGE)
         np.testing.assert_array_equal(candidates.render_proxy(decoded, adjustments), expected)
         self.assertEqual(max(expected.shape[:2]), candidates.MAX_PROXY_EDGE)
 
@@ -326,6 +345,297 @@ class CandidateOptimizerTests(unittest.TestCase):
             self.generate(decoder, preset="no_such_preset")
         self.assertEqual(decoder.calls, [])
 
+    # ------------------------------------------------------------------
+    # star_color_saturation: 星ごとの白飛び割合の平均
+    # ------------------------------------------------------------------
+
+    def test_star_color_saturation_is_the_mean_over_stars_not_a_sum(self):
+        # 40個の星のうち10個だけ白飛び。合計にすると1.0に張り付くが、平均なら 10/40。
+        measured = candidates._star_measurements(make_star_field(clipped=10, unclipped=30))
+        self.assertTrue(measured["is_star_scene"])
+        self.assertEqual(measured["star_count"], 40)
+        self.assertAlmostEqual(measured["star_color_saturation"], 0.25, places=6)
+
+    def test_star_color_saturation_spans_zero_to_one_with_the_clipped_share(self):
+        none_clipped = candidates._star_measurements(make_star_field(clipped=0, unclipped=40))
+        all_clipped = candidates._star_measurements(make_star_field(clipped=40, unclipped=0))
+        few_stars = candidates._star_measurements(make_star_field(clipped=3, unclipped=9))
+        self.assertEqual(none_clipped["star_color_saturation"], 0.0)
+        self.assertEqual(all_clipped["star_color_saturation"], 1.0)
+        self.assertAlmostEqual(few_stars["star_color_saturation"], 0.25, places=6)
+
+    def test_star_color_saturation_is_zero_when_no_star_is_detected(self):
+        flat = np.full((320, 480, 3), 0.04, dtype=np.float32)
+        measured = candidates._star_measurements(flat)
+        self.assertEqual(measured["star_count"], 0)
+        self.assertEqual(measured["star_color_saturation"], 0.0)
+
+    # ------------------------------------------------------------------
+    # 重複回避で動かした値も安全チェックを通す
+    # ------------------------------------------------------------------
+
+    def test_moved_adjustments_must_pass_the_safety_check(self):
+        # 探索結果が natural とほぼ同じ値になり、重複回避で動かす経路を強制する。
+        chosen = dict(resolve_adjustments("neutral_recovery"), contrast=1.05)
+
+        def fake_optimise(evaluator, style, star_reference, budget, seed):
+            return dict(chosen), evaluator.metrics, None
+
+        def social_adjustments(safe: bool) -> dict:
+            with (
+                mock.patch.object(candidates, "_optimise_style", side_effect=fake_optimise),
+                mock.patch.object(candidates, "_safe_vector", return_value=safe),
+            ):
+                result = self.generate(FakeDecoder(make_scene(stars=False)))
+            return {item["id"]: item for item in result["candidates"]}["social"]["adjustments"]
+
+        # 移動後の値が安全チェックを通るときだけ移動値を採用する。
+        self.assertNotEqual(social_adjustments(True), chosen)
+        self.assertEqual(social_adjustments(False), chosen)
+
+    # ------------------------------------------------------------------
+    # 本番デコーダ open_raw_half_decoder（rawpy をモック）
+    # ------------------------------------------------------------------
+
+    def open_decoder(self, raw: mock.MagicMock, base: dict | None = None):
+        import rawpy
+
+        return mock.patch.object(rawpy, "imread", return_value=raw), candidates.open_raw_half_decoder(
+            Path("/nonexistent/DSC00001.ARW"), base or resolve_adjustments("neutral_recovery")
+        )
+
+    @staticmethod
+    def fake_raw() -> mock.MagicMock:
+        raw = mock.MagicMock()
+        raw.camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+        raw.postprocess.return_value = np.full((10, 12, 3), 32768, dtype=np.uint16)
+        return raw
+
+    def test_production_decoder_passes_half_size_and_engine_params(self):
+        import rawpy
+
+        raw = self.fake_raw()
+        base = resolve_adjustments("neutral_recovery")  # highlight_recovery=60 (blend)
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(Path("/nonexistent/DSC00001.ARW"), base) as decode:
+                result = decode("reconstruct", "full", 0.3)
+        self.assertEqual(result.dtype, np.float32)
+        self.assertEqual(result.shape, (10, 12, 3))
+        raw.postprocess.assert_called_once()
+        kwargs = raw.postprocess.call_args.kwargs
+        self.assertIs(kwargs["half_size"], True)
+        self.assertEqual(kwargs["highlight_mode"], rawpy.HighlightMode.ReconstructDefault)
+        self.assertEqual(kwargs["fbdd_noise_reduction"], rawpy.FBDDNoiseReductionMode.Full)
+        self.assertEqual(kwargs["median_filter_passes"], 1)
+        # exposure は格子へスナップせず、渡された値そのものが bright になる。
+        self.assertAlmostEqual(kwargs["bright"], 2.0**0.3, places=9)
+        self.assertNotAlmostEqual(kwargs["bright"], 2.0**0.5, places=3)
+        self.assertEqual(kwargs["exp_shift"], 1.0)
+        self.assertIs(kwargs["no_auto_bright"], False)
+
+    def test_production_decoder_maps_categories_and_noise_reduction(self):
+        import rawpy
+
+        expected_highlight = {
+            "clip": rawpy.HighlightMode.Clip,
+            "blend": rawpy.HighlightMode.Blend,
+            "reconstruct": rawpy.HighlightMode.ReconstructDefault,
+        }
+        expected_noise = {
+            "off": (rawpy.FBDDNoiseReductionMode.Off, 0),
+            "light": (rawpy.FBDDNoiseReductionMode.Light, 0),
+            "full": (rawpy.FBDDNoiseReductionMode.Full, 1),
+        }
+        raw = self.fake_raw()
+        base = resolve_adjustments("neutral_recovery")
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(Path("/nonexistent/DSC00001.ARW"), base) as decode:
+                for category, highlight in expected_highlight.items():
+                    for noise, (fbdd, median) in expected_noise.items():
+                        raw.postprocess.reset_mock()
+                        decode(category, noise, 0.0)
+                        kwargs = raw.postprocess.call_args.kwargs
+                        self.assertEqual(kwargs["highlight_mode"], highlight, (category, noise))
+                        self.assertEqual(kwargs["fbdd_noise_reduction"], fbdd, (category, noise))
+                        self.assertEqual(kwargs["median_filter_passes"], median, (category, noise))
+                        self.assertIs(kwargs["half_size"], True)
+
+    def test_production_decoder_closes_raw_on_success_and_on_errors(self):
+        import rawpy
+
+        base = resolve_adjustments("neutral_recovery")
+        path = Path("/nonexistent/DSC00001.ARW")
+
+        raw = self.fake_raw()
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with candidates.open_raw_half_decoder(path, base) as decode:
+                decode("blend", "light", 0.0)
+        raw.close.assert_called_once()
+
+        # デコード失敗は DevelopmentCandidateError に包まれ、raw は閉じられる。
+        raw = self.fake_raw()
+        raw.postprocess.side_effect = rawpy.LibRawError("broken")
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with self.assertRaises(candidates.DevelopmentCandidateError):
+                with candidates.open_raw_half_decoder(path, base) as decode:
+                    decode("blend", "light", 0.0)
+        raw.close.assert_called_once()
+
+        # 呼び出し側の例外でも close される。
+        raw = self.fake_raw()
+        with mock.patch.object(rawpy, "imread", return_value=raw):
+            with self.assertRaises(RuntimeError):
+                with candidates.open_raw_half_decoder(path, base):
+                    raise RuntimeError("boom")
+        raw.close.assert_called_once()
+
+        # ARW を開けない場合は DevelopmentCandidateError（close する対象が無い）。
+        with mock.patch.object(rawpy, "imread", side_effect=OSError("cannot open")):
+            with self.assertRaises(candidates.DevelopmentCandidateError):
+                with candidates.open_raw_half_decoder(path, base):
+                    pass
+
+    # ------------------------------------------------------------------
+    # 安全策・ゲートの境界
+    # ------------------------------------------------------------------
+
+    def test_clip_worsen_limit_boundary_is_ten_points(self):
+        # しきい値は 0.10、比較は「以上で除外」。期待値は定数ではなくリテラルで固定する。
+        base = {"highlight_clip": 0.0, "shadow_clip": 0.0, "noise_flat": 0.01, "shadow_mean": 0.1}
+        self.assertEqual(candidates.CLIP_WORSEN_LIMIT, 0.10)
+        self.assertIn("白飛び", candidates._guard_failure("social", dict(base, highlight_clip=0.10), base))
+        self.assertIsNone(candidates._guard_failure("social", dict(base, highlight_clip=0.099), base))
+        self.assertIn("黒つぶれ", candidates._guard_failure("social", dict(base, shadow_clip=0.10), base))
+        self.assertIsNone(candidates._guard_failure("social", dict(base, shadow_clip=0.099), base))
+
+    def test_low_noise_guard_boundary(self):
+        base = {"highlight_clip": 0.0, "shadow_clip": 0.0, "noise_flat": 0.0100, "shadow_mean": 0.1}
+        # 同値は通過、わずかでも悪化なら除外。
+        self.assertIsNone(candidates._guard_failure("low_noise", dict(base, noise_flat=0.0100), base))
+        self.assertIsNotNone(candidates._guard_failure("low_noise", dict(base, noise_flat=0.010001), base))
+        self.assertIsNone(candidates._guard_failure("low_noise", dict(base, noise_flat=0.0099), base))
+
+    def test_decode_cache_is_lru(self):
+        calls: list[float] = []
+
+        def decode(category, noise_reduction, exposure):
+            calls.append(exposure)
+            return np.full((4, 4, 3), 0.5, dtype=np.float32)
+
+        cache = candidates.DecodeCache(decode, limit=2)
+        cache.get("blend", "light", 0.0)  # A
+        cache.get("blend", "light", 0.5)  # B
+        cache.get("blend", "light", 0.0)  # A（最近使用になる）
+        cache.get("blend", "light", 1.0)  # C → 最も古い B が追い出される
+        self.assertEqual(cache.decode_count, 3)
+        cache.get("blend", "light", 0.0)  # A は残っている
+        self.assertEqual(cache.decode_count, 3)
+        cache.get("blend", "light", 0.5)  # B は再デコード
+        self.assertEqual(cache.decode_count, 4)
+        self.assertEqual(calls, [0.0, 0.5, 1.0, 0.5])
+
+    def test_star_gate_rejects_many_small_points_by_total_bright_area(self):
+        def points(count: int) -> np.ndarray:
+            image = np.full((320, 480, 3), 0.04, dtype=np.float32)
+            for index in range(count):
+                y = 15 + 30 * (index // 10)
+                x = 15 + 45 * (index % 10)
+                image[y : y + 3, x : x + 3] = 1.0  # 9画素（点の面積上限 69 以下）
+            return image
+
+        # 点は小さく暗背景でも、明部の合計面積が上限を超えたら星空ではない。
+        many = candidates.detect_star_scene(points(100))
+        self.assertEqual(many["star_count"], 100)
+        self.assertGreater(many["dark_background_ratio"], 0.9)
+        self.assertGreater(many["bright_point_ratio"], 0.005)
+        self.assertFalse(many["is_star_scene"])
+        # 同じ形で明部の合計面積だけ上限内なら星空と判定される（対照）。
+        few = candidates.detect_star_scene(points(50))
+        self.assertLessEqual(few["bright_point_ratio"], 0.005)
+        self.assertTrue(few["is_star_scene"])
+
+    def test_exposure_grid_snaps_to_half_ev(self):
+        self.assertEqual(candidates.EXPOSURE_GRID, 0.5)
+        for value, expected in (
+            (0.0, 0.0),
+            (0.3, 0.5),
+            (0.26, 0.5),
+            (0.24, 0.0),
+            (0.2, 0.0),
+            (-0.3, -0.5),
+            (-0.2, 0.0),
+            (0.74, 0.5),
+            (0.8, 1.0),
+            (1.9, 2.0),
+            (5.0, 2.0),
+            (-1.9, -2.0),
+            (-5.0, -2.0),
+        ):
+            self.assertEqual(candidates.snap_exposure(value), expected, value)
+
+    # ------------------------------------------------------------------
+    # E2E のレスポンス形
+    # ------------------------------------------------------------------
+
+    def assert_rejected_shape(self, result: dict) -> None:
+        for item in result["rejected"]:
+            self.assertEqual(set(item), {"id", "reason"})
+            self.assertNotEqual(item["id"], "natural")
+            self.assertIsInstance(item["reason"], str)
+            self.assertTrue(item["reason"])
+        self.assertNotIn("natural", [item["id"] for item in result["rejected"]])
+        rejected_ids = {item["id"] for item in result["rejected"]}
+        self.assertFalse(rejected_ids & {item["id"] for item in result["candidates"]})
+
+    def test_stars_candidate_is_adopted_on_a_star_scene(self):
+        result = self.generate(FakeDecoder(make_scene(stars=True)))
+        self.assertTrue(result["star_scene"]["is_star_scene"])
+        self.assertIn("stars", [item["id"] for item in result["candidates"]])
+        self.assertNotIn("stars", [item["id"] for item in result["rejected"]])
+        self.assert_rejected_shape(result)
+
+    def test_only_natural_when_every_other_style_is_rejected_or_not_targeted(self):
+        # 平坦なグラデーション画像では social 以外は対象外。social のデコード
+        # （noise_reduction=off）だけ黒つぶれさせ、全候補を落とす。
+        decoder = FakeDecoder(make_scene(stars=False), break_noise_reduction="off")
+        result = self.generate(decoder)
+        self.assertEqual([item["id"] for item in result["candidates"]], ["natural"])
+        self.assertEqual([item["id"] for item in result["rejected"]], ["social"])
+        self.assert_rejected_shape(result)
+        self.assertEqual(result["candidates"][0]["adjustments"], resolve_adjustments("neutral_recovery"))
+
+    def test_candidate_that_worsens_shadow_clip_is_rejected_end_to_end(self):
+        decoder = FakeDecoder(make_scene(stars=False), break_noise_reduction="off")
+        result = self.generate(decoder)
+        natural = result["candidates"][0]["metrics"]
+        self.assertEqual(natural["shadow_clip"], 0.0)
+        self.assertNotIn("social", [item["id"] for item in result["candidates"]])
+        reasons = {item["id"]: item["reason"] for item in result["rejected"]}
+        self.assertIn("黒つぶれ", reasons["social"])
+        self.assertIn("除外", reasons["social"])
+        for item in result["candidates"]:
+            self.assertLess(item["metrics"]["shadow_clip"] - natural["shadow_clip"], 0.10)
+
+    def test_candidate_that_worsens_highlight_clip_is_rejected_end_to_end(self):
+        # 白飛びはトーン（brightness 0.7 まで下げられる）で回避されてしまうため、
+        # 基準以外の調整値の代理画像を全面白にして「どの点も白飛びが悪化する」状況を作る。
+        base = resolve_adjustments("neutral_recovery")
+        real_render = candidates.render_proxy
+
+        def render(decoded, adjustments):
+            image = real_render(decoded, adjustments)
+            return image if adjustments == base else np.ones_like(image)
+
+        with mock.patch.object(candidates, "render_proxy", side_effect=render):
+            result = self.generate(FakeDecoder(make_scene(stars=False)))
+        natural = result["candidates"][0]["metrics"]
+        self.assertEqual(natural["highlight_clip"], 0.0)
+        self.assertNotIn("social", [item["id"] for item in result["candidates"]])
+        reasons = {item["id"]: item["reason"] for item in result["rejected"]}
+        self.assertIn("白飛び", reasons["social"])
+        for item in result["candidates"]:
+            self.assertLess(item["metrics"]["highlight_clip"] - natural["highlight_clip"], 0.10)
+
 
 class CandidateServerHandlerTests(unittest.TestCase):
     class Request:
@@ -377,3 +687,57 @@ class CandidateServerHandlerTests(unittest.TestCase):
         self.assertEqual(request.status, 500)
         self.assertNotIn("/Users/private", request.body["error"])
         self.assertTrue(request.logs)
+
+    def post(self, payload):
+        request = self.Request(payload)
+        server.handle_development_candidates(request, urlparse("/api/development-candidates"))
+        return request
+
+    def test_invalid_inputs_are_400_and_never_reach_the_generator(self):
+        valid = {"capture_id": "DSC00001", "preset": "neutral_recovery"}
+        cases = {
+            "capture_id missing": {"preset": "neutral_recovery"},
+            "capture_id empty": dict(valid, capture_id=""),
+            "capture_id number": dict(valid, capture_id=1),
+            "capture_id null": dict(valid, capture_id=None),
+            "capture_id list": dict(valid, capture_id=["DSC00001"]),
+            "preset missing": {"capture_id": "DSC00001"},
+            "preset empty": dict(valid, preset=""),
+            "preset number": dict(valid, preset=3),
+            "preset null": dict(valid, preset=None),
+            "seed float": dict(valid, seed=1.5),
+            "seed integral float": dict(valid, seed=7.0),
+            "seed string": dict(valid, seed="7"),
+            "budget float": dict(valid, budget=48.0),
+            "budget string": dict(valid, budget="48"),
+            "payload list": ["DSC00001"],
+            "payload null": None,
+            "payload string": "DSC00001",
+        }
+        for name, payload in cases.items():
+            with self.subTest(name), mock.patch.object(candidates, "generate_development_candidates") as generate:
+                request = self.post(payload)
+                self.assertEqual(request.status, 400)
+                self.assertIn("error", request.body)
+                generate.assert_not_called()
+
+    def test_out_of_range_budget_is_400(self):
+        for budget in (candidates.MIN_BUDGET - 1, candidates.MAX_BUDGET + 1, 0, -5):
+            with self.subTest(budget=budget):
+                request = self.post({"capture_id": "DSC00001", "preset": "neutral_recovery", "budget": budget})
+                self.assertEqual(request.status, 400)
+                self.assertIn("budget", request.body["error"])
+
+    def test_valid_request_passes_arguments_through_and_returns_the_result(self):
+        result = {"capture_id": "DSC00001", "candidates": [{"id": "natural"}], "rejected": []}
+        with mock.patch.object(candidates, "generate_development_candidates", return_value=result) as generate:
+            request = self.post({"capture_id": "DSC00001", "preset": "neutral_recovery", "seed": 5, "budget": 64})
+        self.assertEqual(request.status, 200)
+        self.assertIs(request.body, result)
+        generate.assert_called_once_with("DSC00001", "neutral_recovery", seed=5, budget=64)
+
+    def test_omitted_seed_and_budget_are_passed_as_none(self):
+        with mock.patch.object(candidates, "generate_development_candidates", return_value={}) as generate:
+            request = self.post({"capture_id": "DSC00001", "preset": "neutral_recovery"})
+        self.assertEqual(request.status, 200)
+        generate.assert_called_once_with("DSC00001", "neutral_recovery", seed=None, budget=None)
