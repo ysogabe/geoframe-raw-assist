@@ -48,6 +48,7 @@ import {
   sourceFolderErrorMessage,
 } from "./lib/format";
 import { adjacentGroupId, isEditableTarget } from "./lib/group-nav";
+import { confirmDiscard } from "./lib/confirm";
 import type { Adjustments, DevelopmentCandidate, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
@@ -366,6 +367,11 @@ export default function Home() {
     });
   }
 
+  /** グループ移動の確認ダイアログ表示中。二重に出さないための再入ガード。 */
+  const confirmingRef = useRef(false);
+  /** 最新レンダーの選択グループ id（確認ダイアログの await 後に古い closure の group を見ないため）。 */
+  const currentGroupIdRef = useRef<number | null>(null);
+
   function openOperationScreen(groupId: number) {
     dispatch({ type: "screen/operation", groupId });
     scrollToTop();
@@ -378,10 +384,30 @@ export default function Home() {
    * 手動調整が残っているときは黙って捨てずに確認を取る。選択中のグループへの
    * 「移動」は何もしない（再ディスパッチで調整が消えるのを防ぐ。GroupStrip 側の
    * 再クリック無視と同じ理由）。
+   *
+   * 確認は非同期（Tauri ではネイティブダイアログ。WKWebView は window.confirm を
+   * 出さない）。表示中の再入は confirmingRef で弾き、確認中に選択グループが
+   * 変わっていたら（最新値は currentGroupIdRef で見る）移動しない。
+   * 呼び出し側は戻り値の Promise を待たなくてよい（例外は内部で処理する）。
    */
-  function moveToGroup(groupId: number, scroll: "top" | "media") {
+  async function moveToGroup(groupId: number, scroll: "top" | "media") {
     if (!group || groupId === group.id) return;
-    if (changedKeys.length > 0 && !window.confirm("調整値が失われます。移動しますか？")) return;
+    if (confirmingRef.current) return;
+    if (changedKeys.length > 0) {
+      const fromGroupId = group.id;
+      confirmingRef.current = true;
+      let ok: boolean;
+      try {
+        ok = await confirmDiscard("調整値が失われます。移動しますか？");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dispatch({ type: "notice/set", message: `移動の確認ダイアログを表示できませんでした: ${detail}`, tone: "error" });
+        return;
+      } finally {
+        confirmingRef.current = false;
+      }
+      if (!ok || currentGroupIdRef.current !== fromGroupId) return;
+    }
     dispatch({ type: "screen/operation", groupId });
     if (scroll === "media") scrollToMediaCard();
     else scrollToTop();
@@ -401,8 +427,9 @@ export default function Home() {
     const next = adjacentGroupId(analysis.groups, group.id, event.key === "ArrowLeft" ? -1 : 1);
     // 両端では何もしない（既定動作も奪わない）。
     if (next === null) return;
+    // 既定動作の抑止は同期のうちに（確認ダイアログの await 後では効かない）。
     event.preventDefault();
-    moveToGroup(next, "media");
+    void moveToGroup(next, "media");
   }
 
   // window の購読は操作画面の間だけ張り替えずに持ち、中身は毎レンダーの最新ハンドラへ
@@ -410,6 +437,7 @@ export default function Home() {
   const groupKeyHandlerRef = useRef(handleGroupKey);
   useEffect(() => {
     groupKeyHandlerRef.current = handleGroupKey;
+    currentGroupIdRef.current = group?.id ?? null;
   });
   useEffect(() => {
     if (screen !== "operation") return;
@@ -759,8 +787,8 @@ export default function Home() {
               acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
               // クリック・◀▶ の移動も ←→ キーと同じ確認を通す。カードのクリックは従来どおり
               // ページ先頭へ、◀▶ は ←→ キーと同じ操作なので着地もキーと揃える。
-              onSelectGroup={(groupId) => moveToGroup(groupId, "top")}
-              onStepGroup={(groupId) => moveToGroup(groupId, "media")}
+              onSelectGroup={(groupId) => void moveToGroup(groupId, "top")}
+              onStepGroup={(groupId) => void moveToGroup(groupId, "media")}
             />
             <OperationPanel
               analysis={analysis}
