@@ -23,6 +23,11 @@ describe("candidateStyleLabel", () => {
   it("未知の id はそのまま返す", () => {
     expect(candidateStyleLabel("future")).toBe("future");
   });
+  it("プロトタイプ由来のキーでも id 文字列を返す", () => {
+    for (const id of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      expect(candidateStyleLabel(id)).toBe(id);
+    }
+  });
 });
 
 describe("summarizeStarScene", () => {
@@ -31,6 +36,7 @@ describe("summarizeStarScene", () => {
     expect(s.verdict).toBe("星空として評価");
     expect(s.facts).toEqual([
       { label: "暗い背景の割合", value: "73%" },
+      { label: "明るい部分の割合", value: "0.10%" },
       { label: "星の数", value: "42個" },
       { label: "EXIFの夜判定", value: "夜" },
     ]);
@@ -39,6 +45,14 @@ describe("summarizeStarScene", () => {
     const s = summarizeStarScene({ ...scene, is_star_scene: false, exif_night: false, dark_background_ratio: NaN });
     expect(s.verdict).toBe("星空ではないと判定");
     expect(s.facts[0].value).toBe("—");
-    expect(s.facts[2].value).toBe("夜ではない");
+    expect(s.facts[3].value).toBe("夜ではない");
+  });
+  it("明るい部分の割合は 0.5% 前後が読める精度で表示する", () => {
+    const f = (v: number) => summarizeStarScene({ ...scene, bright_point_ratio: v }).facts[1];
+    expect(f(0.0065)).toEqual({ label: "明るい部分の割合", value: "0.65%" });
+    expect(f(0.004).value).toBe("0.40%");
+    expect(f(0.05).value).toBe("5.00%");
+    expect(f(NaN).value).toBe("—");
+    expect(f(Infinity).value).toBe("—");
   });
 });
