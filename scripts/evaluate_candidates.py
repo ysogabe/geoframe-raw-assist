@@ -600,23 +600,33 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
 # ---------------------------------------------------------------------------
 
 
-def develop_real_array(raw: Any, adjustments: dict[str, Any], lens_resolution: Any) -> tuple[np.ndarray, dict[str, Any], dict[str, float]]:
+def develop_real_array(
+    raw: Any,
+    adjustments: dict[str, Any],
+    lens_resolution: Any,
+    dark_scene_bright_k: float | None = None,
+    capture_exif: dict[str, Any] | None = None,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, float]]:
     """engine.develop_raw と同じ手順（full デコード → レンズ補正 → 後段）を配列のまま行う。
+
+    ``capture_exif`` はペアJPG の EXIF 要約（無ければ None）。RAW から ISO が取れないときの
+    フォールバックにだけ使う。
 
     ファイルには何も書かない。戻り値の配列は長辺 ``COMPARE_EDGE`` に揃える前の PREVIEW サイズ。
     """
 
     started = time.monotonic()
-    rgb = raw.postprocess(**engine._postprocess_params(raw, adjustments, True))
+    rgb = raw.postprocess(**engine._postprocess_params(raw, adjustments, True, dark_scene_bright_k))
     decode_seconds = time.monotonic() - started
     rgb = engine._decode_16bit_to_float01(rgb)
-    rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
-    # 注意: develop_raw と違い、ペアJPGの EXIF への ISO フォールバックはしない
-    # （EXIF を受け取らない構造）。RAW から ISO が取れないと撮影時シャープの ISO 依存は
-    # 「不明」扱いになり、本番出力と差が出うる。
-    rgb = engine.apply_post_decode_chain(
-        rgb, adjustments, engine.PREVIEW_MAX_EDGE, iso=engine._raw_iso(raw)
+    rgb, lens_correction = apply_lens_correction(
+        rgb, lens_resolution, force_skip_vignetting=dark_scene_bright_k is not None
     )
+    # ISO は develop_raw と同じ規則: RAW のメタデータ → 取れなければペアJPG の EXIF。
+    iso = engine._raw_iso(raw)
+    if iso is None:
+        iso = engine._coerce_iso((capture_exif or {}).get("iso"))
+    rgb = engine.apply_post_decode_chain(rgb, adjustments, engine.PREVIEW_MAX_EDGE, iso=iso)
     return rgb, lens_correction, {"t_decode": decode_seconds, "t_total": time.monotonic() - started}
 
 
@@ -702,9 +712,16 @@ def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str
     candidates = [dict(c) for c in result["candidates"]]
     reals: dict[str, np.ndarray] = {}
     with rawpy.imread(str(arw_path)) as raw:
+        dark_scene = engine.detect_dark_scene(exif, raw=raw)
         for candidate in candidates:
             try:
-                rgb, lens_correction, timing = develop_real_array(raw, candidate["adjustments"], lens_resolution)
+                rgb, lens_correction, timing = develop_real_array(
+                    raw,
+                    candidate["adjustments"],
+                    lens_resolution,
+                    dark_scene["bright_k"],
+                    exif,
+                )
             except Exception as error:  # 1候補の失敗で他を巻き込まない
                 traceback.print_exc()
                 candidate["raw_error"] = f"{type(error).__name__}: {error}"
@@ -742,6 +759,7 @@ def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str
         "rejected": result["rejected"],
         "seed": result["seed"],
         "budget": result["budget"],
+        "dark_scene": dark_scene,
         "exif": exif,
     }
 

@@ -345,7 +345,7 @@ class DevelopParityTests(unittest.TestCase):
             original = getattr(target, name)
 
             def recorder(*args, **kwargs):
-                calls.append((label, args[1:] if label != "decode16" else ()))
+                calls.append((label, args[1:] if label != "decode16" else (), dict(kwargs)))
                 return original(*args, **kwargs)
 
             return mock.patch.object(target, name, side_effect=recorder)
@@ -370,28 +370,71 @@ class DevelopParityTests(unittest.TestCase):
         adjustments = engine.resolve_adjustments("neutral_recovery")
         calls = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({})))
         self.assertEqual([c[0] for c in calls], ["postprocess_params", "decode16", "lens", "chain"])
-        self.assertEqual(calls[0][1], (adjustments, True))  # preview 相当（full デコード）
+        self.assertEqual(calls[0][1], (adjustments, True, None))  # preview 相当（full デコード）
+        self.assertEqual(calls[2][2], {"force_skip_vignetting": False})
         self.assertEqual(calls[3][1], (adjustments, engine.PREVIEW_MAX_EDGE))
 
-    def test_same_calls_as_engine_develop_raw(self):
+    def test_dark_scene_passes_fixed_gain_and_skips_vignetting(self):
         adjustments = engine.resolve_adjustments("neutral_recovery")
-        mine = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({})))
+        calls = self._run(
+            lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({}), 5.0)
+        )
+        self.assertEqual(calls[0][1], (adjustments, True, 5.0))
+        self.assertEqual(calls[2][2], {"force_skip_vignetting": True})
+
+    def test_iso_falls_back_to_pair_jpg_exif(self):
+        adjustments = engine.resolve_adjustments("neutral_recovery")
+        calls = self._run(
+            lambda: ec.develop_real_array(
+                self.FakeRaw(), adjustments, ec.probe_lens({}), None, {"iso": 3200}
+            )
+        )
+        self.assertEqual(calls[3][2], {"iso": 3200})
+
+    def _compare_with_engine(self, exif: dict | None):
+        """exif が None ならペアJPG無し。dict ならその EXIF を持つペアJPGがある状況を再現。"""
+        adjustments = engine.resolve_adjustments("neutral_recovery")
+        bright_k = engine.detect_dark_scene(exif or {})["bright_k"]
+        mine = self._run(
+            lambda: ec.develop_real_array(
+                self.FakeRaw(), adjustments, ec.probe_lens({}), bright_k, exif
+            )
+        )
 
         def run_engine():
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory) / "src"
                 root.mkdir()
                 (root / "DSC00001.ARW").write_bytes(b"")
-                with (
+                patches = [
                     mock.patch.object(engine.config, "source_root", return_value=root),
                     mock.patch.object(engine, "OUTPUT_ROOT", Path(directory) / "out"),
                     mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
                     mock.patch.object(engine.rawpy, "imread", return_value=self.FakeRaw()),
-                ):
+                ]
+                if exif is not None:
+                    (root / "DSC00001.JPG").write_bytes(b"")
+                    patches.append(mock.patch.object(engine, "read_capture_exif", return_value=exif))
+                with contextlib.ExitStack() as stack:
+                    for patch in patches:
+                        stack.enter_context(patch)
                     engine.develop_raw("DSC00001", "neutral_recovery", preview=True)
 
         theirs = self._run(run_engine)
         self.assertEqual(mine, theirs)
+        return mine
+
+    def test_same_calls_as_engine_develop_raw(self):
+        self._compare_with_engine(None)
+
+    def test_same_calls_as_engine_develop_raw_bright_scene(self):
+        calls = self._compare_with_engine({"f_number": 8.0, "exposure_time": 1 / 250, "iso": 100})
+        self.assertEqual(calls[0][1], (engine.resolve_adjustments("neutral_recovery"), True, None))
+
+    def test_same_calls_as_engine_develop_raw_dark_scene(self):
+        calls = self._compare_with_engine({"f_number": 2.8, "exposure_time": 15.0, "iso": 3200})
+        self.assertEqual(calls[0][1][2], 5.0)
+        self.assertEqual(calls[2][2], {"force_skip_vignetting": True})
 
 
 if __name__ == "__main__":

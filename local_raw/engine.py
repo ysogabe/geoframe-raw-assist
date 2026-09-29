@@ -34,7 +34,12 @@ import rawpy
 from PIL import Image
 
 from . import config, source_files
-from .exif import SRGB_ICC_BYTES, build_inherited_exif, read_capture_exif
+from .exif import (
+    SRGB_ICC_BYTES,
+    build_inherited_exif,
+    read_capture_exif,
+    read_capture_exif_from_bytes,
+)
 from .lens import _all_finite, apply_lens_correction, probe_lens
 from .presets import (
     DEFAULT_PRESET,
@@ -107,8 +112,13 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: コアリング閾値と gain は ISO に依存させる。sharpness<1 のぼかし分岐は廃止（弱いシャープ
 #: になる）。あわせて noise_reduction="light" の FBDD を ISO<800 では Off にする
 #: （ISO 不明・800以上は従来どおり Light）。RECIPE_VERSION 10 でレシピに "iso" を追加。
-ENGINE_VERSION = 16
-RECIPE_VERSION = 10
+#: ENGINE_VERSION 17: 暗いシーン（EV100 <= DARK_SCENE_MAX_EV100）では LibRaw の auto_bright を
+#: やめて固定倍率（DARK_SCENE_BRIGHT_K）でデコードし、ビネット補正を強制スキップする
+#: （Issue #50。星空・夜景が過剰に明るくなり空が灰白色に飛ぶ問題）。該当シーンの
+#: 画素出力とレシピ（`dark_scene`）が変わり、キャッシュキーにも倍率を含める。RECIPE_VERSION 11 でレシピに
+#: "dark_scene" を追加。
+ENGINE_VERSION = 17
+RECIPE_VERSION = 11
 
 DEFAULT_MAX_EDGE = 6000
 PREVIEW_MAX_EDGE = 1600
@@ -119,15 +129,29 @@ JPEG_QUALITY = 92
 
 #: LibRaw の自動明るさ補正しきい値。
 #:
-#: 自動明るさ補正は **有効のまま**にしている（露出が picture ごとに適応的に決まり、
-#: カメラ内 JPEG に近い明るさになるため）。ただし副作用として `exp_shift` による
-#: 露出変更はヒストグラム正規化でほぼ打ち消される。実測（DSC02943, half_size）:
+#: 通常のシーンでは自動明るさ補正を **有効のまま**にしている（露出が picture ごとに
+#: 適応的に決まり、カメラ内 JPEG に近い明るさになるため）。ただし副作用として `exp_shift`
+#: による露出変更はヒストグラム正規化でほぼ打ち消される。実測（DSC02943, half_size）:
 #:   no_auto_bright=False → ±1EV での平均輝度差は 0.18（実質スライダーが死ぬ）
 #:   no_auto_bright=True  → 同 15.65 だが平均輝度 12.7（カメラJPEG 52.4 の約1/4で暗すぎる）
 #: 自動明るさ補正は残すが、露出スライダーを二重に掛けないよう `exp_shift` は 1.0
 #: に固定し、`bright` のみに露出倍率を渡す。LibRaw の自動正規化後にも露出調整が残り、
 #: EVの増減が過度に明るさへ反映される問題を抑える。
+#:
+#: 例外: **暗いシーン**（下の DARK_SCENE_MAX_EV100 以下）では auto_bright をやめて固定倍率
+#: にする。auto_bright は暗い画面ほど強く持ち上げて「平均的な明るさ」に揃えようとする
+#: ため、星空・夜景では黒い空まで灰白色に持ち上がる（Issue #50）。
 AUTO_BRIGHT_THR = 0.01
+
+#: 暗いシーンの判定しきい値（EV100 = log2(N²/t) − log2(ISO/100) がこれ以下）。
+#: 根拠（Issue #50 の調査）: 撮影ごとの「理想の固定倍率」は EV100 と無相関で、
+#: 中央値 5.5・残差 ±0.35 stop に収まる。しきい値を 6 → 7 に上げると白飛びの増加が
+#: 急に悪化する。EV100 <= 6 では 9〜16時・ISO 200以下の屋外シーンは0枚だった。
+DARK_SCENE_MAX_EV100 = 6.0
+
+#: 暗いシーンで auto_bright の代わりに使う固定倍率（LibRaw `bright`）。露出スライダーは
+#: `DARK_SCENE_BRIGHT_K * 2**exposure` として一度だけ乗る。上記の理想倍率の中央値 5.5 に近い 5.0。
+DARK_SCENE_BRIGHT_K = 5.0
 
 # プレビューを先に半分へデモザイクすると、後段の1600px縮小で細部が二重に失われる。
 # full-sizeでデモザイクしてからリサイズする。`preview=False`も元々full-sizeなので、
@@ -263,6 +287,85 @@ def _save_recipe(recipe_path: Path, recipe: dict[str, Any]) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def ev100(exif: dict[str, Any] | None) -> float | None:
+    """EXIF の F値・露光秒・ISO から EV100 = log2(N²/t) − log2(ISO/100) を返す純粋関数。
+
+    3値のどれかが無い・数値でない・有限でない・0以下のときは None。
+    """
+    if not exif:
+        return None
+    try:
+        f_number = float(exif.get("f_number"))
+        exposure_time = float(exif.get("exposure_time"))
+        iso = float(exif.get("iso"))
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) and value > 0 for value in (f_number, exposure_time, iso)):
+        return None
+    return math.log2(f_number**2 / exposure_time) - math.log2(iso / 100.0)
+
+
+def _bright_k_for_ev100(value: float | None) -> float | None:
+    if value is None or value > DARK_SCENE_MAX_EV100:
+        return None
+    return DARK_SCENE_BRIGHT_K
+
+
+def dark_scene_bright_k(exif: dict[str, Any] | None) -> float | None:
+    """暗いシーン（EV100 <= DARK_SCENE_MAX_EV100）なら固定倍率、そうでなければ None。"""
+    return _bright_k_for_ev100(ev100(exif))
+
+
+def detect_dark_scene(
+    capture_exif: dict[str, Any] | None,
+    *,
+    raw: Any | None = None,
+    source_path: Path | None = None,
+) -> dict[str, Any]:
+    """暗いシーンの判定結果（EV100・倍率・EXIF の出所）を返す。
+
+    ペアJPGの EXIF（`capture_exif`）に F値・露光秒・ISO の3値が揃っていればそれを使う。
+    欠けるときは RAW 埋め込みサムネイル（JPEG のとき）の EXIF から同じ3値を読む
+    （`raw` が開いていればそれを、無ければ `source_path` を開く）。それでも読めなければ
+    暗いシーン扱いにしない（従来どおりの auto_bright）。
+    """
+    source: str | None = None
+    value = ev100(capture_exif)
+    if value is not None:
+        source = "pair_jpg"
+    else:
+        value = ev100(_read_thumbnail_exif(raw, source_path))
+        if value is not None:
+            source = "raw_thumbnail"
+    bright_k = _bright_k_for_ev100(value)
+    return {
+        "ev100": None if value is None else round(value, 3),
+        "dark_scene": bright_k is not None,
+        "bright_k": bright_k,
+        "source": source,
+    }
+
+
+def _read_thumbnail_exif(raw: Any | None, source_path: Path | None) -> dict[str, Any]:
+    """RAW 埋め込みサムネイルの EXIF 要約。読めなければ空 dict（例外は握る）。"""
+
+    def from_raw(opened: Any) -> dict[str, Any]:
+        thumb = opened.extract_thumb()
+        if getattr(thumb, "format", None) != rawpy.ThumbFormat.JPEG:
+            return {}
+        return read_capture_exif_from_bytes(bytes(thumb.data))
+
+    try:
+        if raw is not None:
+            return from_raw(raw)
+        if source_path is not None:
+            with rawpy.imread(str(source_path)) as opened:
+                return from_raw(opened)
+    except Exception:  # noqa: BLE001 - 判定不能は「暗いシーンではない」に倒す
+        return {}
+    return {}
+
+
 def _params_hash(
     adjustments: dict[str, Any],
     preset_name: str,
@@ -270,6 +373,7 @@ def _params_hash(
     preview: bool,
     lens_applied: bool,
     source_root: str,
+    dark_scene_bright_k: float | None = None,
 ) -> str:
     """キャッシュキー（契約 §1）。
 
@@ -280,6 +384,9 @@ def _params_hash(
     `capture_id` がカメラの連番でカードをまたぐと衝突するため。これが無いと、
     別フォルダの同名 ID を同じプリセットで現像したときに
     **他人の写真の現像結果が `cached: true` で返る**。
+
+    `dark_scene_bright_k` は暗いシーン判定の固定倍率（非該当は None）。EXIF/サムネイル
+    由来の判定でデコード方式（auto_bright か固定倍率か）と出力が変わるため含める。
     """
     payload = {
         "adjustments": adjustments,
@@ -288,6 +395,7 @@ def _params_hash(
         "preview": bool(preview),
         "lens_applied": bool(lens_applied),
         "source_root": str(source_root),
+        "dark_scene_bright_k": dark_scene_bright_k,
         "versions": {
             "engine": ENGINE_VERSION,
             "rawpy": rawpy.__version__,
@@ -384,7 +492,13 @@ def _postprocess_params(
     raw: Any,
     adjustments: dict[str, Any],
     preview: bool,
+    dark_scene_bright_k: float | None = None,
 ) -> dict[str, Any]:
+    """rawpy.postprocess の引数を組み立てる。
+
+    `dark_scene_bright_k` が渡されたとき（暗いシーン）は auto_bright を使わず、
+    `bright = dark_scene_bright_k * 2**exposure` の固定倍率にする。None なら従来どおり。
+    """
     exposure = float(adjustments["exposure"])
     exposure_gain = 2.0**exposure
     highlight_recovery = float(adjustments["highlight_recovery"])
@@ -418,6 +532,12 @@ def _postprocess_params(
         "median_filter_passes": median_passes,
         "use_auto_wb": False,
     }
+
+    if dark_scene_bright_k is not None:
+        # 暗いシーン: auto_bright の正規化は黒い空まで持ち上げるので使わず固定倍率にする。
+        params["no_auto_bright"] = True
+        params.pop("auto_bright_thr")
+        params["bright"] = float(dark_scene_bright_k) * exposure_gain
 
     wb_temp = float(adjustments["wb_temp"])
     if wb_temp == 0:
@@ -768,6 +888,10 @@ def develop_raw(
     # params_hash がレンズ補正の適用有無を含むため、キャッシュ判定より前に必要。
     lens_resolution = probe_lens(capture_exif)
 
+    # 暗いシーン判定もキャッシュ判定より前に必要（デコード方式が params_hash に入る）。
+    dark_scene = detect_dark_scene(capture_exif, source_path=source_path)
+    dark_bright_k = dark_scene["bright_k"]
+
     params_hash = _params_hash(
         resolved,
         preset_name,
@@ -775,6 +899,7 @@ def develop_raw(
         preview,
         lens_resolution.applicable,
         str(source_root),
+        dark_bright_k,
     )
 
     destination_root = PREVIEW_ROOT if preview else OUTPUT_ROOT
@@ -807,7 +932,7 @@ def develop_raw(
     try:
         with rawpy.imread(str(source_path)) as raw:
             iso = _raw_iso(raw)
-            rgb = raw.postprocess(**_postprocess_params(raw, resolved, preview))
+            rgb = raw.postprocess(**_postprocess_params(raw, resolved, preview, dark_bright_k))
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
     if iso is None:
@@ -817,7 +942,11 @@ def develop_raw(
     rgb = _decode_16bit_to_float01(rgb)
 
     # --- rawpy postprocess（highlight_recovery込み） → レンズ補正（リサイズ前） ---
-    rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
+    # 暗いシーンは固定倍率で持ち上げるため、周辺減光補正のゲインが暗部ノイズ・空の
+    # 色ムラを増幅する。ビネットだけ強制スキップし、歪曲・TCAは従来どおり。
+    rgb, lens_correction = apply_lens_correction(
+        rgb, lens_resolution, force_skip_vignetting=dark_bright_k is not None
+    )
 
     # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
     rgb = apply_post_decode_chain(rgb, resolved, effective_max_edge, iso=iso)
@@ -837,6 +966,7 @@ def develop_raw(
         # 撮影時シャープに使った値（RAW の ISO、無ければペアJPGの EXIF）。FBDD の判定は RAW の ISO のみ（デバッグ用。不明なら null）。
         "iso": iso,
         "lens_correction": lens_correction,
+        "dark_scene": dark_scene,
         "exif": capture_exif,
         "exif_inherited": exif_inherited,
         "makernote": "dropped",

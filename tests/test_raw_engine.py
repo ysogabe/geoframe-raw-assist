@@ -1,7 +1,10 @@
 """現像エンジンの検証（サンプル画像に依存しない範囲）。"""
 
+import contextlib
 import fractions
+import io
 import json
+import math
 import os
 import struct
 import tempfile
@@ -956,6 +959,236 @@ class FbddIsoAdaptationTests(unittest.TestCase):
             with self.subTest(iso=iso):
                 self.assertEqual(self.fbdd("full", iso), (mode.Full, 1))
                 self.assertEqual(self.fbdd("off", iso), (mode.Off, 0))
+
+
+class DarkSceneTests(unittest.TestCase):
+    """暗いシーン（EV100 <= 6）の判定・デコード方式・レンズ補正・キャッシュキー（Issue #50）。"""
+
+    class FakeRaw:
+        camera_whitebalance = [2.0, 1.0, 1.5, 1.0]
+
+    @staticmethod
+    def exif_for_ev100(target: float, iso: float = 100.0) -> dict:
+        # f/1（N²=1）, t = 2**-(EV100 + log2(ISO/100))  →  EV100 = target
+        return {"f_number": 1.0, "exposure_time": 2.0 ** -(target + math.log2(iso / 100.0)), "iso": iso}
+
+    def test_ev100_formula(self):
+        self.assertAlmostEqual(engine.ev100({"f_number": 8.0, "exposure_time": 1 / 125, "iso": 100}), math.log2(64 * 125))
+        # ISO が2倍になると EV100 は1下がる
+        low = engine.ev100({"f_number": 2.8, "exposure_time": 1 / 30, "iso": 3200})
+        base = engine.ev100({"f_number": 2.8, "exposure_time": 1 / 30, "iso": 100})
+        self.assertAlmostEqual(base - low, 5.0)
+
+    def test_ev100_invalid_values_are_none(self):
+        good = {"f_number": 2.8, "exposure_time": 1 / 30, "iso": 800}
+        self.assertIsNotNone(engine.ev100(good))
+        self.assertIsNone(engine.ev100(None))
+        self.assertIsNone(engine.ev100({}))
+        for key in good:
+            for bad in (None, 0, 0.0, -1.0, float("nan"), float("inf"), "abc"):
+                with self.subTest(key=key, bad=bad):
+                    self.assertIsNone(engine.ev100({**good, key: bad}))
+            missing = dict(good)
+            del missing[key]
+            self.assertIsNone(engine.ev100(missing))
+
+    def test_dark_scene_threshold_boundary(self):
+        self.assertAlmostEqual(engine.ev100(self.exif_for_ev100(6.0)), 6.0)
+        self.assertEqual(engine.dark_scene_bright_k(self.exif_for_ev100(6.0)), 5.0)
+        self.assertEqual(engine.dark_scene_bright_k(self.exif_for_ev100(-3.0)), 5.0)
+        self.assertIsNone(engine.dark_scene_bright_k(self.exif_for_ev100(6.01)))
+        self.assertIsNone(engine.dark_scene_bright_k({"f_number": 2.8}))
+        self.assertIsNone(engine.dark_scene_bright_k({}))
+
+    def test_bright_scene_params_are_identical_to_legacy(self):
+        adjustments = resolve_adjustments(DEFAULT_PRESET, {"exposure": 0.5})
+        legacy = engine._postprocess_params(self.FakeRaw(), adjustments, False)
+        self.assertEqual(engine._postprocess_params(self.FakeRaw(), adjustments, False, None), legacy)
+        self.assertIs(legacy["no_auto_bright"], False)
+        self.assertEqual(legacy["auto_bright_thr"], engine.AUTO_BRIGHT_THR)
+        self.assertAlmostEqual(legacy["bright"], 2.0**0.5)
+
+    def test_dark_scene_params_use_fixed_gain(self):
+        for exposure in (-1.0, 0.0, 0.5):
+            with self.subTest(exposure=exposure):
+                adjustments = resolve_adjustments(DEFAULT_PRESET, {"exposure": exposure})
+                legacy = engine._postprocess_params(self.FakeRaw(), adjustments, False)
+                params = engine._postprocess_params(self.FakeRaw(), adjustments, False, 5.0)
+                self.assertIs(params["no_auto_bright"], True)
+                self.assertNotIn("auto_bright_thr", params)
+                self.assertAlmostEqual(params["bright"], 5.0 * 2.0**exposure)
+                self.assertEqual(params["exp_shift"], 1.0)
+                for key in legacy.keys() - {"no_auto_bright", "auto_bright_thr", "bright"}:
+                    self.assertEqual(params[key], legacy[key], key)
+
+    def test_params_hash_changes_with_dark_scene(self):
+        base = {
+            "adjustments": resolve_adjustments(DEFAULT_PRESET),
+            "preset_name": DEFAULT_PRESET,
+            "max_edge": 6000,
+            "preview": False,
+            "lens_applied": True,
+            "source_root": "/x",
+        }
+        legacy = _params_hash(**base)
+        self.assertEqual(_params_hash(**base, dark_scene_bright_k=None), legacy)
+        dark = _params_hash(**base, dark_scene_bright_k=5.0)
+        self.assertNotEqual(dark, legacy)
+        self.assertNotEqual(_params_hash(**base, dark_scene_bright_k=4.0), dark)
+
+    def test_engine_version_bumped(self):
+        self.assertGreaterEqual(engine.ENGINE_VERSION, 16)
+
+    # --- サムネイル EXIF へのフォールバック ---------------------------------
+
+    @staticmethod
+    def thumb_with_exif(f_number: float, exposure: float, iso: int) -> SimpleNamespace:
+        from local_raw.exif import TAG_EXIF_IFD, TAG_EXPOSURE_TIME, TAG_F_NUMBER, TAG_ISO
+
+        image = Image.new("RGB", (8, 8))
+        exif = image.getexif()
+        ifd = exif.get_ifd(TAG_EXIF_IFD)
+        ifd[TAG_ISO] = iso
+        ifd[TAG_F_NUMBER] = f_number
+        ifd[TAG_EXPOSURE_TIME] = exposure
+        buffer = io.BytesIO()
+        image.save(buffer, "JPEG", exif=exif.tobytes())
+        return SimpleNamespace(format=rawpy.ThumbFormat.JPEG, data=buffer.getvalue())
+
+    def test_pair_jpg_exif_takes_precedence(self):
+        raw = mock.MagicMock()
+        info = engine.detect_dark_scene(self.exif_for_ev100(3.0), raw=raw)
+        self.assertEqual((info["source"], info["dark_scene"], info["bright_k"]), ("pair_jpg", True, 5.0))
+        raw.extract_thumb.assert_not_called()
+
+    def test_falls_back_to_thumbnail_exif(self):
+        raw = mock.MagicMock()
+        raw.extract_thumb.return_value = self.thumb_with_exif(2.8, 15.0, 3200)
+        for incomplete in (None, {}, {"f_number": 2.8, "iso": 3200}):
+            with self.subTest(incomplete=incomplete):
+                info = engine.detect_dark_scene(incomplete, raw=raw)
+                self.assertEqual(info["source"], "raw_thumbnail")
+                self.assertTrue(info["dark_scene"])
+                self.assertEqual(info["bright_k"], 5.0)
+                expected = math.log2(2.8**2 / 15.0) - math.log2(32.0)
+                self.assertAlmostEqual(info["ev100"], expected, places=2)
+
+    def test_thumbnail_bright_scene_is_not_dark(self):
+        raw = mock.MagicMock()
+        raw.extract_thumb.return_value = self.thumb_with_exif(8.0, 1 / 250, 100)
+        info = engine.detect_dark_scene({}, raw=raw)
+        self.assertEqual(info["source"], "raw_thumbnail")
+        self.assertFalse(info["dark_scene"])
+        self.assertIsNone(info["bright_k"])
+
+    def test_unreadable_thumbnail_is_not_dark(self):
+        bad_cases = {
+            "bitmap": SimpleNamespace(format=rawpy.ThumbFormat.BITMAP, data=np.zeros((2, 2, 3), np.uint8)),
+            "garbage_jpeg": SimpleNamespace(format=rawpy.ThumbFormat.JPEG, data=b"not a jpeg"),
+            "no_exif": SimpleNamespace(
+                format=rawpy.ThumbFormat.JPEG,
+                data=(lambda b: (Image.new("RGB", (4, 4)).save(b, "JPEG"), b.getvalue())[1])(io.BytesIO()),
+            ),
+        }
+        for name, thumb in bad_cases.items():
+            with self.subTest(name):
+                raw = mock.MagicMock()
+                raw.extract_thumb.return_value = thumb
+                info = engine.detect_dark_scene({}, raw=raw)
+                self.assertEqual(
+                    (info["ev100"], info["dark_scene"], info["bright_k"], info["source"]),
+                    (None, False, None, None),
+                )
+        raw = mock.MagicMock()
+        raw.extract_thumb.side_effect = rawpy.LibRawNoThumbnailError("none")
+        self.assertFalse(engine.detect_dark_scene({}, raw=raw)["dark_scene"])
+
+    # --- develop_raw の配線 --------------------------------------------------
+
+    def run_develop_raw(self, *, exif: dict | None, thumb=None) -> tuple[mock.MagicMock, mock.MagicMock, dict]:
+        """exif が None ならペアJPGなし。戻り値: (postprocess params 記録, lens mock, recipe)。"""
+
+        class FakeRaw:
+            camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+
+            def __init__(self):
+                self.postprocess = mock.MagicMock(
+                    return_value=np.full((40, 60, 3), 30000, dtype=np.uint16)
+                )
+
+            def extract_thumb(self):
+                if thumb is None:
+                    raise rawpy.LibRawNoThumbnailError("none")
+                return thumb
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        fake = FakeRaw()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "src"
+            root.mkdir()
+            (root / "DSC00001.ARW").write_bytes(b"")
+            patches = [
+                mock.patch.object(engine.config, "source_root", return_value=root),
+                mock.patch.object(engine, "OUTPUT_ROOT", Path(directory) / "out"),
+                mock.patch.object(engine, "PREVIEW_ROOT", Path(directory) / "preview"),
+                mock.patch.object(engine.rawpy, "imread", return_value=fake),
+            ]
+            if exif is not None:
+                (root / "DSC00001.JPG").write_bytes(b"")
+                patches.append(mock.patch.object(engine, "read_capture_exif", return_value=exif))
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                lens = stack.enter_context(
+                    mock.patch.object(
+                        engine,
+                        "apply_lens_correction",
+                        side_effect=lambda rgb, resolution, **kw: (rgb, {"applied": False, **kw}),
+                    )
+                )
+                result = develop_raw("DSC00001", "neutral_recovery", max_edge=1200)
+                recipe = json.loads((Path(directory) / "out" / result["recipe_filename"]).read_text("utf-8"))
+        return fake.postprocess, lens, recipe
+
+    def test_develop_raw_dark_scene(self):
+        postprocess, lens, recipe = self.run_develop_raw(exif=self.exif_for_ev100(3.0))
+        params = postprocess.call_args.kwargs
+        self.assertIs(params["no_auto_bright"], True)
+        self.assertNotIn("auto_bright_thr", params)
+        self.assertAlmostEqual(params["bright"], 5.0 * 2.0 ** recipe["adjustments"]["exposure"])
+        self.assertIs(lens.call_args.kwargs["force_skip_vignetting"], True)
+        self.assertEqual(recipe["dark_scene"]["dark_scene"], True)
+        self.assertEqual(recipe["dark_scene"]["bright_k"], 5.0)
+        self.assertEqual(recipe["dark_scene"]["source"], "pair_jpg")
+        self.assertAlmostEqual(recipe["dark_scene"]["ev100"], 3.0, places=2)
+
+    def test_develop_raw_bright_scene(self):
+        postprocess, lens, recipe = self.run_develop_raw(exif=self.exif_for_ev100(12.0))
+        params = postprocess.call_args.kwargs
+        self.assertIs(params["no_auto_bright"], False)
+        self.assertEqual(params["auto_bright_thr"], engine.AUTO_BRIGHT_THR)
+        self.assertIs(lens.call_args.kwargs["force_skip_vignetting"], False)
+        self.assertFalse(recipe["dark_scene"]["dark_scene"])
+        self.assertIsNone(recipe["dark_scene"]["bright_k"])
+
+    def test_develop_raw_falls_back_to_thumbnail_without_pair_jpg(self):
+        postprocess, lens, recipe = self.run_develop_raw(
+            exif=None, thumb=self.thumb_with_exif(2.8, 15.0, 3200)
+        )
+        self.assertIs(postprocess.call_args.kwargs["no_auto_bright"], True)
+        self.assertIs(lens.call_args.kwargs["force_skip_vignetting"], True)
+        self.assertEqual(recipe["dark_scene"]["source"], "raw_thumbnail")
+
+    def test_develop_raw_without_any_exif_keeps_legacy_decode(self):
+        postprocess, lens, recipe = self.run_develop_raw(exif=None, thumb=None)
+        self.assertIs(postprocess.call_args.kwargs["no_auto_bright"], False)
+        self.assertIs(lens.call_args.kwargs["force_skip_vignetting"], False)
+        self.assertIsNone(recipe["dark_scene"]["source"])
 
 
 if __name__ == "__main__":

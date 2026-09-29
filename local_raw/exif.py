@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,7 @@ __all__ = [
     "SRGB_ICC_BYTES",
     "build_inherited_exif",
     "read_capture_exif",
+    "read_capture_exif_from_bytes",
 ]
 
 
@@ -69,6 +71,24 @@ def _rational_to_float(value: Any) -> float | None:
     return number
 
 
+def _summarize_exif(image: Image.Image) -> dict[str, Any]:
+    exif = image.getexif()
+    ifd = exif.get_ifd(TAG_EXIF_IFD)
+    lens_model = ifd.get(TAG_LENS_MODEL)
+    return {
+        "make": exif.get(TAG_MAKE),
+        "model": exif.get(TAG_MODEL),
+        "orientation": exif.get(TAG_ORIENTATION),
+        "captured_at": ifd.get(TAG_DATETIME_ORIGINAL),
+        "offset_time": ifd.get(TAG_OFFSET_TIME_ORIGINAL),
+        "iso": ifd.get(TAG_ISO),
+        "lens_model": lens_model.strip() if isinstance(lens_model, str) else lens_model,
+        "focal_length": _rational_to_float(ifd.get(TAG_FOCAL_LENGTH)),
+        "f_number": _rational_to_float(ifd.get(TAG_F_NUMBER)),
+        "exposure_time": _rational_to_float(ifd.get(TAG_EXPOSURE_TIME)),
+    }
+
+
 def read_capture_exif(source_jpg: Path) -> dict[str, Any]:
     """レンズ補正の事前判定とレシピ記録に使う EXIF 要約を読む。
 
@@ -76,21 +96,16 @@ def read_capture_exif(source_jpg: Path) -> dict[str, Any]:
     """
     try:
         with Image.open(source_jpg) as image:
-            exif = image.getexif()
-            ifd = exif.get_ifd(TAG_EXIF_IFD)
-            lens_model = ifd.get(TAG_LENS_MODEL)
-            return {
-                "make": exif.get(TAG_MAKE),
-                "model": exif.get(TAG_MODEL),
-                "orientation": exif.get(TAG_ORIENTATION),
-                "captured_at": ifd.get(TAG_DATETIME_ORIGINAL),
-                "offset_time": ifd.get(TAG_OFFSET_TIME_ORIGINAL),
-                "iso": ifd.get(TAG_ISO),
-                "lens_model": lens_model.strip() if isinstance(lens_model, str) else lens_model,
-                "focal_length": _rational_to_float(ifd.get(TAG_FOCAL_LENGTH)),
-                "f_number": _rational_to_float(ifd.get(TAG_F_NUMBER)),
-                "exposure_time": _rational_to_float(ifd.get(TAG_EXPOSURE_TIME)),
-            }
+            return _summarize_exif(image)
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def read_capture_exif_from_bytes(jpeg_bytes: bytes) -> dict[str, Any]:
+    """JPEG バイト列（RAW 埋め込みサムネイル等）から `read_capture_exif` と同じ要約を読む。"""
+    try:
+        with Image.open(io.BytesIO(jpeg_bytes)) as image:
+            return _summarize_exif(image)
     except (OSError, ValueError, AttributeError):
         return {}
 
