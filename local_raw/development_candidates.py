@@ -595,7 +595,8 @@ def _adjustments_from_vector(vector: Sequence[float], base: dict[str, Any], nois
 # gain = SHARPEN_GAIN_LARGE * (1 + (s - 1) * SHARPEN_SLIDER_SLOPE) で、これが
 # SHARPEN_GAIN_MAX に達する s = 1 + (GAIN_MAX / GAIN_LARGE - 1) / SLOPE (≈ 1.476) 以上は
 # 上限に張り付いて本番出力に差が出ない。それ以上を探索しても無駄なので、境界の少し
-# 手前（1.47）で打ち切る。
+# 手前（1.47）で打ち切る。縮小プレビュー側（長辺 <= 2000px、基準 gain 0.5）の飽和点は
+# 約 1.93 と高いが、候補の最終用途は原寸現像なので原寸の飽和点で揃える（#57）。
 _SHARPNESS_SEARCH_MAX = 1.47
 assert _SHARPNESS_SEARCH_MAX <= 1.0 + (
     engine.SHARPEN_GAIN_MAX / engine.SHARPEN_GAIN_LARGE - 1.0
