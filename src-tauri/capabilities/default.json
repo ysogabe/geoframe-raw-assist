@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window. The Python RAW-engine sidecar is spawned directly via std::process::Command in Rust (see src/main.rs), not through tauri-plugin-shell, so no shell/process permissions are required here. dialog:allow-open is the single dialog permission granted: the source-folder picker only needs open(); save/message/ask/confirm are intentionally not granted.",
+  "description": "Capabilities for the main window. The Python RAW-engine sidecar is spawned directly via std::process::Command in Rust (see src/main.rs), not through tauri-plugin-shell, so no shell/process permissions are required here. Dialog permissions are limited to dialog:allow-open (the source-folder picker) and dialog:allow-confirm (confirming a group move that discards manual adjustments; WKWebView does not show window.confirm; in tauri-plugin-dialog 2.x this permission is a deprecated alias that allows the underlying message command). dialog:allow-save / allow-message / allow-ask are intentionally not listed.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-confirm"
   ]
 }

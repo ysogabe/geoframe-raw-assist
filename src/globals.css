@@ -174,11 +174,26 @@ img { display: block; max-width: 100%; }
    一覧へ戻らずに次のグループへ移るための帯。カードの幅と縦横比を CSS で固定して
    おくこと。158 枚ぶんの img が loading="lazy" なので、寸法を画像側から取ると
    未読み込みのカードが 0 高さになり、選択カードのセンタリングがずれる。 */
+/* 帯は window の縦スクロールに追従して上端に固定する（.page-header-sticky と同じ流儀:
+   不透明ベタ + 下に薄い影、z-index は .sidebar(5) より下）。祖先（.workspace /
+   .app-shell / body）はどれも overflow を持たないので sticky は window 基準で効く。
+   帯自身は横スクロールさせない。スクロールするのは内側の .group-strip-scroller だけで、
+   左端の ◀ n/N ▶ は常に見えている。
+   帯の上の余白は margin ではなく sentinel（GroupStrip のコンパクト判定用、帯の外側）の
+   高さで取る。sentinel の下端 = 帯の元の上端、になるようにするため。 */
+.group-strip-sentinel { height: 18px; }
+.group-strip { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 10px; background: var(--paper); box-shadow: 0 6px 14px -10px rgba(23,33,31,.5); }
+.group-strip-nav { flex: 0 0 auto; display: grid; grid-template-columns: auto auto auto; align-items: center; justify-items: center; gap: 2px 4px; }
+.group-strip-nav button { width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: #5c6a66; font-size: 11px; line-height: 1; cursor: pointer; }
+.group-strip-nav button:hover:not(:disabled) { border-color: #9fcabb; color: var(--green); }
+.group-strip-nav button:disabled { opacity: .34; cursor: not-allowed; }
+.group-strip-position { min-width: 58px; text-align: center; color: #4f5d59; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.group-strip-hint { grid-column: 1 / -1; color: #8b9491; font-size: 10px; white-space: nowrap; }
 /* position: relative は GroupStrip の自動スクロール用。カードの offsetLeft が
-   この帯（＝横スクロールする要素）基準になり、scrollLeft とそのまま揃う。 */
-.group-strip { position: relative; overflow-x: auto; margin-top: 18px; }
+   この要素（＝横スクロールする要素）基準になり、scrollLeft とそのまま揃う。 */
+.group-strip-scroller { position: relative; flex: 1 1 auto; min-width: 0; overflow-x: auto; }
 /* 余白は track 側に持たせる。overflow-x のスクロールコンテナは上下も clip するので、
-   帯側に置くとミニカードの focus outline / aria-current の box-shadow が欠ける。 */
+   スクローラ側に置くとミニカードの focus outline / aria-current の box-shadow が欠ける。 */
 .group-strip-track { display: flex; gap: 8px; margin: 0; padding: 4px 2px; list-style: none; }
 .group-strip-track li { flex: 0 0 auto; }
 .group-strip-card { display: grid; gap: 6px; width: 104px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: inherit; text-align: left; cursor: pointer; }
@@ -190,6 +205,14 @@ img { display: block; max-width: 100%; }
 .group-strip-label { display: block; min-width: 0; }
 .group-strip-label strong { display: block; font-size: 11px; }
 .group-strip-label small { display: block; margin-top: 2px; color: #7d8783; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* コンパクト表示（固定中）。サムネと枚数を落とし、時刻 + 種別だけの 1 行チップにする。
+   幅はここでも CSS で固定する（センタリングの計算がカード幅に依存するため）。 */
+.group-strip.is-compact .group-strip-thumb, .group-strip.is-compact .group-strip-count, .group-strip.is-compact .group-strip-hint { display: none; }
+.group-strip.is-compact .group-strip-card { display: block; width: 92px; padding: 4px 7px; border-radius: 7px; }
+.group-strip.is-compact .group-strip-label { display: flex; align-items: baseline; gap: 5px; }
+.group-strip.is-compact .group-strip-label strong { flex: 0 0 auto; }
+.group-strip.is-compact .group-strip-label small { min-width: 0; margin-top: 0; }
+.group-strip.is-compact .group-strip-nav button { width: 22px; height: 22px; }
 
 .operation-screen { padding: 24px 0 12px; }
 .operation-progress { width: min(520px, 100%); margin: 0 auto 22px; display: grid; grid-template-columns: 32px auto 1fr 32px auto; align-items: center; gap: 10px; }
@@ -203,10 +226,14 @@ img { display: block; max-width: 100%; }
 .operation-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(350px, .65fr); gap: 22px; align-items: start; }
 .operation-media-card, .operation-controls-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 10px 32px rgba(43,54,50,.07); }
 .operation-media-card { padding: 18px; }
-.operation-controls-card { position: sticky; top: 18px; padding: 18px; }
+/* 固定されたグループ帯（--strip-h は GroupStrip が実測して :root に置く）の下に止める。 */
+.operation-controls-card { position: sticky; top: calc(var(--strip-h, 0px) + 18px); padding: 18px; }
 .media-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 13px; }
 .media-heading h2, .controls-heading h2 { margin: 5px 0 0; font-family: Georgia, "Yu Mincho", serif; font-size: 21px; font-weight: 500; }
-.operation-preview { height: auto; aspect-ratio: 3 / 2; }
+/* 選択写真はカード幅いっぱい。ただし縦位置写真で 3:2 の箱が画面より高くならないよう、
+   固定帯の下に収まる高さで頭打ちにする。帯の実寸(--strip-h)は引かない: コンパクト切替で帯が縮むと写真の高さ＝文書の高さが動き、コンパクト判定に跳ね返ってチカチカするため、通常表示の帯を見込んだ固定値にする（幅は 100% のまま、余白は contain の背景色）。
+   .selected-preview の共通定義は他画面でも使うので、ここは operation 系にだけ効かせる。 */
+.selected-preview.operation-preview { width: 100%; height: auto; aspect-ratio: 3 / 2; max-height: calc(100vh - 200px); }
 .operation-preview > img { object-fit: contain; background: #171d1b; }
 .controls-heading { padding-bottom: 13px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .controls-heading h2 { font-size: 18px; }
@@ -268,7 +295,12 @@ img { display: block; max-width: 100%; }
 
 /* 操作パネル側の上書き。**.shot-picker の定義より後ろに置くこと** — 同じ詳細度なので、
    前に置くと（以前の .operation-shot-picker small がそうだった）一切効かない。 */
-.operation-shot-picker { grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 10px; margin: 12px 0 0; }
+/* 操作パネルでは見出しの直下・大きい写真の上に 1 行で並べ、はみ出したら横スクロール。
+   タイル幅は固定（lazy な img から寸法を取らない）。overflow-x のスクロールコンテナは
+   上下も clip するので、focus outline と合成タイルの破線マーカー（left: -5px）の分を
+   padding で確保しておく。 */
+.operation-shot-picker { display: flex; gap: 10px; margin: 0 0 12px; padding: 3px 3px 4px 7px; overflow-x: auto; }
+.operation-shot-picker > .shot-tile { flex: 0 0 136px; }
 .operation-shot-picker .shot-open { height: auto; aspect-ratio: 3 / 2; }
 .operation-shot-picker .shot-id, .operation-shot-picker .merged-tag { right: 6px; bottom: 5px; padding: 3px 5px; }
 .analysis-card { background: #f4f6f2; border-radius: 9px; padding: 13px; }
@@ -389,6 +421,8 @@ img { display: block; max-width: 100%; }
   .operation-media-card, .operation-controls-card { padding: 13px; }
   .operation-preview { height: auto; }
   .operation-shot-picker { gap: 6px; }
+  .operation-shot-picker > .shot-tile { flex-basis: 112px; }
+  .group-strip-hint { display: none; }
   .operation-shot-picker .shot-open { height: auto; }
   .operation-comparison { padding: 10px; }
   .operation-comparison .before-after-grid { gap: 7px; }

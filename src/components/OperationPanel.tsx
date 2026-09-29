@@ -33,6 +33,7 @@ import type {
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
 import { BracketMerge } from "./BracketMerge";
+import { ProgressiveImage } from "./ProgressiveImage";
 
 type OperationPanelProps = {
   analysis: Analysis;
@@ -267,26 +268,6 @@ export function OperationPanel({
             <div><p className="eyebrow">SELECTED PHOTO</p><h2>{captureId}</h2></div>
             <span className={rawPillClass(group.raw.level)}>{group.raw.label}</span>
           </div>
-          <div className="selected-preview operation-preview">
-            {photo ? <img src={assetUrl(photo.thumb)} alt={`選択中 ${captureId}`} decoding="async" /> : null}
-            {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
-            <div className="filename">{captureId}.JPG</div>
-            {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
-            <button
-              type="button"
-              className="preview-open"
-              onClick={() => onOpenViewer(photoGalleryFor("before"))}
-              aria-label={`${captureId} を原寸で表示`}
-            >
-              <span>原寸で見る</span>
-            </button>
-          </div>
-          <div className="media-footnote">
-            {photo && <span>{formatDimensions(photo)}{isPortrait(photo.orientation) ? "・縦位置" : ""}</span>}
-            <button type="button" onClick={() => onOpenViewer(photoGalleryFor("before"))}>
-              カメラJPGを原寸で開く
-            </button>
-          </div>
 
           {/*
             フィルムストリップ。以前はラジオグループとして組んでいたが、ラジオは
@@ -295,6 +276,8 @@ export function OperationPanel({
             素の <ul> に戻し、タイルごとに「表示を切り替える」ボタンと
             「採用をトグルする」ボタンを 1 つずつ置く。状態は色ではなく
             aria-current（表示中）と aria-pressed（採用）で読める。
+            置き場所は大きい写真の **上**。写真を選ぶ → 大きく見る、の順に目が流れるようにし、
+            大きい写真を固定帯の直下に合わせたときも選択肢が画面外へ押し出されないようにする。
           */}
           <ul className="shot-picker operation-shot-picker" aria-label="このグループの写真">
             {/*
@@ -378,6 +361,29 @@ export function OperationPanel({
               );
             })}
           </ul>
+
+          <div className="selected-preview operation-preview">
+            {photo ? (
+              <ProgressiveImage thumbSrc={assetUrl(photo.thumb)} fullSrc={sourceJpgUrl(captureId)} alt={`選択中 ${captureId}`} />
+            ) : null}
+            {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
+            <div className="filename">{captureId}.JPG</div>
+            {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
+            <button
+              type="button"
+              className="preview-open"
+              onClick={() => onOpenViewer(photoGalleryFor("before"))}
+              aria-label={`${captureId} を原寸で表示`}
+            >
+              <span>原寸で見る</span>
+            </button>
+          </div>
+          <div className="media-footnote">
+            {photo && <span>{formatDimensions(photo)}{isPortrait(photo.orientation) ? "・縦位置" : ""}</span>}
+            <button type="button" onClick={() => onOpenViewer(photoGalleryFor("before"))}>
+              カメラJPGを原寸で開く
+            </button>
+          </div>
 
           {photo && (
             <dl className="exif-grid">

@@ -47,6 +47,8 @@ import {
   SOURCE_FOLDER_UNAVAILABLE,
   sourceFolderErrorMessage,
 } from "./lib/format";
+import { adjacentGroupId, isEditableTarget } from "./lib/group-nav";
+import { confirmDiscard } from "./lib/confirm";
 import type { Adjustments, DevelopmentCandidate, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
@@ -73,6 +75,9 @@ const MERGE_UNAVAILABLE = "ブラケット合成機能を準備中です。し�
 // オフライン表示にフォールバックする。
 const HEALTH_CHECK_RETRY_INTERVAL_MS = 1000;
 const HEALTH_CHECK_MAX_ATTEMPTS = 20; // 1000ms × 20 ≈ 20秒、冷間起動の実測時間に対して十分な余裕
+
+// ←→ でグループを送ったあと、写真カードの上端を固定グループ帯の下端からどれだけ離すか。
+const MEDIA_CARD_GAP = 12;
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -342,10 +347,104 @@ export default function Home() {
     });
   }
 
+  /**
+   * 大きい写真カード（.operation-media-card）の上端が、固定されたグループ帯の直下に
+   * 来る位置へ送る。←→ で次々送るとき、毎回ページ先頭へ戻されると写真を見るたびに
+   * スクロールし直すことになるため。
+   *
+   * 帯の高さは「今の」実測値で引く。ページ先頭付近（帯が通常表示）から送ると、
+   * スクロール途中で帯がコンパクト化して縮むが、縮んだぶん下の要素も同じだけ上へ
+   * 詰まるので、着地時の写真カードは結局コンパクト帯の直下に来る。
+   */
+  function scrollToMediaCard() {
+    window.requestAnimationFrame(() => {
+      const card = document.querySelector<HTMLElement>(".operation-media-card");
+      if (!card) return;
+      const stripHeight = document.querySelector<HTMLElement>(".group-strip")?.offsetHeight ?? 0;
+      const top = card.getBoundingClientRect().top + window.scrollY - stripHeight - MEDIA_CARD_GAP;
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      window.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? "auto" : "smooth" });
+    });
+  }
+
+  /** グループ移動の確認ダイアログ表示中。二重に出さないための再入ガード。 */
+  const confirmingRef = useRef(false);
+  /** 最新レンダーの選択グループ id（確認ダイアログの await 後に古い closure の group を見ないため）。 */
+  const currentGroupIdRef = useRef<number | null>(null);
+
   function openOperationScreen(groupId: number) {
     dispatch({ type: "screen/operation", groupId });
     scrollToTop();
   }
+
+  /**
+   * 操作パネル内でのグループ移動（グループ帯のクリック・◀▶・←→ キー）の共通入口。
+   *
+   * screen/operation は「移動」の意味で presetName / overrides をリセットするので、
+   * 手動調整が残っているときは黙って捨てずに確認を取る。選択中のグループへの
+   * 「移動」は何もしない（再ディスパッチで調整が消えるのを防ぐ。GroupStrip 側の
+   * 再クリック無視と同じ理由）。
+   *
+   * 確認は非同期（Tauri ではネイティブダイアログ。WKWebView は window.confirm を
+   * 出さない）。表示中の再入は confirmingRef で弾き、確認中に選択グループが
+   * 変わっていたら（最新値は currentGroupIdRef で見る）移動しない。
+   * 呼び出し側は戻り値の Promise を待たなくてよい（例外は内部で処理する）。
+   */
+  async function moveToGroup(groupId: number, scroll: "top" | "media") {
+    if (!group || groupId === group.id) return;
+    if (confirmingRef.current) return;
+    if (changedKeys.length > 0) {
+      const fromGroupId = group.id;
+      confirmingRef.current = true;
+      let ok: boolean;
+      try {
+        ok = await confirmDiscard("調整値が失われます。移動しますか？");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dispatch({ type: "notice/set", message: `移動の確認ダイアログを表示できませんでした: ${detail}`, tone: "error" });
+        return;
+      } finally {
+        confirmingRef.current = false;
+      }
+      if (!ok || currentGroupIdRef.current !== fromGroupId) return;
+    }
+    dispatch({ type: "screen/operation", groupId });
+    if (scroll === "media") scrollToMediaCard();
+    else scrollToTop();
+  }
+
+  /** 操作パネルでの ←→ キー。analysis.groups の並び順で前後のグループへ送る。 */
+  function handleGroupKey(event: KeyboardEvent) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    // 誰かが既に処理したキー・修飾キー付き（ブラウザ/OS のショートカット）・IME 変換中は触らない。
+    if (event.defaultPrevented || event.isComposing) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    // スライダーやテキスト入力は矢印キーを自分で使う。
+    if (isEditableTarget(event.target)) return;
+    // 原寸ビューアは自前で ←→ を写真送りに使う（<dialog> 内の keydown が window まで上がってくる）。
+    if (state.viewer && state.viewer.items.length > 0) return;
+    if (!analysis || !group) return;
+    const next = adjacentGroupId(analysis.groups, group.id, event.key === "ArrowLeft" ? -1 : 1);
+    // 両端では何もしない（既定動作も奪わない）。
+    if (next === null) return;
+    // 既定動作の抑止は同期のうちに（確認ダイアログの await 後では効かない）。
+    event.preventDefault();
+    void moveToGroup(next, "media");
+  }
+
+  // window の購読は操作画面の間だけ張り替えずに持ち、中身は毎レンダーの最新ハンドラへ
+  // 委ねる（state を閉じ込めたハンドラを直接登録すると古い group / changedKeys を見る）。
+  const groupKeyHandlerRef = useRef(handleGroupKey);
+  useEffect(() => {
+    groupKeyHandlerRef.current = handleGroupKey;
+    currentGroupIdRef.current = group?.id ?? null;
+  });
+  useEffect(() => {
+    if (screen !== "operation") return;
+    const listener = (event: KeyboardEvent) => groupKeyHandlerRef.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [screen]);
 
   function returnToSuggestions() {
     dispatch({ type: "screen/suggestions" });
@@ -686,7 +785,10 @@ export default function Home() {
               selectedGroupId={group.id}
               heroCaptureOf={(item) => heroCaptureOf(state, item)}
               acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
-              onSelectGroup={openOperationScreen}
+              // クリック・◀▶ の移動も ←→ キーと同じ確認を通す。カードのクリックは従来どおり
+              // ページ先頭へ、◀▶ は ←→ キーと同じ操作なので着地もキーと揃える。
+              onSelectGroup={(groupId) => void moveToGroup(groupId, "top")}
+              onStepGroup={(groupId) => void moveToGroup(groupId, "media")}
             />
             <OperationPanel
               analysis={analysis}
