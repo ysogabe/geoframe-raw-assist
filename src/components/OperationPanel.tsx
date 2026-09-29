@@ -22,6 +22,8 @@ import type {
   CaptureId,
   DevelopedResult,
   DevelopmentCandidate,
+  DevelopmentCandidatesResponse,
+  StarSceneInfo,
   GroupInfo,
   HealthResponse,
   MergedResult,
@@ -81,6 +83,8 @@ type OperationPanelProps = {
   /** どのグループであれ合成が走っているか。重い処理の同時実行を止めるのに使う。 */
   mergeBusy: boolean;
   developmentCandidates: DevelopmentCandidate[];
+  developmentRejected: DevelopmentCandidatesResponse["rejected"];
+  developmentStarScene: StarSceneInfo | null;
   developmentCandidatesBusy: boolean;
   developmentCandidatesError: string;
   onGenerateCandidates: () => void;
@@ -141,6 +145,8 @@ export function OperationPanel({
   mergeMode,
   mergeBusy,
   developmentCandidates,
+  developmentRejected,
+  developmentStarScene,
   developmentCandidatesBusy,
   developmentCandidatesError,
   onGenerateCandidates,
@@ -462,6 +468,8 @@ export function OperationPanel({
             hasFull={Boolean(fullResult)}
             mergeBusy={mergeBusy}
             developmentCandidates={developmentCandidates}
+            developmentRejected={developmentRejected}
+            developmentStarScene={developmentStarScene}
             developmentCandidatesBusy={developmentCandidatesBusy}
             developmentCandidatesError={developmentCandidatesError}
             onGenerateCandidates={onGenerateCandidates}

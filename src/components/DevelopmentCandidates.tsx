@@ -1,7 +1,15 @@
-import type { DevelopmentCandidate, DevelopmentCandidateMetrics } from "../lib/types";
+import { candidateStyleLabel, summarizeStarScene } from "../lib/candidate-view";
+import type {
+  DevelopmentCandidate,
+  DevelopmentCandidateMetrics,
+  DevelopmentCandidateStyle,
+  StarSceneInfo,
+} from "../lib/types";
 
 type DevelopmentCandidatesProps = {
   candidates: DevelopmentCandidate[];
+  rejected: { id: DevelopmentCandidateStyle; reason: string }[];
+  starScene: StarSceneInfo | null;
   busy: boolean;
   error: string;
   disabled: boolean;
@@ -30,8 +38,24 @@ function CandidateMetrics({ values }: { values: DevelopmentCandidateMetrics }) {
   );
 }
 
+function StarSceneNote({ scene }: { scene: StarSceneInfo }) {
+  const summary = summarizeStarScene(scene);
+  return (
+    <details className="development-star-scene">
+      <summary>星空判定: {summary.verdict}</summary>
+      <dl>
+        {summary.facts.map((fact) => (
+          <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
 export function DevelopmentCandidates({
   candidates,
+  rejected,
+  starScene,
   busy,
   error,
   disabled,
@@ -50,6 +74,7 @@ export function DevelopmentCandidates({
           className="secondary-action candidate-generate"
           onClick={onGenerate}
           disabled={disabled || busy}
+          aria-busy={busy}
         >
           {busy ? "候補を探索中…" : candidates.length > 0 ? "候補を作り直す" : "自動候補を作る"}
         </button>
@@ -80,6 +105,17 @@ export function DevelopmentCandidates({
           ))}
         </div>
       )}
+      {rejected.length > 0 && (
+        <div className="development-candidate-rejected">
+          <strong>出なかった候補</strong>
+          <ul>
+            {rejected.map((item) => (
+              <li key={item.id}><b>{candidateStyleLabel(item.id)}</b>{item.reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {starScene && <StarSceneNote scene={starScene} />}
     </section>
   );
 }

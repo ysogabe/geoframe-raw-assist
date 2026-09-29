@@ -7,7 +7,7 @@ import {
   developedGroupIds,
   effectiveAdjustments,
   groupMergeResultOf,
-  currentDevelopmentCandidates,
+  currentDevelopmentCandidatesResponse,
   heroCaptureOf,
   initialState,
   isBracketGroup,
@@ -258,6 +258,7 @@ export default function Home() {
   const viewing = group ? viewingOf(state, group) : null;
   const captureId = group ? viewingCaptureOf(state, group) : "";
   const photo = photoOf(analysis, captureId);
+  const shownCandidates = currentDevelopmentCandidatesResponse(state, captureId);
   const adjustments = effectiveAdjustments(state);
   const changedKeys = changedAdjustmentKeys(state);
   const groupsToShow = useMemo(() => visibleGroups(state), [state]);
@@ -751,7 +752,9 @@ export default function Home() {
               mergeBlockReason={mergeBlock}
               mergePreviewResult={mergePreviewResult}
               mergeFullResult={mergeFullResult}
-              developmentCandidates={currentDevelopmentCandidates(state, captureId)}
+              developmentCandidates={shownCandidates?.candidates ?? []}
+              developmentRejected={shownCandidates?.rejected ?? []}
+              developmentStarScene={shownCandidates?.star_scene ?? null}
               developmentCandidatesBusy={state.developmentCandidatesBusy}
               developmentCandidatesError={
                 state.developmentCandidatesCaptureId === captureId ? state.developmentCandidatesError : ""

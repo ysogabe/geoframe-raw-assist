@@ -1,7 +1,7 @@
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
 import type { Adjustments, HealthResponse, NoiseReduction, PresetName } from "../lib/types";
-import type { DevelopmentCandidate } from "../lib/types";
+import type { DevelopmentCandidate, DevelopmentCandidatesResponse, StarSceneInfo } from "../lib/types";
 import { DevelopmentCandidates } from "./DevelopmentCandidates";
 
 type DevelopControlsProps = {
@@ -29,6 +29,8 @@ type DevelopControlsProps = {
   mergeBusy: boolean;
   /** RAW縮小デコード代理評価による候補生成の状態。候補選択は現像を開始しない。 */
   developmentCandidates: DevelopmentCandidate[];
+  developmentRejected: DevelopmentCandidatesResponse["rejected"];
+  developmentStarScene: StarSceneInfo | null;
   developmentCandidatesBusy: boolean;
   developmentCandidatesError: string;
   onGenerateCandidates: () => void;
@@ -54,6 +56,8 @@ export function DevelopControls({
   hasFull,
   mergeBusy,
   developmentCandidates,
+  developmentRejected,
+  developmentStarScene,
   developmentCandidatesBusy,
   developmentCandidatesError,
   onGenerateCandidates,
@@ -146,6 +150,8 @@ export function DevelopControls({
 
         <DevelopmentCandidates
           candidates={developmentCandidates}
+          rejected={developmentRejected}
+          starScene={developmentStarScene}
           busy={developmentCandidatesBusy}
           error={developmentCandidatesError}
           disabled={disabled || mergeBusy || developMode !== null}

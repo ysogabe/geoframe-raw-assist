@@ -1096,18 +1096,25 @@ function clearedCandidateResult(): Pick<State, "developmentCandidates" | "develo
  * `captureId` の写真について表示・適用してよい候補。応答の capture_id / preset が
  * 現在の撮影・プリセットと一致し、かつ現在のフォルダ世代の応答のときだけ返す。
  */
-export function currentDevelopmentCandidates(state: State, captureId: CaptureId | null): DevelopmentCandidate[] {
+export function currentDevelopmentCandidatesResponse(
+  state: State,
+  captureId: CaptureId | null,
+): DevelopmentCandidatesResponse | null {
   const response = state.developmentCandidates;
-  if (!response || !captureId) return [];
+  if (!response || !captureId) return null;
   if (
     response.capture_id !== captureId ||
     response.preset !== state.presetName ||
     state.developmentCandidatesCaptureId !== captureId ||
     state.developmentCandidatesGeneration !== state.sourceFolderGeneration
   ) {
-    return [];
+    return null;
   }
-  return response.candidates;
+  return response;
+}
+
+export function currentDevelopmentCandidates(state: State, captureId: CaptureId | null): DevelopmentCandidate[] {
+  return currentDevelopmentCandidatesResponse(state, captureId)?.candidates ?? [];
 }
 
 export function activePreset(state: State): PresetInfo | null {
