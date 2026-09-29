@@ -161,7 +161,8 @@ outputs/
 ## テスト
 
 ```bash
-npm run test       # ビルド検証（vite build）
+npm test           # フロント単体テスト（vitest。reducer など純粋関数）
+npm run build      # ビルド検証（vite build）
 npm run test:raw   # Python側（解析・現像・書き出し・フォルダ設定・レンズ補正・ブラケット合成）294件
 npm run lint
 ```

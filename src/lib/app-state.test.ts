@@ -165,12 +165,16 @@ describe("candidates/ok", () => {
     expect(next).toBe(started);
   });
 
-  it("フォルダ切替後に届いた古い世代の応答は捨てる", () => {
+  it("フォルダ切替後に届いた古い世代の応答は捨てる（capture_id は一致、世代だけ古い）", () => {
     const started = reducer(withEngine, { type: "candidates/start", captureId: "A1", generation: 0 });
     const switched = reducer(started, { type: "source/changed", info: folder("/new"), message: "m" });
-    const next = reducer(switched, { type: "candidates/ok", captureId: "A1", generation: 0, response });
-    expect(next).toBe(switched);
+    // 新世代で同じ capture_id のリクエストが走っている状況。capture_id 照合では弾けない。
+    const restarted = reducer(switched, { type: "candidates/start", captureId: "A1", generation: 1 });
+    expect(restarted.developmentCandidatesCaptureId).toBe("A1");
+    const next = reducer(restarted, { type: "candidates/ok", captureId: "A1", generation: 0, response });
+    expect(next).toBe(restarted);
     expect(next.developmentCandidates).toBeNull();
+    expect(next.developmentCandidatesBusy).toBe(true);
   });
 
   it("start 時と違う capture_id の応答は捨て、後発の busy を上書きしない", () => {
@@ -329,7 +333,7 @@ describe("候補のクリア契機", () => {
   it("health/ok でプリセットが存在しなくなったら候補を捨てる", () => {
     const shown: State = { ...stateShowingCandidates(), presetName: "gone_preset" };
     const next = reducer(shown, { type: "health/ok", health: HEALTH });
-    expect(next.presetName).not.toBe("gone_preset");
+    expect(next.presetName).toBe("neutral_recovery");
     expect(next.developmentCandidates).toBeNull();
     expect(next.developmentCandidatesError).toBe("");
   });
@@ -352,7 +356,7 @@ describe("候補のクリア契機", () => {
     expect(next.developmentCandidatesError).toBe("");
   });
 
-  it("preset/change 後は古い応答が届いても採用されない", () => {
+  it("preset/change で capture_id が null に戻るため、その前の応答は採用されない", () => {
     const started = reducer(withEngine, { type: "candidates/start", captureId: "A1", generation: 0 });
     const changed = reducer(started, { type: "preset/change", presetName: "shadow_rescue" });
     const next = reducer(changed, {
@@ -443,7 +447,7 @@ describe("develop/ok の世代照合", () => {
     expect(next.notice).toBe("切替");
   });
 
-  it("develop/fail は世代に関係なく通知を出し実行中を解除する", () => {
+  it("develop/fail は通知を出し実行中を解除する", () => {
     const started = reducer(withEngine, { type: "develop/start", mode: "full", captureId: "A1" });
     const next = reducer(started, { type: "develop/fail", message: "err" });
     expect(next.developMode).toBeNull();
