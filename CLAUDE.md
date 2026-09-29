@@ -15,6 +15,7 @@
 ## ビルド / 検証コマンド
 
 - フロントビルド: `npm run build`（= vite build）／型検査: `npx tsc --noEmit`／lint: `npm run lint`
+- フロント単体テスト: `npm test`（= `vitest run`、reducer など純粋関数。node 環境）
 - デスクトップ（Tauri）ビルド: `env -u CI npm run tauri:build`
   - 環境に `CI=1` が設定されており、そのままだと tauri CLI が `--ci 1` エラーになるため `CI` を必ず外す。
 - ローカル実行: `npm run dev:raw`（RAW エンジン http://127.0.0.1:8788 + vite http://localhost:1420）
