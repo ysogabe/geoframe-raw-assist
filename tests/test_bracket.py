@@ -9,6 +9,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -121,7 +122,13 @@ class BracketTestCase(unittest.TestCase):
         self.fake_decode_mock = decode_patcher.start()
         self.addCleanup(decode_patcher.stop)
 
-    def fake_decode(self, source_path: Path, adjustments: dict, preview: bool) -> np.ndarray:
+    def fake_decode(
+        self,
+        source_path: Path,
+        adjustments: dict,
+        preview: bool,
+        metadata: dict | None = None,
+    ) -> np.ndarray:
         """撮影IDごとに違う露出のフレームを返す（rawpy は呼ばない）。
 
         先頭IDを最も明るく、以降を段階的に暗くする。実データの AEB と同じ向き
@@ -351,7 +358,7 @@ class FusionContentTests(BracketTestCase):
 
     def test_rejects_frames_with_different_sizes(self):
         """向きが混ざったグループは `cv2.error`(500) ではなく日本語の 400 にする。"""
-        def mixed(source_path, adjustments, preview):
+        def mixed(source_path, adjustments, preview, metadata=None):
             if source_path.stem == CAPTURES[1]:
                 return expose(scene_radiance(96, 128), self.DARK_GAIN)
             return expose(self.radiance, self.BRIGHT_GAIN)
@@ -1341,6 +1348,27 @@ class MergePostprocessParamsTests(unittest.TestCase):
             bracket_module._merge_postprocess_params(raw, adjustments, False)["half_size"]
         )
 
+    def test_light_noise_reduction_adapts_to_iso(self):
+        """engine と同じく "light" は ISO<800 で FBDD Off、高ISO・不明は Light。"""
+        mode = bracket_module.rawpy.FBDDNoiseReductionMode
+
+        def fbdd(noise_reduction, iso):
+            raw = self.FakeRaw()
+            if iso is not None:
+                raw.other = SimpleNamespace(iso_speed=iso)
+            params = bracket_module._merge_postprocess_params(
+                raw, resolve_adjustments(DEFAULT_PRESET, {"noise_reduction": noise_reduction}), False
+            )
+            return params["fbdd_noise_reduction"], params["median_filter_passes"]
+
+        self.assertEqual(fbdd("light", 100.0), (mode.Off, 0))
+        self.assertEqual(fbdd("light", 3200.0), (mode.Light, 0))
+        self.assertEqual(fbdd("light", None), (mode.Light, 0))
+        for iso in (100.0, 3200.0, None):
+            with self.subTest(iso=iso):
+                self.assertEqual(fbdd("full", iso), (mode.Full, 1))
+                self.assertEqual(fbdd("off", iso), (mode.Off, 0))
+
 
 class ToneAfterMergeTests(BracketTestCase):
     """トーン調整はフレームごとではなく合成結果に1回だけ効くこと。"""
@@ -1390,6 +1418,88 @@ class ToneAfterMergeTests(BracketTestCase):
     def test_rejects_unknown_adjustment_key(self):
         with self.assertRaises(RawDevelopmentError):
             merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True, adjustments={"gamma": 1.0})
+
+    def test_tone_uses_the_first_frame_iso(self):
+        """撮影時シャープの ISO 依存には先頭フレームの ISO を使う。"""
+        frame_isos = {CAPTURES[0]: 200.0, CAPTURES[1]: 6400.0}
+
+        def decode_with_iso(source_path, adjustments, preview, metadata=None):
+            if metadata is not None:
+                metadata["iso"] = frame_isos[source_path.stem]
+            return self.fake_decode(source_path, adjustments, preview)
+
+        with mock.patch.object(
+            bracket_module, "_decode_frame", side_effect=decode_with_iso
+        ), mock.patch.object(
+            bracket_module, "_apply_tone_array", wraps=bracket_module._apply_tone_array
+        ) as tone:
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        tone.assert_called_once()
+        self.assertEqual(tone.call_args.kwargs["iso"], 200.0)
+
+    def test_tone_iso_falls_back_to_first_frame_exif(self):
+        """RAW から ISO が取れないときは先頭フレームのペアJPG EXIF を使う。"""
+        for capture_id in CAPTURES[:2]:
+            Image.new("RGB", (8, 8)).save(self.source_root / f"{capture_id}.JPG")
+        exifs = {CAPTURES[0]: {"iso": 400}, CAPTURES[1]: {"iso": 6400}}
+
+        def decode_without_iso(source_path, adjustments, preview, metadata=None):
+            if metadata is not None:
+                metadata["iso"] = None
+            return self.fake_decode(source_path, adjustments, preview)
+
+        with mock.patch.object(
+            bracket_module, "_decode_frame", side_effect=decode_without_iso
+        ), mock.patch.object(
+            bracket_module, "read_capture_exif", side_effect=lambda path: exifs[path.stem]
+        ), mock.patch.object(
+            bracket_module, "_apply_tone_array", wraps=bracket_module._apply_tone_array
+        ) as tone:
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        tone.assert_called_once()
+        self.assertEqual(tone.call_args.kwargs["iso"], 400.0)
+
+    def test_tone_iso_is_none_when_unknown(self):
+        with mock.patch.object(
+            bracket_module, "_apply_tone_array", wraps=bracket_module._apply_tone_array
+        ) as tone:
+            merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+        self.assertIsNone(tone.call_args.kwargs["iso"])
+
+
+class DecodeFrameIsoTests(unittest.TestCase):
+    """本物の `_decode_frame` が RAW の ISO を metadata に書き込むこと。"""
+
+    class FakeRaw:
+        camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
+        other = SimpleNamespace(iso_speed=100.0)
+
+        def __init__(self):
+            self.params = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def postprocess(self, **kwargs):
+            self.params = kwargs
+            return np.full((2, 3, 3), 30000, dtype=np.uint16)
+
+    def test_decode_frame_reports_iso_and_adapts_fbdd(self):
+        raw = self.FakeRaw()
+        metadata: dict = {}
+        with mock.patch.object(bracket_module.rawpy, "imread", return_value=raw):
+            bracket_module._decode_frame(
+                Path("DSC00001.ARW"), resolve_adjustments(DEFAULT_PRESET), True, metadata=metadata
+            )
+        self.assertEqual(metadata["iso"], 100.0)
+        self.assertEqual(
+            raw.params["fbdd_noise_reduction"], bracket_module.rawpy.FBDDNoiseReductionMode.Off
+        )
 
 
 if __name__ == "__main__":

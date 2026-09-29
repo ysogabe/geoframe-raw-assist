@@ -254,6 +254,10 @@ MergedResult = {
   崩れる。`highlight_recovery` は no-op とし、複数露出からハイライト情報を統合する Mertens
   自体の処理に任せる。`wb_temp` / `noise_reduction` は全フレームに同一に効くので反映する。
   トーン調整は**合成結果に対して1回だけ**適用する。
+- （2026-09-29 追補）撮影時シャープ（§2）の ISO 依存には**先頭フレーム**（昇順正規化後）の ISO を使う
+  （RAW の `iso_speed`、無ければ先頭フレームのペアJPG EXIF。EXIF 継承元と同じ基準）。
+  `noise_reduction="light"` の FBDD の ISO 適応（§2、ISO<800 で Off）は各フレームのデコードで
+  そのフレーム自身の ISO により判定する。
 - EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
 - `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
   ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
@@ -281,6 +285,7 @@ rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの�
 - **`ENGINE_VERSION` も含める**（2026-08-21 追補）。合成はレンズ補正・トーン処理・JPEG保存を
   §2 の現像パイプラインと共有しているので、そちらの出力が変わる修正で `ENGINE_VERSION` を
   上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
+  （2026-09-29 追補: 撮影時シャープの既定化で `ENGINE_VERSION` は 16、`RECIPE_VERSION` は 10 になった。§2 参照）
 - ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
 ### `POST /api/development-candidates`
@@ -307,6 +312,9 @@ body { capture_id:string, preset:string, seed?:number, budget?:number }
   LRU キャッシュ（最大24枚）する。同一キーは再デコードしない。
 - 評価は engine の後段関数そのもの（`_apply_shadow_lift_array` → 長辺640pxへ `_resize_array` →
   `_apply_tone_array`）を適用する。`develop_raw` の後段と同じ順序で、独自のトーン式は持たない。
+  （2026-09-29 追補）撮影時シャープ（§2）の ISO 依存も本番と揃えるため、ISO は RAW の `iso_speed`、
+  無ければペアJPGの EXIF から取り、`render_proxy(..., iso=)` 経由で後段へ渡す。デコードキャッシュの
+  キーは変えない（`noise_reduction="light"` の FBDD は ISO で切り替わるが、同一 ARW ではキー内で ISO は一定）。
   **レンズ補正（`apply_lens_correction`）は代理では省略**する（幾何補正が中心のため）。
   full-size デモザイクではないので、ノイズ・細部の絶対値は本番と厳密には一致しない。
 - **`highlight_recovery` は連続値として探索しない**。rawpy のデコード時に効く3段階
@@ -474,7 +482,7 @@ Adjustments = {
   brightness: number,         // 0.7..1.4  (float32 RGB配列を倍率適用)
   contrast: number,           // 0.8..1.4
   saturation: number,         // 0.0..1.5  (0 = モノクロ)
-  sharpness: number,          // 0.8..1.6
+  sharpness: number,          // 0.8..1.6（1.0 = カメラJPEG相当の撮影時シャープ。2026-09-29 追補）
   noise_reduction: "off" | "light" | "full"
 }
 ```
@@ -496,6 +504,30 @@ Adjustments = {
 - **処理順序（固定）**: rawpy postprocess (16bit; `highlight_recovery` は上記 `HighlightMode` へ
   マッピング) → 65535除算で float32化 → lensfun補正 → shadow_lift (float32) → resize →
   Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
+
+> **（2026-09-29 追補）撮影時シャープの既定化と `noise_reduction="light"` の ISO 適応**
+> （`ENGINE_VERSION` 15→16 / `RECIPE_VERSION` 9→10。根拠は 2026-09 の実測）。上記の処理順序は変わらない。
+>
+> **`sharpness`**: 従来は `sharpness == 1.0` でシャープ無し、`> 1.0` で輝度USM（σ0.8 固定・閾値 1/255 固定・
+> gain = `(s−1)×1.5`）、`< 1.0` でRGB全体のぼかし（σ0.8）だった。これを、**`sharpness == 1.0` が「カメラJPEG相当の
+> 撮影時シャープ（Rec.709 輝度限定USM）」を意味する**ように変更した。契約範囲 0.8..1.6 はその強さの倍率で、
+> `gain = 基準gain × (1 + (sharpness − 1) × 1.5)`（`0 <= gain <= 1.2` にクランプ）。従来の
+> **`sharpness < 1` のぼかし挙動は廃止**し、弱いシャープになる（ぼかしにはならない）。
+> - σ と基準 gain は**出力長辺**（リサイズ後の配列の長辺）で決まる。長辺 ≤2000px: σ0.6 / 基準gain 0.5、
+>   ≥4000px: σ0.8 / 基準gain 0.7、その間は線形補間。
+> - ISO は `raw.other.iso_speed`、取れなければペアJPGの EXIF の ISO（`develop_raw`）を使う。
+>   コアリング閾値（輝度差の絶対値がこれ以下なら捨てる）は ISO≤400 で 0、ISO≥1600 で 1/255、間は線形。
+>   ISO が不明なら 0.5/255。gain は ISO≤1600 で ×1.0、ISO 1600→3200 で ×1.0→×0.5 へ線形に減衰し、
+>   ISO≥3200 は ×0.5（ISO 不明時は減衰なし）。ISO 減衰は上記の gain 計算（上限 1.2 のクランプ後）に掛かる。
+> - 出力が変わるため `ENGINE_VERSION` を 15→16 に上げた（`params_hash` に入るので旧キャッシュは無効化される）。
+>
+> **`noise_reduction`**: `"light"` の FBDD を ISO で切り替える。従来は常に FBDD Light だったが、
+> **ISO が分かって 800 未満なら FBDD Off**、ISO が 800 以上または不明なら従来どおり Light。
+> `"full"` / `"off"` は不変（ISO に依存しない）。単体現像（`_postprocess_params`）と
+> ブラケット合成（`_merge_postprocess_params`）の両デコード経路で同じ判定（`_fbdd_mode_for`）を使う。
+>
+> **レシピJSON**: トップレベルに `"iso": number | null` を追加した（`RECIPE_VERSION` 9→10）。
+> 撮影時シャープに実際に使った ISO（RAW の `iso_speed`、無ければペアJPG EXIF）で、不明なら `null`。FBDD の判定は RAW の ISO のみで行う（デバッグ用。`DevelopedResult` の型は変えない）。
 
 - `highlight_recovery` の旧来の連続ソフトニーは、rawpy の16bit出力を65535で正規化した値が常に
   `<=1.0` で実質何もしていなかったため廃止した。現在の離散3段階・75境界の方式は、閾値の前後で
@@ -764,6 +796,11 @@ Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約�
 - 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
 - `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
   — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
+- （2026-09-29 追補）後段関数のシグネチャに keyword 専用引数 `iso` が増えた（撮影時シャープの ISO 依存。§2）:
+  `apply_post_decode_chain(rgb, adjustments, max_edge, *, iso: float | None = None)` /
+  `_apply_tone_array(rgb, adjustments, *, iso: float | None = None)`。`iso=None`（不明）は
+  コアリング閾値 0.5/255・gain 減衰なしの扱い。`development_candidates.render_proxy(decoded, adjustments, iso: float | None = None)` も同様。
+  `ENGINE_VERSION = 16` / `RECIPE_VERSION = 10`（レシピに `"iso": number | null` を追加）。
 
 ### `local_raw/bracket.py`（2026-08-20 追補）
 

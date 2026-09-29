@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import numbers
 import os
 import re
 import sys
@@ -99,8 +101,14 @@ CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: 経路にも skipped/reason のマーカーを追加した（lens.py）。画素出力は変わらないが、
 #: レシピJSONの lens_correction.reason の値が変わりうるため、古いキャッシュのレシピを
 #: 引き継がないようにする。
-ENGINE_VERSION = 15
-RECIPE_VERSION = 9
+#:
+#: ENGINE_VERSION 16: 「撮影時シャープ」を既定化した。sharpness 1.0 でもカメラJPEG相当の
+#: 輝度限定USMを掛け、σ/gain は出力長辺（2000px以下→4000px以上で線形補間）に、
+#: コアリング閾値と gain は ISO に依存させる。sharpness<1 のぼかし分岐は廃止（弱いシャープ
+#: になる）。あわせて noise_reduction="light" の FBDD を ISO<800 では Off にする
+#: （ISO 不明・800以上は従来どおり Light）。RECIPE_VERSION 10 でレシピに "iso" を追加。
+ENGINE_VERSION = 16
+RECIPE_VERSION = 10
 
 DEFAULT_MAX_EDGE = 6000
 PREVIEW_MAX_EDGE = 1600
@@ -136,6 +144,46 @@ MINOR_RESIZE_CROP_SCALE = 0.98
 
 #: shadow_lift LUT の強さ係数（契約 §2 の式の定数部）。Wave 3 で目視調整可。
 SHADOW_LIFT_GAIN = 0.5 * 255.0 * 4.0
+
+# --- 撮影時シャープ（capture sharpening） ---
+#
+# 2026-09 の実測（work/sharpness-investigation/REPORT.md）に基づく。sharpness 1.0 は
+# 「カメラJPEG相当の撮影時シャープ」で、契約範囲 0.8..1.6 はその倍率として扱う。
+# 必要な強さは出力サイズに依存し、原寸（長辺6000px）では σ0.8・gain0.7 前後、
+# 1600px プレビュー（縮小後）では σ0.6・gain0.5 程度でカメラJPEGに並ぶ。
+# その間は出力長辺で線形補間する。高ISOではノイズを増幅するため、ISO で
+# コアリング閾値を上げ、さらに gain を減衰させる。
+
+#: この長辺以下の出力は「縮小プレビュー」側の σ/gain を使う。
+SHARPEN_SMALL_EDGE = 2000
+#: この長辺以上の出力は「原寸」側の σ/gain を使う。
+SHARPEN_LARGE_EDGE = 4000
+#: 縮小プレビュー側 / 原寸側の USM ガウシアン σ。
+SHARPEN_SIGMA_SMALL = 0.6
+SHARPEN_SIGMA_LARGE = 0.8
+#: 縮小プレビュー側 / 原寸側の基準 gain（sharpness 1.0 のとき）。
+SHARPEN_GAIN_SMALL = 0.5
+SHARPEN_GAIN_LARGE = 0.7
+#: スライダー倍率: gain = base × (1 + (sharpness − 1) × SHARPEN_SLIDER_SLOPE)。
+SHARPEN_SLIDER_SLOPE = 1.5
+#: gain の上限（ハロー・ノイズ増幅の安全弁）。
+SHARPEN_GAIN_MAX = 1.2
+#: ISO がこれ以下ならコアリング閾値 0（低ノイズなので細部を捨てない）。
+SHARPEN_ISO_CORING_START = 400.0
+#: ISO がこれ以上ならコアリング閾値 1/255。gain 減衰もここから始まる。
+SHARPEN_ISO_CORING_FULL = 1600.0
+#: ISO がこれ以上なら gain を SHARPEN_ISO_GAIN_FLOOR 倍に落とす（間は線形）。
+SHARPEN_ISO_GAIN_FULL_ATTEN = 3200.0
+SHARPEN_ISO_GAIN_FLOOR = 0.5
+#: コアリング閾値の上限（ISO ≥ SHARPEN_ISO_CORING_FULL）。
+SHARPEN_CORING_MAX = 1.0 / 255.0
+#: ISO 不明時のコアリング閾値（中庸値）。
+SHARPEN_CORING_UNKNOWN_ISO = 0.5 / 255.0
+
+#: noise_reduction="light" のとき、ISO がこれ未満なら FBDD を Off にする。
+#: 実測で ISO100 原寸の FBDD Light が Laplacian 分散を 15〜25% 削り、低ISOでは
+#: ノイズ低減の利得より解像感の損失が大きかったため（REPORT.md 参照）。
+FBDD_LIGHT_MIN_ISO = 800.0
 
 __all__ = [
     "CAPTURE_ID_PATTERN",
@@ -291,6 +339,47 @@ def _apply_shadow_lift_array(rgb: np.ndarray, lift: float) -> np.ndarray:
     return lifted.astype(np.float32, copy=False)
 
 
+def _coerce_iso(value: Any) -> float | None:
+    """ISO 値らしきものを正の float に揃える。0 以下・欠損・非数値は None。
+
+    実数型（`numbers.Real`、bool を除く）だけを受け付ける。`float()` で何でも変換すると
+    `MagicMock`（`__float__` が 1.0 を返す）等を ISO 1 と誤認するため。
+    """
+    if isinstance(value, (tuple, list)):
+        value = value[0] if value else None
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    try:
+        iso = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(iso) or iso <= 0:
+        return None
+    return iso
+
+
+def _raw_iso(raw: Any) -> float | None:
+    """rawpy の `raw.other.iso_speed` を安全に読む（取れなければ None）。"""
+    other = getattr(raw, "other", None)
+    return _coerce_iso(getattr(other, "iso_speed", None))
+
+
+def _fbdd_mode_for(noise_reduction: Any, iso: float | None) -> tuple[Any, int]:
+    """noise_reduction と ISO から (FBDD モード, median_filter_passes) を決める。
+
+    `"light"` は ISO が分かって `FBDD_LIGHT_MIN_ISO` 未満なら Off、それ以外
+    （高ISO・不明）は従来どおり Light。`"full"` / `"off"` は ISO に依存しない。
+    engine と bracket の両デコード経路で共有する。
+    """
+    if noise_reduction == "full":
+        return rawpy.FBDDNoiseReductionMode.Full, 1
+    if noise_reduction == "light":
+        if iso is not None and iso < FBDD_LIGHT_MIN_ISO:
+            return rawpy.FBDDNoiseReductionMode.Off, 0
+        return rawpy.FBDDNoiseReductionMode.Light, 0
+    return rawpy.FBDDNoiseReductionMode.Off, 0
+
+
 def _postprocess_params(
     raw: Any,
     adjustments: dict[str, Any],
@@ -310,15 +399,7 @@ def _postprocess_params(
     else:
         highlight_mode = rawpy.HighlightMode.ReconstructDefault
 
-    if noise_reduction == "full":
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Full
-        median_passes = 1
-    elif noise_reduction == "light":
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Light
-        median_passes = 0
-    else:
-        fbdd_mode = rawpy.FBDDNoiseReductionMode.Off
-        median_passes = 0
+    fbdd_mode, median_passes = _fbdd_mode_for(noise_reduction, _raw_iso(raw))
 
     params: dict[str, Any] = {
         "output_color": rawpy.ColorSpace.sRGB,
@@ -409,8 +490,56 @@ def _resize_array(rgb: np.ndarray, max_edge: int) -> np.ndarray:
     )
 
 
-def _apply_tone_array(rgb: np.ndarray, adjustments: dict[str, Any]) -> np.ndarray:
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, value))
+
+
+def _capture_sharpen_params(
+    long_edge: int,
+    sharpness: float,
+    iso: float | None,
+) -> tuple[float, float, float]:
+    """撮影時シャープの (sigma, gain, coring_threshold) を返す。
+
+    - 出力長辺 `long_edge` で σ と基準 gain を線形補間する
+      （`SHARPEN_SMALL_EDGE` 以下→小、`SHARPEN_LARGE_EDGE` 以上→大）。
+    - `sharpness`（1.0 = カメラJPEG相当）は基準 gain への倍率で、[0, SHARPEN_GAIN_MAX] に収める。
+    - ISO が分かればコアリング閾値と gain 減衰を ISO で決め、不明なら中庸の閾値・減衰なし。
+    """
+    t = _clamp01((long_edge - SHARPEN_SMALL_EDGE) / (SHARPEN_LARGE_EDGE - SHARPEN_SMALL_EDGE))
+    sigma = SHARPEN_SIGMA_SMALL + (SHARPEN_SIGMA_LARGE - SHARPEN_SIGMA_SMALL) * t
+    base_gain = SHARPEN_GAIN_SMALL + (SHARPEN_GAIN_LARGE - SHARPEN_GAIN_SMALL) * t
+
+    gain = base_gain * (1.0 + (float(sharpness) - 1.0) * SHARPEN_SLIDER_SLOPE)
+    gain = min(SHARPEN_GAIN_MAX, max(0.0, gain))
+
+    if iso is None:
+        threshold = SHARPEN_CORING_UNKNOWN_ISO
+        iso_mult = 1.0
+    else:
+        threshold = SHARPEN_CORING_MAX * _clamp01(
+            (iso - SHARPEN_ISO_CORING_START)
+            / (SHARPEN_ISO_CORING_FULL - SHARPEN_ISO_CORING_START)
+        )
+        attenuation = _clamp01(
+            (iso - SHARPEN_ISO_CORING_FULL)
+            / (SHARPEN_ISO_GAIN_FULL_ATTEN - SHARPEN_ISO_CORING_FULL)
+        )
+        iso_mult = 1.0 - (1.0 - SHARPEN_ISO_GAIN_FLOOR) * attenuation
+    return sigma, gain * iso_mult, threshold
+
+
+def _apply_tone_array(
+    rgb: np.ndarray,
+    adjustments: dict[str, Any],
+    *,
+    iso: float | None = None,
+) -> np.ndarray:
     """float32 RGBへ Brightness → Contrast → Color → Sharpness を適用する。
+
+    シャープは「撮影時シャープ」（`_capture_sharpen_params` 参照）。入力配列は既に
+    リサイズ済みの**出力サイズ**なので、σ/gain は配列寸法の長辺から決める。
+    `iso` は撮影 ISO（不明なら None）で、コアリング閾値と gain 減衰に使う。
 
     入力は [0,1] にクリップ済みであることを前提とする（前段の
     `_apply_shadow_lift_array` が [0,1] に揃えた float32 を `_resize_array` が
@@ -436,24 +565,21 @@ def _apply_tone_array(rgb: np.ndarray, adjustments: dict[str, Any]) -> np.ndarra
     else:
         image = luma + (image - luma) * saturation
 
-    sharpness = float(adjustments["sharpness"])
-    if sharpness > 1.0:
+    sigma, gain, threshold = _capture_sharpen_params(
+        max(image.shape[:2]), float(adjustments["sharpness"]), iso
+    )
+    if gain > 0.0:
         # RGB各チャンネルのunsharpは、TCAの残差やJPEG前の微小な色ずれを別々に
         # 増幅して、細線の両側へマゼンタ/シアンのハローを作る。Rec.709輝度の
         # 高周波成分だけを3チャンネルへ同量加えると、明暗のキレを保ったまま
-        # 色差は増幅しない。ごく小さい差分はノイズなので閾値で捨てる。
-        luma_blurred = cv2.GaussianBlur(luma[..., 0], (0, 0), sigmaX=0.8)[..., None]
+        # 色差は増幅しない。ごく小さい差分はノイズなので閾値で捨てる（コアリング）。
+        # sharpness<1 も「弱いシャープ」であり、ぼかしにはしない。
+        luma_blurred = cv2.GaussianBlur(luma[..., 0], (0, 0), sigmaX=sigma)[..., None]
         detail_luma = luma - luma_blurred
-        threshold = 1.0 / 255.0
         detail_luma = np.sign(detail_luma) * np.maximum(
             np.abs(detail_luma) - threshold, 0.0
         )
-        image = image + detail_luma * ((sharpness - 1.0) * 1.5)
-    elif sharpness < 1.0:
-        # 柔らかいプリセットは従来どおりRGB全体を混ぜる。こちらは色を強調する
-        # 操作ではなく、人物向けの低域寄りのぼかしなので挙動を維持する。
-        blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=0.8)
-        image = image * sharpness + blurred * (1.0 - sharpness)
+        image = image + detail_luma * gain
 
     np.clip(image, 0.0, 1.0, out=image)
     return image.astype(np.float32, copy=False)
@@ -474,17 +600,19 @@ def apply_post_decode_chain(
     rgb: np.ndarray,
     adjustments: dict[str, Any],
     max_edge: int,
+    *,
+    iso: float | None = None,
 ) -> np.ndarray:
     """デコード（＋レンズ補正）後の後段: shadow_lift → リサイズ → トーン。
 
     `develop_raw` と現像候補生成の代理画像（`development_candidates.render_proxy`）が
     同じ関数を呼ぶことで、代理と本番の後段が構造的にずれないようにする。
-    入力は [0,1] の float32 RGB。
+    入力は [0,1] の float32 RGB。`iso` は撮影時シャープの ISO 依存に使う（不明なら None）。
     """
 
     rgb = _apply_shadow_lift_array(rgb, float(adjustments["shadow_lift"]))
     rgb = _resize_array(rgb, max_edge)
-    return _apply_tone_array(rgb, adjustments)
+    return _apply_tone_array(rgb, adjustments, iso=iso)
 
 
 def _decode_16bit_to_float01(rgb: np.ndarray) -> np.ndarray:
@@ -678,9 +806,13 @@ def develop_raw(
 
     try:
         with rawpy.imread(str(source_path)) as raw:
+            iso = _raw_iso(raw)
             rgb = raw.postprocess(**_postprocess_params(raw, resolved, preview))
     except (rawpy.LibRawError, OSError) as error:
         raise RawDevelopmentError(f"RAWデコードに失敗しました: {error}") from error
+    if iso is None:
+        # RAW のメタデータで取れなければペアJPGの EXIF にフォールバックする。
+        iso = _coerce_iso(capture_exif.get("iso"))
 
     rgb = _decode_16bit_to_float01(rgb)
 
@@ -688,7 +820,7 @@ def develop_raw(
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
 
     # --- shadow_lift（リサイズ前） → リサイズ → トーン ---
-    rgb = apply_post_decode_chain(rgb, resolved, effective_max_edge)
+    rgb = apply_post_decode_chain(rgb, resolved, effective_max_edge, iso=iso)
     image = _array_to_image(rgb)
 
     save_kwargs, exif_inherited = _resolve_save_kwargs(source_jpg, image.width, image.height)
@@ -702,6 +834,8 @@ def develop_raw(
         "params_hash": params_hash,
         "preset": {"name": preset_name, "label": preset_label},
         "adjustments": resolved,
+        # 撮影時シャープに使った値（RAW の ISO、無ければペアJPGの EXIF）。FBDD の判定は RAW の ISO のみ（デバッグ用。不明なら null）。
+        "iso": iso,
         "lens_correction": lens_correction,
         "exif": capture_exif,
         "exif_inherited": exif_inherited,

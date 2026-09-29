@@ -611,7 +611,12 @@ def develop_real_array(raw: Any, adjustments: dict[str, Any], lens_resolution: A
     decode_seconds = time.monotonic() - started
     rgb = engine._decode_16bit_to_float01(rgb)
     rgb, lens_correction = apply_lens_correction(rgb, lens_resolution)
-    rgb = engine.apply_post_decode_chain(rgb, adjustments, engine.PREVIEW_MAX_EDGE)
+    # 注意: develop_raw と違い、ペアJPGの EXIF への ISO フォールバックはしない
+    # （EXIF を受け取らない構造）。RAW から ISO が取れないと撮影時シャープの ISO 依存は
+    # 「不明」扱いになり、本番出力と差が出うる。
+    rgb = engine.apply_post_decode_chain(
+        rgb, adjustments, engine.PREVIEW_MAX_EDGE, iso=engine._raw_iso(raw)
+    )
     return rgb, lens_correction, {"t_decode": decode_seconds, "t_total": time.monotonic() - started}
 
 
