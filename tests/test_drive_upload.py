@@ -725,7 +725,9 @@ class ProgressTests(DriveUploadTestCase):
 
         snapshot = progress.snapshot()
         self.assertEqual(snapshot["stage"], "uploading")
-        self.assertEqual(snapshot["done"], snapshot["total"], 2)
+        # 件数に manifest.json が混ざっていないこと（total=2）を直接見る。
+        self.assertEqual(snapshot["total"], 2)
+        self.assertEqual(snapshot["done"], 2)
         self.assertEqual(snapshot["bytes_done"], snapshot["bytes_total"])
         self.assertEqual(snapshot["bytes_total"], 7 + 2)
 
