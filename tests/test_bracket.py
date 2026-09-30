@@ -773,8 +773,9 @@ class MergedRecipeTests(BracketTestCase):
         フレーム個別の resolution で呼ぶため、焦点距離が割れると歪曲/TCA の幾何ワープ
         自体がフレームごとに変わってしまう。これは `_apply_group_lens_corrections`
         （ビネットのグループ判定）より上流の問題なので、トリガー集合をいくら広げても
-        直らない。`merge_bracket` 側で焦点距離・絞りの一致を検証し、
-        `lens_applicable` を全フレーム無補正へ倒す必要がある。
+        直らない。`merge_bracket` 側で焦点距離の一致を検証し、
+        `lens_applicable` を全フレーム無補正へ倒す必要がある（絞りだけの不一致は
+        幾何に影響しないため別扱い。Issue #36）。
 
         Sony E PZ 16-50mm（パワーズーム）で 18.0mm/19.0mm のように、
         `_vignetting_profile_guard` の閾値をまたぐズーム位置のブレを想定。
@@ -812,31 +813,193 @@ class MergedRecipeTests(BracketTestCase):
                     "lens_params_inconsistent_across_frames",
                 )
 
-    def test_an_aperture_inconsistent_bracket_gets_no_lens_correction_at_all(self):
-        """焦点距離が一致していても絞りが食い違えば同様に全フレーム無補正にする。"""
-        applied_to: list[object] = []
-
-        def spy(rgb, resolution):
-            applied_to.append(resolution)
-            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
-
-        resolutions = [
+    @staticmethod
+    def _aperture_inconsistent_resolutions(
+        focal_lengths: tuple[float, float] = (10.0, 10.0),
+    ) -> list[LensResolution]:
+        return [
             LensResolution(
-                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=2.8
+                applicable=True,
+                lens_name="Sigma / 10-18mm",
+                focal_length=focal_lengths[0],
+                aperture=2.8,
             ),
             LensResolution(
-                applicable=True, lens_name="Sigma / 10-18mm", focal_length=10.0, aperture=4.0
+                applicable=True,
+                lens_name="Sigma / 10-18mm",
+                focal_length=focal_lengths[1],
+                aperture=4.0,
             ),
         ]
+
+    def test_an_aperture_inconsistent_bracket_keeps_geometry_and_forces_vignetting_skip(self):
+        """絞りだけが食い違うブラケットは、歪曲/TCAを保ちビネットだけ全フレームで止める。
+
+        Issue #36: lensfun で絞りが効くのはビネットモデルだけで、歪曲/TCA の幾何
+        マップは焦点距離のみで決まる。Sony の S/P モード露出ブラケットでは絞りが
+        変動しうるため、絞り不一致で全フレーム無補正にすると歪曲補正まで失われる。
+        1パス目から全フレームを `force_skip_vignetting=True` で実行し（2パスにしない）、
+        群理由 `vignetting_aperture_inconsistent_across_frames` を記録すること。
+        """
+        calls: list[tuple[object, bool]] = []
+
+        def spy(rgb, resolution, force_skip_vignetting=False):
+            calls.append((resolution, force_skip_vignetting))
+            metadata = {
+                "lens": resolution.lens_name,
+                "focal_length": resolution.focal_length,
+                "aperture": resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": ["distortion", "vignetting"],
+            }
+
         with mock.patch.object(
-            bracket_module, "probe_lens", side_effect=resolutions
+            bracket_module,
+            "probe_lens",
+            side_effect=self._aperture_inconsistent_resolutions(),
         ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
             result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
 
-        self.assertEqual(applied_to, [], "絞りが食い違うなら1枚も補正しないこと")
+        self.assertEqual(
+            [force for _, force in calls],
+            [True, True],
+            "1パス目から全フレームをビネット強制スキップで実行すること（再実行しない）",
+        )
+        summary = result["lens_correction"]
+        self.assertTrue(summary["applied"])
+        self.assertEqual(summary["skipped"], ["vignetting_aperture_inconsistent_across_frames"])
+        self.assertEqual(summary["flags"], ["distortion"])
+        self.assertEqual(summary["focal_length"], 10.0)
+        # 絞りはフレーム間で値が割れるため、共有フィールドから落ちる。
+        self.assertNotIn("aperture", summary)
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertTrue(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["skipped"],
+                    ["vignetting_aperture_inconsistent_across_frames"],
+                )
+
+    def test_focal_length_inconsistency_wins_over_aperture_inconsistency(self):
+        """焦点距離と絞りの両方が食い違えば、焦点距離側（全フレーム無補正）が勝つこと。"""
+        applied_to: list[object] = []
+
+        def spy(rgb, resolution, force_skip_vignetting=False):
+            applied_to.append(resolution)
+            return rgb, {"applied": True, "lens": "Sigma / 10-18mm"}
+
+        with mock.patch.object(
+            bracket_module,
+            "probe_lens",
+            side_effect=self._aperture_inconsistent_resolutions(focal_lengths=(10.0, 12.0)),
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(applied_to, [], "焦点距離が食い違うなら1枚も補正しないこと")
+        self.assertFalse(result["lens_correction"]["applied"])
         self.assertEqual(
             result["lens_correction"]["reason"], "lens_params_inconsistent_across_frames"
         )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "lens_params_inconsistent_across_frames",
+                )
+
+    def test_geometry_failure_in_an_aperture_inconsistent_bracket_falls_back_for_all(self):
+        """絞りのみ不一致でも、幾何補正が1枚失敗すれば全フレーム無補正へ落とすこと。"""
+        calls: list[bool] = []
+
+        def spy(rgb, resolution, force_skip_vignetting=False):
+            calls.append(force_skip_vignetting)
+            metadata = {
+                "lens": resolution.lens_name,
+                "focal_length": resolution.focal_length,
+                "aperture": resolution.aperture,
+            }
+            if len(calls) == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "tca"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            return rgb, {
+                "applied": True,
+                **metadata,
+                "flags": [],
+                "skipped": ["vignetting_forced_skip", "geometry_correction_failed"],
+            }
+
+        with mock.patch.object(
+            bracket_module,
+            "probe_lens",
+            side_effect=self._aperture_inconsistent_resolutions(),
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(calls, [True, True])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
+
+    def test_vignetting_only_lens_in_an_aperture_inconsistent_bracket_reports_group_reason(
+        self,
+    ):
+        """ビネット較正しか無いレンズで強制スキップ → 未適用、reason は群理由に置換すること。"""
+        calls: list[bool] = []
+
+        def spy(rgb, resolution, force_skip_vignetting=False):
+            calls.append(force_skip_vignetting)
+            if force_skip_vignetting:
+                return rgb, {"applied": False, "reason": "vignetting_forced_skip"}
+            return rgb * 1.1, {"applied": True, "flags": ["vignetting"]}
+
+        with mock.patch.object(
+            bracket_module,
+            "probe_lens",
+            side_effect=self._aperture_inconsistent_resolutions(),
+        ), mock.patch.object(bracket_module, "apply_lens_correction", side_effect=spy):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(calls, [True, True])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"],
+            "vignetting_aperture_inconsistent_across_frames",
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                correction = frame["lens_correction"]
+                self.assertFalse(correction["applied"])
+                self.assertEqual(
+                    correction["reason"], "vignetting_aperture_inconsistent_across_frames"
+                )
+                self.assertNotIn("vignetting_forced_skip", correction.get("skipped", []))
 
     def test_a_fully_resolvable_bracket_still_gets_lens_correction(self):
         """全フレーム解決できるときは従来どおり全フレームに補正が掛かること。"""

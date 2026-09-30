@@ -374,7 +374,8 @@ def _summarize_lens_corrections(
     """フレームごとの `lens_correction` を `MergedResult` 用の1件に畳む。
 
     全フレームで同じ結果になるのが正常（`probe_lens` は EXIF から決まり、ブラケットは
-    同一レンズ・同一焦点距離・同一絞りのため）。**1枚でも食い違ったら適用扱いにしない**:
+    同一レンズ・同一焦点距離のため。絞りだけが割れる場合は `aperture` が共有フィールド
+    から落ちるだけで、`applied` / `flags` / `skipped` は揃う）。**1枚でも食い違ったら適用扱いにしない**:
     歪曲補正は放射状のワープなので、補正済みと未補正が混ざると位置合わせでは
     取り除けないゴーストになる。食い違いの中身はレシピJSONの `frames[]` に残す。
     """
@@ -420,7 +421,9 @@ def _summarize_lens_corrections(
 #
 # vignetting_profile_focal_guard（焦点距離依存）は、本来 merge_bracket 側の
 # lens_params_inconsistent ガードで焦点距離の不一致自体を検出し、この関数に
-# 到達する時点では全フレーム一致しているはず。それでも安価な多層防御として
+# 到達する時点では全フレーム一致しているはず（絞りだけの不一致はこのガードの
+# 対象外で、merge_bracket が force_skip_vignetting_reason を渡して1パス目から
+# 全フレームのビネットを止めるため、このトリガー判定自体を通らない）。それでも安価な多層防御として
 # トリガーに含める：一致しているケースでは、どのフレームも flags に
 # "vignetting" を持たない（＝全フレームが同じ理由でビネット非適用）ため
 # 後続の再実行ループが全件 continue し、結果的に no-op になる（トリガー判定
@@ -455,10 +458,21 @@ def _has_geometry_skip(correction: dict[str, Any]) -> bool:
 def _apply_group_lens_corrections(
     frames: list[np.ndarray],
     lens_resolutions: list[LensResolution],
+    *,
+    force_skip_vignetting_reason: str | None = None,
 ) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
     """全フレームのレンズ補正を実行し、ビネット安全弁をグループで揃える。
 
-    1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
+    `force_skip_vignetting_reason` が指定された場合（merge_bracket が絞りだけの
+    不一致を検出したとき。値は `vignetting_aperture_inconsistent_across_frames`）は、
+    1パス目から全フレームを `force_skip_vignetting=True` で実行する（通常実行→
+    再実行の2パスにするとフル解像度の remap が倍になるため）。幾何フォールバックの
+    判定は下記と同じく1パス目の直後に行い、トリガー判定と再実行は飛ばして、
+    各フレームの `skipped` / `reason` を指定された理由に正規化する。ビネット較正
+    しか無いレンズでは lens.py が `applied: False`（reason `vignetting_forced_skip`）
+    を返しうるが、その reason も同じ理由に置換される。
+
+    指定が無い場合、1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
     `_GEOMETRY_SKIP_REASONS` のいずれかが返った場合は、幾何補正（歪曲/TCA）が
     フレーム間で揃わないため、force_skip_vignetting の2パス目には進まず、
     全フレームを無補正の元配列へフォールバックする。
@@ -471,16 +485,23 @@ def _apply_group_lens_corrections(
     トリガーに含めるのは画素内容に依存し、ブラケット内のフレーム間で実際に
     食い違いうる理由（ハイライト余地不足・非有限値破棄）と、上流のガードが
     素通りした場合の多層防御として `vignetting_profile_focal_guard`
-    （本来 merge_bracket 側で焦点距離の不一致自体を検出済みのはず）。
+    （本来 merge_bracket 側で焦点距離の不一致自体を検出済みのはず。絞りだけの
+    不一致は merge_bracket が `force_skip_vignetting_reason` で扱う）。
     `vignetting_forced_skip`（この関数自身の2パス目が付与するマーカー）と
     `apply_color_modification` 失敗は、こちらが制御しているか同一
     resolution なら決定論的なためトリガーにしない（詳細は
     `_GROUP_SKIP_TRIGGER_REASONS` 直上のコメントを参照）。
     """
+    forced_from_start = force_skip_vignetting_reason is not None
     corrected_frames: list[np.ndarray] = []
     corrections: list[dict[str, Any]] = []
     for frame, resolution in zip(frames, lens_resolutions):
-        corrected, correction = apply_lens_correction(frame, resolution)
+        if forced_from_start:
+            corrected, correction = apply_lens_correction(
+                frame, resolution, force_skip_vignetting=True
+            )
+        else:
+            corrected, correction = apply_lens_correction(frame, resolution)
         corrected_frames.append(np.ascontiguousarray(corrected))
         corrections.append(correction)
 
@@ -490,32 +511,41 @@ def _apply_group_lens_corrections(
             for resolution in lens_resolutions
         ]
 
-    def group_skip_trigger_reason(correction: dict[str, Any]) -> str | None:
-        for reason in correction.get("skipped", []):
+    if force_skip_vignetting_reason is not None:
+        # 1パス目から全フレームを強制スキップ済みなので、トリガー判定と再実行は不要。
+        group_skip_reason = force_skip_vignetting_reason
+    else:
+
+        def group_skip_trigger_reason(correction: dict[str, Any]) -> str | None:
+            for reason in correction.get("skipped", []):
+                if reason in _GROUP_SKIP_TRIGGER_REASONS:
+                    return reason
+            reason = correction.get("reason")
             if reason in _GROUP_SKIP_TRIGGER_REASONS:
                 return reason
-        reason = correction.get("reason")
-        if reason in _GROUP_SKIP_TRIGGER_REASONS:
-            return reason
-        return None
+            return None
 
-    trigger_reasons = [group_skip_trigger_reason(correction) for correction in corrections]
-    if not any(reason is not None for reason in trigger_reasons):
-        return corrected_frames, corrections
+        trigger_reasons = [
+            group_skip_trigger_reason(correction) for correction in corrections
+        ]
+        if not any(reason is not None for reason in trigger_reasons):
+            return corrected_frames, corrections
 
-    # グループ全体に記録する理由は、実際に発火した理由のうち最初のもの。
-    group_skip_reason = next(reason for reason in trigger_reasons if reason is not None)
-
-    for index, (frame, resolution, correction) in enumerate(
-        zip(frames, lens_resolutions, corrections)
-    ):
-        if "vignetting" not in correction.get("flags", []):
-            continue
-        corrected, forced_correction = apply_lens_correction(
-            frame, resolution, force_skip_vignetting=True
+        # グループ全体に記録する理由は、実際に発火した理由のうち最初のもの。
+        group_skip_reason = next(
+            reason for reason in trigger_reasons if reason is not None
         )
-        corrected_frames[index] = np.ascontiguousarray(corrected)
-        corrections[index] = forced_correction
+
+        for index, (frame, resolution, correction) in enumerate(
+            zip(frames, lens_resolutions, corrections)
+        ):
+            if "vignetting" not in correction.get("flags", []):
+                continue
+            corrected, forced_correction = apply_lens_correction(
+                frame, resolution, force_skip_vignetting=True
+            )
+            corrected_frames[index] = np.ascontiguousarray(corrected)
+            corrections[index] = forced_correction
 
     # `force_skip_vignetting` は lens.py 内部の理由として
     # `vignetting_forced_skip` を返すが、レシピにはグループ判定の原因を共通して記録
@@ -675,19 +705,29 @@ def merge_bracket(
     lens_resolutions = [probe_lens(exif) for exif in capture_exifs]
     lens_applicable = all(resolution.applicable for resolution in lens_resolutions)
 
-    # 全フレームでレンズDBの解決自体は成功しても、焦点距離・絞りが食い違えば
-    # modifier.initialize(resolution.focal_length, resolution.aperture, ...) への
-    # 入力がフレームごとに変わり、歪曲/TCAの幾何ワープ自体が揃わなくなる（パワーズーム
-    # レンズでズーム位置がわずかにずれる等）。ビネットの安全弁と違い、この不一致は
-    # _apply_group_lens_corrections より上流（幾何補正そのもの）で発生するため、
-    # グループ判定のトリガーを増やしても直らない。ここで検出し、全フレーム無補正に
-    # フォールバックする既存の「全か無か」の設計に合流させる。
+    # 全フレームでレンズDBの解決自体は成功しても、焦点距離が食い違えば
+    # modifier.initialize(resolution.focal_length, ...) への入力がフレームごとに変わり、
+    # 歪曲/TCAの幾何ワープ自体が揃わなくなる（パワーズームレンズでズーム位置がわずかに
+    # ずれる等）。ビネットの安全弁と違い、この不一致は _apply_group_lens_corrections
+    # より上流（幾何補正そのもの）で発生するため、グループ判定のトリガーを増やしても
+    # 直らない。ここで検出し、全フレーム無補正にフォールバックする既存の「全か無か」の
+    # 設計に合流させる。
+    #
+    # 一方、lensfun で絞りが効くのはビネットモデルだけで、歪曲/TCA は焦点距離のみで
+    # 決まる（実測で f/4 と f/8 の幾何マップは完全一致）。S/P モードの露出ブラケット
+    # のように絞りだけが食い違う場合は幾何が揃うため、補正は維持し、フレーム間で
+    # 量が変わるビネットだけを全フレームで強制スキップする（Issue #36）。焦点距離と
+    # 絞りの両方が食い違う場合は焦点距離側（全フレーム無補正）を優先する。
     lens_params_inconsistent = lens_applicable and (
         len({resolution.focal_length for resolution in lens_resolutions}) > 1
-        or len({resolution.aperture for resolution in lens_resolutions}) > 1
     )
     if lens_params_inconsistent:
         lens_applicable = False
+    aperture_inconsistent = (
+        lens_applicable
+        and not lens_params_inconsistent
+        and len({resolution.aperture for resolution in lens_resolutions}) > 1
+    )
 
     params_hash = _merge_params_hash(
         normalized_ids,
@@ -770,10 +810,17 @@ def merge_bracket(
     # デコード済みの元配列を保持したまま、レンズ補正をグループ単位で決める。全フレーム
     # 解決済みなら、ビネット安全弁が1枚でも発火したときだけ該当フレームを元配列から
     # 再実行する（デコードをやり直さない）。レンズ解決自体が不揃いな場合は従来どおり
-    # 全フレームを無補正にして、補正済み/未補正の幾何を混ぜない。
+    # 全フレームを無補正にして、補正済み/未補正の幾何を混ぜない。絞りだけが
+    # 食い違う場合は、1パス目から全フレームのビネットを強制スキップする。
     if lens_applicable:
         frames, lens_corrections = _apply_group_lens_corrections(
-            decoded_frames, lens_resolutions
+            decoded_frames,
+            lens_resolutions,
+            force_skip_vignetting_reason=(
+                "vignetting_aperture_inconsistent_across_frames"
+                if aperture_inconsistent
+                else None
+            ),
         )
     else:
         frames = decoded_frames

@@ -276,12 +276,20 @@ MergedResult = {
 - EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
 - `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
   ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
-- 全フレームで lensfun の解決自体が成功していても、焦点距離または絞りが一致しない場合は、
+- 全フレームで lensfun の解決自体が成功していても、焦点距離が一致しない場合は、
   幾何ワープを揃えられないため全フレーム無補正へフォールバックする。この場合の reason は
   `lens_params_inconsistent_across_frames` であり、一部フレームのレンズ解決失敗を表す
   `inconsistent_across_frames` とは別物である（Sony E PZ 16-50mm のパワーズーム等での
-  ズーム位置の微小なずれを検出するため）。
-- 事前の焦点距離・絞り一致検証を通過しても、実行時に一部フレームだけ歪曲/TCA（幾何補正）
+  ズーム位置の微小なずれを検出するため）。焦点距離と絞りの両方が一致しない場合もこちらになる。
+- （2026-09 追補, Issue #36）焦点距離が一致し**絞りだけ**が一致しない場合（S/P モードの
+  露出ブラケット等）は、全フレーム無補正にはしない。lensfun で絞りが効くのはビネットモデル
+  だけで歪曲/TCA の幾何は焦点距離のみで決まるため、幾何補正は全フレームで維持し、ビネットだけを
+  全フレームで強制スキップする。各フレームと集約の `lens_correction.skipped` には
+  `vignetting_aperture_inconsistent_across_frames` が入る（lens.py 内部の
+  `vignetting_forced_skip` はこの群理由に置き換わる）。集約 `lens_correction` からは値が
+  割れる `aperture` が落ちる。ビネット較正しか無いレンズでは結果的に `applied:false` となり、
+  reason が `vignetting_aperture_inconsistent_across_frames` になる。
+- 事前の焦点距離一致検証を通過しても、実行時に一部フレームだけ歪曲/TCA（幾何補正）
   が失敗することがある（`tca_map_unexpected_shape` / `geometry_non_finite` /
   `geometry_correction_failed`）。この場合 `apply_lens_correction` は成功済みのビネット
   補正だけを保持した部分適用状態（`applied:true`）を返すため、ビネット用のグループ判定
@@ -729,7 +737,9 @@ outputs/
    `skipped[]` に現れうる値は `vignetting_forced_skip` / `vignetting_profile_focal_guard` /
    `vignetting_highlight_headroom` / `vignetting_non_finite` /
    `vignetting_color_modification_failed` / `tca_map_unexpected_shape` /
-   `geometry_non_finite` / `geometry_correction_failed` である。幾何補正は、配列の長辺
+   `geometry_non_finite` / `geometry_correction_failed` である。ブラケット合成時のみ、
+   群理由として `vignetting_aperture_inconsistent_across_frames`（絞りだけがフレーム間で
+   一致しない。Issue #36）も現れうる。幾何補正は、配列の長辺
    `max(height,width)` が **4000px以上なら `INTER_CUBIC`、未満なら `INTER_LINEAR`** とし、
    TCA較正がある場合はRGB別マップで歪曲補正と一度に適用する。
 
