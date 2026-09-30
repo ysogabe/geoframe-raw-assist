@@ -446,6 +446,10 @@ _GROUP_SKIP_TRIGGER_REASONS = frozenset(
 # 抑制するものであり幾何補正の不一致には効かないため、ビネットの安全弁とは
 # 別に、全フレームを無補正の元配列へフォールバックする（歪曲補正は放射状の
 # ワープなので、位置合わせでは補正済み/未補正の混在を除去できないため）。
+# ただし lens.py は補正フラグが1つも立たないと `skipped` を返さず、先頭の理由だけを
+# `reason` に昇格させる（lens.py の `if not applied_flags:` 分岐）。ビネットがスキップ
+# （強制スキップ含む）されたフレームで幾何も失敗すると、ここでの理由は見えなくなる。
+# その穴は _apply_group_lens_corrections の最終ガード（`applied` の混在検出）が補う。
 _GEOMETRY_SKIP_REASONS = frozenset(
     {"tca_map_unexpected_shape", "geometry_non_finite", "geometry_correction_failed"}
 )
@@ -466,11 +470,12 @@ def _apply_group_lens_corrections(
     `force_skip_vignetting_reason` が指定された場合（merge_bracket が絞りだけの
     不一致を検出したとき。値は `vignetting_aperture_inconsistent_across_frames`）は、
     1パス目から全フレームを `force_skip_vignetting=True` で実行する（通常実行→
-    再実行の2パスにするとフル解像度の remap が倍になるため）。幾何フォールバックの
-    判定は下記と同じく1パス目の直後に行い、トリガー判定と再実行は飛ばして、
-    各フレームの `skipped` / `reason` を指定された理由に正規化する。ビネット較正
+    再実行の2パスにするとフル解像度の remap が倍になるため）。トリガー判定と再実行は
+    飛ばして、各フレームの `skipped` / `reason` を指定された理由に正規化する。ビネット較正
     しか無いレンズでは lens.py が `applied: False`（reason `vignetting_forced_skip`）
-    を返しうるが、その reason も同じ理由に置換される。
+    を返しうるが、その reason も同じ理由に置換される。この分岐では、幾何補正が失敗した
+    フレームは `skipped` に幾何理由が現れないことがある（下記の最終ガード参照）ため、
+    1パス目直後の `_has_geometry_skip` 判定だけでは幾何の失敗を捕捉しきれない。
 
     指定が無い場合、1パス目は通常のレンズ補正で各フレームのハイライト余地を判定する。1枚でも
     `_GEOMETRY_SKIP_REASONS` のいずれかが返った場合は、幾何補正（歪曲/TCA）が
@@ -491,6 +496,18 @@ def _apply_group_lens_corrections(
     `apply_color_modification` 失敗は、こちらが制御しているか同一
     resolution なら決定論的なためトリガーにしない（詳細は
     `_GROUP_SKIP_TRIGGER_REASONS` 直上のコメントを参照）。
+
+    最終ガード: どの経路でも、最終状態で `applied` がフレーム間で混在（一部 True・
+    一部 False）していれば、全フレームを無補正の元配列へフォールバックする（reason
+    `geometry_inconsistent_across_frames`）。lens.py は補正フラグが1つも立たないと
+    `skipped` を返さず、先頭の理由だけを `reason` にする（`if not applied_flags:`
+    分岐）。そのためビネットのスキップ（強制スキップ・ハイライト余地不足など）と
+    幾何補正の失敗が同じフレームで重なると幾何理由が消え、`_has_geometry_skip` では
+    検出できない。同一グループ（レンズ解決済み・焦点距離一致）でビネットの適用可否を
+    揃えた後に `applied` が割れる原因は、そのフレームの幾何失敗か補正全体の失敗
+    （`error:...` 等）しか無く、どちらも混在させて合成してはいけない。全フレーム
+    `applied: False` はビネット較正しか無いレンズの強制スキップ等の正当なケースなので
+    そのまま返す。
     """
     forced_from_start = force_skip_vignetting_reason is not None
     corrected_frames: list[np.ndarray] = []
@@ -511,6 +528,7 @@ def _apply_group_lens_corrections(
             for resolution in lens_resolutions
         ]
 
+    group_skip_reason: str | None
     if force_skip_vignetting_reason is not None:
         # 1パス目から全フレームを強制スキップ済みなので、トリガー判定と再実行は不要。
         group_skip_reason = force_skip_vignetting_reason
@@ -528,41 +546,52 @@ def _apply_group_lens_corrections(
         trigger_reasons = [
             group_skip_trigger_reason(correction) for correction in corrections
         ]
-        if not any(reason is not None for reason in trigger_reasons):
-            return corrected_frames, corrections
-
         # グループ全体に記録する理由は、実際に発火した理由のうち最初のもの。
+        # トリガー未検出でも早期 return せず、再実行と正規化だけを飛ばして
+        # 最終ガードを必ず通す。
         group_skip_reason = next(
-            reason for reason in trigger_reasons if reason is not None
+            (reason for reason in trigger_reasons if reason is not None), None
         )
 
-        for index, (frame, resolution, correction) in enumerate(
-            zip(frames, lens_resolutions, corrections)
-        ):
-            if "vignetting" not in correction.get("flags", []):
-                continue
-            corrected, forced_correction = apply_lens_correction(
-                frame, resolution, force_skip_vignetting=True
-            )
-            corrected_frames[index] = np.ascontiguousarray(corrected)
-            corrections[index] = forced_correction
+        if group_skip_reason is not None:
+            for index, (frame, resolution, correction) in enumerate(
+                zip(frames, lens_resolutions, corrections)
+            ):
+                if "vignetting" not in correction.get("flags", []):
+                    continue
+                corrected, forced_correction = apply_lens_correction(
+                    frame, resolution, force_skip_vignetting=True
+                )
+                corrected_frames[index] = np.ascontiguousarray(corrected)
+                corrections[index] = forced_correction
 
-    # `force_skip_vignetting` は lens.py 内部の理由として
-    # `vignetting_forced_skip` を返すが、レシピにはグループ判定の原因を共通して記録
-    # する。フレーム単位の skipped が揃うため、全体 summary でも情報を落とさない。
-    for index, correction in enumerate(corrections):
-        normalized = dict(correction)
-        skipped = [
-            reason
-            for reason in normalized.get("skipped", [])
-            if reason != "vignetting_forced_skip"
+    if group_skip_reason is not None:
+        # `force_skip_vignetting` は lens.py 内部の理由として
+        # `vignetting_forced_skip` を返すが、レシピにはグループ判定の原因を共通して記録
+        # する。フレーム単位の skipped が揃うため、全体 summary でも情報を落とさない。
+        for index, correction in enumerate(corrections):
+            normalized = dict(correction)
+            skipped = [
+                reason
+                for reason in normalized.get("skipped", [])
+                if reason != "vignetting_forced_skip"
+            ]
+            if group_skip_reason not in skipped:
+                skipped.append(group_skip_reason)
+            normalized["skipped"] = skipped
+            if not normalized.get("applied"):
+                normalized["reason"] = group_skip_reason
+            corrections[index] = normalized
+
+    # 最終ガード: `applied` がフレーム間で混在していれば、幾何補正済みと未補正
+    # （または補正全体の失敗）が混ざっているので全フレームを無補正へ落とす。
+    # lens.py は補正フラグが空だと `skipped` を落として先頭理由だけを `reason` に
+    # するため、幾何の失敗が `_has_geometry_skip` から見えないことがある（docstring 参照）。
+    if len({bool(correction.get("applied")) for correction in corrections}) > 1:
+        return list(frames), [
+            resolution.unapplied("geometry_inconsistent_across_frames")
+            for resolution in lens_resolutions
         ]
-        if group_skip_reason not in skipped:
-            skipped.append(group_skip_reason)
-        normalized["skipped"] = skipped
-        if not normalized.get("applied"):
-            normalized["reason"] = group_skip_reason
-        corrections[index] = normalized
 
     return corrected_frames, corrections
 

@@ -703,6 +703,11 @@ class MergedRecipeTests(BracketTestCase):
         なったので、ここで見るのは**実行時**に割れる残りの経路（全フレーム解決済みだが
         `apply_lens_correction` が一部フレームで失敗する）。そのため `probe_lens` を
         全フレーム適用可能に差し替えてから `apply_lens_correction` を揺らす。
+
+        PR #64 レビュー対応で、実行時に `applied` が割れた場合は
+        `_apply_group_lens_corrections` の最終ガードが全フレームを無補正へ揃える
+        （以前は1枚目だけ補正済みのまま合成し、集約だけ `inconsistent_across_frames`
+        にしていた）。
         """
         results = iter(
             [
@@ -721,11 +726,17 @@ class MergedRecipeTests(BracketTestCase):
             result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
 
         self.assertEqual(
-            result["lens_correction"], {"applied": False, "reason": "inconsistent_across_frames"}
+            result["lens_correction"],
+            {"applied": False, "reason": "geometry_inconsistent_across_frames"},
         )
         recipe = self.read_recipe(result)
-        self.assertTrue(recipe["frames"][0]["lens_correction"]["applied"])
-        self.assertFalse(recipe["frames"][1]["lens_correction"]["applied"])
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
 
     def test_a_partially_resolvable_bracket_gets_no_lens_correction_at_all(self):
         """1枚でもレンズを解決できなければ、**どのフレームにも**補正を掛けないこと。
@@ -921,7 +932,14 @@ class MergedRecipeTests(BracketTestCase):
                 )
 
     def test_geometry_failure_in_an_aperture_inconsistent_bracket_falls_back_for_all(self):
-        """絞りのみ不一致でも、幾何補正が1枚失敗すれば全フレーム無補正へ落とすこと。"""
+        """絞りのみ不一致でも、幾何補正が1枚失敗すれば全フレーム無補正へ落とすこと。
+
+        強制スキップ下で幾何も失敗したフレームは、lens.py の `if not applied_flags:`
+        分岐（lens.py:447-449）により `skipped` が落ち、先頭理由の
+        `vignetting_forced_skip` だけが `reason` に残る `applied: False` になる。
+        `_has_geometry_skip` では見えないため、最終ガード（`applied` の混在検出）で
+        捕捉すること（PR #64 レビュー指摘）。
+        """
         calls: list[bool] = []
 
         def spy(rgb, resolution, force_skip_vignetting=False):
@@ -938,11 +956,13 @@ class MergedRecipeTests(BracketTestCase):
                     "flags": ["distortion", "tca"],
                     "skipped": ["vignetting_forced_skip"],
                 }
+            # lens.py の実際の戻り値の形: 補正フラグが空なので skipped
+            # （["vignetting_forced_skip", "geometry_correction_failed"]）は返らず、
+            # 先頭の理由だけが reason になる（lens.py:447-449）。
             return rgb, {
-                "applied": True,
-                **metadata,
-                "flags": [],
-                "skipped": ["vignetting_forced_skip", "geometry_correction_failed"],
+                "applied": False,
+                "reason": "vignetting_forced_skip",
+                "lens_model": "10-18mm F2.8 DC DN | Contemporary 023",
             }
 
         with mock.patch.object(
@@ -1193,6 +1213,121 @@ class MergedRecipeTests(BracketTestCase):
         # force_skip_vignetting=True の再実行（ビネット用の2パス目）は起きない。
         # 幾何不一致はそれとは別の経路で、全フレーム無補正へフォールバックする。
         self.assertEqual([force for _, force in calls], [False, False])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
+
+    def test_headroom_skip_with_hidden_geometry_failure_falls_back_for_all(self):
+        """ビネットのヘッドルームスキップと幾何失敗が同じフレームで重なっても揃えること。
+
+        lens.py は補正フラグが空だと `skipped` を返さず先頭理由だけを `reason` にする
+        （lens.py:447-449）。フレームBでヘッドルーム不足によりビネットがスキップされ、
+        さらに幾何補正も失敗すると `{"applied": False, "reason":
+        "vignetting_highlight_headroom"}` になり、幾何理由が消える。グループ判定は
+        発火してフレームAが再実行されるが、Aは幾何補正済みのまま `applied: True`、
+        Bは未補正の `applied: False` となり混在するため、最終ガードで全フレームを
+        無補正へ落とすこと（PR #64 レビュー指摘）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[bool] = []
+        normal_calls = 0
+
+        def grouped(rgb, current_resolution, force_skip_vignetting=False):
+            nonlocal normal_calls
+            calls.append(force_skip_vignetting)
+            metadata = {
+                "lens": current_resolution.lens_name,
+                "focal_length": current_resolution.focal_length,
+                "aperture": current_resolution.aperture,
+            }
+            if force_skip_vignetting:
+                return rgb * 1.05, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion"],
+                    "skipped": ["vignetting_forced_skip"],
+                }
+            normal_calls += 1
+            if normal_calls == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    **metadata,
+                    "flags": ["distortion", "vignetting"],
+                }
+            # ヘッドルームスキップ + 幾何失敗が lens.py で潰れた形。
+            return rgb, {"applied": False, "reason": "vignetting_highlight_headroom"}
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=grouped
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(calls, [False, False, True])
+        self.assertFalse(result["lens_correction"]["applied"])
+        self.assertEqual(
+            result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"
+        )
+        recipe = self.read_recipe(result)
+        for frame in recipe["frames"]:
+            with self.subTest(capture_id=frame["capture_id"]):
+                self.assertFalse(frame["lens_correction"]["applied"])
+                self.assertEqual(
+                    frame["lens_correction"]["reason"],
+                    "geometry_inconsistent_across_frames",
+                )
+
+    def test_whole_correction_failure_in_one_frame_falls_back_for_all(self):
+        """トリガー無しでも、1枚だけ補正全体が失敗したら全フレーム無補正へ揃えること。
+
+        lens.py の外側 `except Exception` は `{"applied": False, "reason": "error:..."}`
+        を返す。ビネットのグループトリガーには該当しないので再実行は起きないが、
+        以前はそのまま早期 return して、補正済みフレームと未補正フレームを混ぜて
+        合成していた（PR #64 レビュー指摘）。
+        """
+        resolution = LensResolution(
+            applicable=True,
+            lens_name="Sigma / 10-18mm",
+            focal_length=10.0,
+            aperture=4.0,
+        )
+        calls: list[bool] = []
+
+        def flaky(rgb, current_resolution, force_skip_vignetting=False):
+            calls.append(force_skip_vignetting)
+            if len(calls) == 1:
+                return rgb * 1.1, {
+                    "applied": True,
+                    "lens": current_resolution.lens_name,
+                    "focal_length": current_resolution.focal_length,
+                    "aperture": current_resolution.aperture,
+                    "flags": ["distortion", "vignetting"],
+                }
+            return rgb, {"applied": False, "reason": "error:boom"}
+
+        with mock.patch.object(
+            bracket_module, "probe_lens", return_value=resolution
+        ), mock.patch.object(
+            bracket_module, "apply_lens_correction", side_effect=flaky
+        ):
+            result = merge_bracket(CAPTURES[:2], DEFAULT_PRESET, preview=True)
+
+        self.assertEqual(calls, [False, False], "トリガーが無いので再実行しないこと")
         self.assertFalse(result["lens_correction"]["applied"])
         self.assertEqual(
             result["lens_correction"]["reason"], "geometry_inconsistent_across_frames"

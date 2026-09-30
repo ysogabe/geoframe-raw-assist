@@ -296,6 +296,12 @@ MergedResult = {
   （`skipped` の `vignetting_*` 系）では検出できない。歪曲補正は放射状のワープで位置合わせ
   では混在を除去できないため、これを検出したら全フレーム無補正へフォールバックし、reason
   は `geometry_inconsistent_across_frames` になる。
+  ただし lens.py は補正フラグが1つも立たないと `skipped` を返さず、先頭の理由だけを
+  `reason` にする（`applied:false`）。そのためビネットのスキップ（強制スキップ含む）と
+  幾何失敗が同じフレームで重なると、幾何理由が見えない。これを補うため、グループ処理の
+  最終状態で `applied` がフレーム間で混在した場合（補正全体の失敗 `error:...` を含む）も、
+  同じ reason `geometry_inconsistent_across_frames` で全フレーム無補正へフォールバックする
+  （Issue #36 の PR #64 レビュー対応）。全フレーム `applied:false` の場合はこの対象外。
 
 #### キャッシュキー
 
