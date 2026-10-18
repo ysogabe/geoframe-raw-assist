@@ -45,6 +45,53 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
 `supported_decoder_versions` が埋まる（渡さなければキー自体が出ない）。
 
+## アプリからの使い方（試験機能、Issue #65 PR2）
+
+デスクトップアプリ（Tauri）は Python エンジン / `.venv` / localhost HTTP を経由せず、Rust
+（`src-tauri/src/coreimage.rs`）からこの CLI を子プロセスとして直接呼ぶ。既定では無効で、
+環境変数 `GEOFRAME_COREIMAGE_EXPERIMENT=1` で起動したときだけ操作パネルに
+「Core Image 試験現像」ボタンと比較表示（カメラ JPEG / rawpy / Core Image）が出る。
+
+### ビルド順序
+
+CLI は Tauri の `bundle.externalBin`（`src-tauri/binaries/geoframe-ci-develop-<target triple>`）として
+同梱する。tauri-build はこのファイルの存在を **コンパイル時に** 検査するため、
+`cargo build` / `cargo test` / `cargo clippy` を素で回す前に一度ビルドしておくこと。
+
+```sh
+npm run build:coreimage     # swift build -c release → src-tauri/binaries/ へコピー（.gitignore 済み）
+cd src-tauri && cargo test  # ここで初めて通る
+```
+
+`npm run tauri:dev` / `tauri:build` は beforeDevCommand / beforeBuildCommand で
+`npm run build:coreimage` を先に実行するので、追加の手順は要らない。
+
+### フラグの立て方
+
+```sh
+GEOFRAME_COREIMAGE_EXPERIMENT=1 npm run tauri:dev
+open -n --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app"
+```
+
+値がちょうど `1` のときだけ有効。無効時は UI に何も出さず、Rust の `develop_coreimage` も
+`EXPERIMENT_DISABLED` で拒否する。ブラウザモード（`npm run dev:raw`）では常に無効。
+
+### 動作
+
+- 現像元フォルダは Python と同じ `<app_data_dir>/config.json` の `source_root` を **読むだけ**
+  （`<app_data_dir>` は macOS で `~/Library/Application Support/com.geoframe.rawassist`）。
+- capture_id → ARW の解決は `local_raw/source_files.py` と同じ規則（拡張子の大文字小文字揺れ、
+  正規表記 `.ARW` 優先、フォルダ外を指すシンボリックリンクは拒否）。
+- リクエストは `mode: "preview"`, `max_edge: 2400`, `format: "jpeg"`, `decoder_version: "9"`,
+  `settings.profile: "neutral"` 固定。
+- 出力先は `<app_data_dir>/coreimage/<撮影ID>_<mode>_<ハッシュ16桁>.jpg`。ハッシュはリクエスト
+  （出力パス以外）+ `--version` 応答 + ARW のパス・サイズ・mtime の SHA-256。同名ファイルと
+  来歴 `<同名>.json`（CLI の応答 JSON そのまま）が揃っていれば再現像しない。
+- sidecar は実行ファイルの隣（dev は `src-tauri/target/debug/`、.app は `Contents/MacOS/`）の
+  `geoframe-ci-develop` を `std::process::Command` で起動し、60 秒で kill する。
+- 表示は Tauri の asset プロトコル（scope `$APPDATA/coreimage/**`）。
+- 元の ARW / JPG と、Python 側の現像キャッシュ・書き出し先には書き込まない。
+
 ## リクエスト（stdin に JSON 1 個）
 
 パスはシェル・Rust 側のエスケープ問題を避けるため引数ではなく JSON で渡す。**未知のキーはエラー**。

@@ -14,8 +14,11 @@ rust-version = "1.77.2"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = "0.4.4"
+# Core Image 試験現像（src/coreimage.rs）: capture_id の検証とキャッシュ名の安定ハッシュ。
+regex = "1"
+sha2 = "0.10"

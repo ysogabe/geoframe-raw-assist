@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.geoframe.rawassist",
   "build": {
-    "beforeDevCommand": "vite",
+    "beforeDevCommand": "npm run build:coreimage && vite",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "vite build",
+    "beforeBuildCommand": "npm run build:coreimage && vite build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -19,7 +19,13 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/coreimage/**"
+        ]
+      }
     }
   },
   "bundle": {
@@ -31,6 +37,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": [
+      "binaries/geoframe-ci-develop"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
   }
 }
