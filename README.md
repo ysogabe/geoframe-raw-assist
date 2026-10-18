@@ -166,6 +166,17 @@ outputs/
 
 最終品質でカタログ管理まで必要になった場合は、同じAPIの背後をdarktable CLIへ差し替えられる構成です。現在の実装は依存が小さく、Sony ARWをローカルだけで試すことを優先しています。
 
+### Core Image 試験現像（実験的、macOS 14 以上）
+
+Python エンジンを経由せず、macOS 標準の Core Image（CIRAWFilter）で ARW を現像する試験経路があります（Issue #65）。既定では表示されません。
+
+- ビルド: `npm run build:coreimage`（Swift CLI `native/coreimage-cli` をビルドし `src-tauri/binaries/` に置く。`tauri:dev` / `tauri:build` からも自動で実行。`cargo build` / `cargo test` の前には一度必要）
+- 有効化: `GEOFRAME_COREIMAGE_EXPERIMENT=1 npm run tauri:dev`（ビルド済み `.app` は `open --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "<アプリのパス>.app"`）。操作パネルに「Core Image 試験現像」とカメラJPEG / rawpy / Core Image の比較が出ます
+- 出力は `<app_data_dir>/coreimage/` だけに書き、原本や既存のキャッシュ・書き出し先には書きません
+- 比較: `.venv/bin/python scripts/compare_engines.py --source-root <フォルダ> --select auto`（出力は `work/engine-comparison/`）
+
+採否と比較結果は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、[比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md) を参照してください。現時点では本番の現像は rawpy のままです。
+
 ## 既知の制限
 
 - 現像は同期処理のため、本現像は完了まで画面で数秒待ちます（キャンセル不可）。
