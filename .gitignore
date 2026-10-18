@@ -57,3 +57,6 @@ __pycache__/
 /Library/
 /.local/
 /AppData/
+
+# Core Image PoC CLI (SwiftPM build output)
+/native/coreimage-cli/.build/
