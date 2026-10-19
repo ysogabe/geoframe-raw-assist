@@ -262,3 +262,178 @@ class DetailBoxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- 解像感（--sharpness）の純粋関数 --------------------------------------------
+
+
+def _blurred_step(sigma, size=96, angle_deg=0.0, low=40.0, high=200.0):
+    """角度 angle_deg の直線エッジ（暗→明）を σ でぼかした 8bit スケール画像。"""
+    import cv2
+
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+    theta = math.radians(angle_deg)
+    # 4 倍で作ってから AREA 縮小（ピクセル積分）するとエイリアスの少ない斜めエッジになる
+    big = 4
+    yy, xx = np.mgrid[0:size * big, 0:size * big].astype(np.float64) / big
+    dist = (xx - size / 2) * math.cos(theta) + (yy - size / 2) * math.sin(theta)
+    img = np.where(dist >= 0, high, low).astype(np.float32)
+    img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+    if sigma > 0:
+        img = cv2.GaussianBlur(img, (0, 0), sigma)
+    return img
+
+
+class EdgeRiseWidthTests(unittest.TestCase):
+    def test_gaussian_edge_profile_matches_theory(self):
+        # σ のガウスでぼかしたステップの 10–90% 幅は 2·1.2816·σ ≈ 2.563σ
+        from math import erf, sqrt
+
+        step = 0.25
+        x = np.arange(-12, 12 + step / 2, step)
+        for sigma in (1.0, 2.0, 3.0):
+            with self.subTest(sigma=sigma):
+                profile = 50 + 150 * np.array([0.5 * (1 + erf(v / (sigma * sqrt(2)))) for v in x])
+                self.assertAlmostEqual(ce.edge_rise_width(profile, step=step), 2.563 * sigma, delta=0.05)
+
+    def test_overshoot_does_not_shrink_width(self):
+        # シャープのオーバーシュート（外側プラトーより中央寄りの山谷）があっても、
+        # プラトーは外側の中央値なので 10/90% の基準は動かない。
+        step = 0.25
+        x = np.arange(-8, 8 + step / 2, step)
+        base = 50 + 150 / (1 + np.exp(-x / 0.6))
+        overshoot = base + 25 * np.exp(-((x - 1.5) ** 2)) - 25 * np.exp(-((x + 1.5) ** 2))
+        w_base = ce.edge_rise_width(base, step=step)
+        w_os = ce.edge_rise_width(overshoot, step=step)
+        self.assertIsNotNone(w_os)
+        self.assertLess(w_os, w_base)  # 立ち上がり自体は急になる
+        self.assertGreater(w_os, 0.3 * w_base)
+
+    def test_rejects_low_contrast_and_reversed(self):
+        x = np.linspace(-8, 8, 65)
+        self.assertIsNone(ce.edge_rise_width(100 + 5 * np.tanh(x)))
+        self.assertIsNone(ce.edge_rise_width(100 - 80 * np.tanh(x)))
+        self.assertIsNone(ce.edge_rise_width(np.array([1.0, 2.0, 3.0])))
+
+    def test_sample_profiles_on_synthetic_edges(self):
+        # 2D の斜めエッジでも、勾配方向に沿って測れば理論値に近い幅になる
+        for angle in (0.0, 30.0, 90.0):
+            with self.subTest(angle=angle):
+                img = _blurred_step(2.0, angle_deg=angle)
+                theta = math.radians(angle)
+                pts = np.array([[48.0, 48.0, math.cos(theta), math.sin(theta)]], dtype=np.float32)
+                prof = ce.sample_profiles(img, pts)[0]
+                width = ce.edge_rise_width(prof)
+                self.assertIsNotNone(width)
+                # AREA 縮小の画素積分ぶん少し太い
+                self.assertAlmostEqual(width, 2.563 * 2.0, delta=0.4)
+
+    def test_find_edge_points_finds_straight_edge_with_correct_normal(self):
+        img = _blurred_step(1.0, size=128, angle_deg=0.0)
+        pts = ce.find_edge_points(img, (0, 0, 128, 128))
+        self.assertGreater(len(pts), 3)
+        self.assertTrue(np.all(np.abs(pts[:, 0] - 64) <= 1.5))
+        self.assertTrue(np.all(pts[:, 2] > 0.95))  # 法線は +x（暗→明）
+
+    def test_blur_widens_measured_edges(self):
+        sharp = _blurred_step(1.0, size=128, angle_deg=20.0)
+        soft = _blurred_step(2.5, size=128, angle_deg=20.0)
+        pts = ce.find_edge_points(sharp, (0, 0, 128, 128))
+        w_sharp = np.median([ce.edge_rise_width(p) for p in ce.sample_profiles(sharp, pts)])
+        w_soft = np.median([w for w in (ce.edge_rise_width(p) for p in ce.sample_profiles(soft, pts)) if w])
+        self.assertGreater(w_soft, w_sharp * 1.8)
+
+
+class SharpnessMetricTests(unittest.TestCase):
+    def setUp(self):
+        rng = np.random.default_rng(0)
+        self.texture = (rng.random((128, 128)) * 255).astype(np.float32)
+
+    def test_tenengrad_and_laplacian_drop_with_blur(self):
+        import cv2
+
+        soft = cv2.GaussianBlur(self.texture, (0, 0), 1.5)
+        self.assertLess(ce.tenengrad(soft), ce.tenengrad(self.texture) * 0.3)
+        self.assertLess(ce.laplacian_var(soft), ce.laplacian_var(self.texture) * 0.1)
+        self.assertEqual(ce.tenengrad(np.full((32, 32), 7.0)), 0.0)
+
+    def test_highfreq_ratio(self):
+        import cv2
+
+        # 白色雑音の高周波帯（0.25–0.5 cyc/px の円環）比は面積比程度、ぼかすと激減
+        white = ce.highfreq_energy_ratio(self.texture)
+        self.assertGreater(white, 0.4)
+        soft = ce.highfreq_energy_ratio(cv2.GaussianBlur(self.texture, (0, 0), 2.0))
+        self.assertLess(soft, white * 0.05)
+        self.assertTrue(math.isnan(ce.highfreq_energy_ratio(np.full((16, 16), 3.0))))
+
+    def test_iso_band(self):
+        self.assertEqual(ce.iso_band(100), "low")
+        self.assertEqual(ce.iso_band(799), "low")
+        self.assertEqual(ce.iso_band(800), "mid")
+        self.assertEqual(ce.iso_band(1600), "mid")
+        self.assertEqual(ce.iso_band(3200), "high")
+        self.assertEqual(ce.iso_band(None), "unknown")
+
+    def test_roi_boxes_prefers_detail_and_does_not_overlap(self):
+        img = np.full((400, 600), 128.0, dtype=np.float32)
+        img[250:350, 400:500] = self.texture[:100, :100]
+        boxes = dict(ce.roi_boxes(img, 100, k=3))
+        self.assertEqual(set(boxes), {"detail1", "detail2", "detail3", "center", "corner"})
+        x0, y0, x1, y1 = boxes["detail1"]
+        self.assertTrue(x0 >= 375 and y0 >= 225 and x1 <= 525 and y1 <= 375)
+        details = [boxes[f"detail{i}"] for i in (1, 2, 3)]
+        for i in range(3):
+            for j in range(i + 1, 3):
+                a, b = details[i], details[j]
+                overlap = not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+                self.assertFalse(overlap)
+        self.assertEqual(boxes["center"], (250, 150, 350, 250))
+
+    def test_roi_shift_recovers_translation(self):
+        import cv2
+
+        big = cv2.GaussianBlur((np.random.default_rng(1).random((300, 300)) * 255).astype(np.float32), (0, 0), 1.2)
+        moved = np.roll(np.roll(big, 4, axis=1), -6, axis=0) * 0.7 + 20  # トーン差があっても
+        dx, dy, response = ce.roi_shift(big, moved, (100, 100, 200, 200), margin=24)
+        self.assertAlmostEqual(dx, 4.0, delta=0.3)
+        self.assertAlmostEqual(dy, -6.0, delta=0.3)
+        self.assertGreater(response, 0.3)
+        self.assertEqual(ce.shift_box((100, 100, 200, 200), dx, dy, 300, 300), (104, 94, 204, 194))
+        self.assertEqual(ce.shift_box((250, 0, 300, 50), 20, -5, 300, 300), (250, 0, 300, 50))
+
+    def test_fit_to_target(self):
+        rgb = np.zeros((1603, 2400, 3), dtype=np.uint8)
+        out, how = ce.fit_to_target(rgb, (2400, 1600))
+        self.assertEqual((out.shape, how), ((1600, 2400, 3), "crop"))
+        out, how = ce.fit_to_target(np.zeros((1598, 2400, 3), dtype=np.uint8), (2400, 1600))
+        self.assertEqual((out.shape, how), ((1600, 2400, 3), "crop"))
+        out, how = ce.fit_to_target(np.zeros((800, 1200, 3), dtype=np.uint8), (2400, 1600))
+        self.assertEqual((out.shape, how), ((1600, 2400, 3), "resampled"))
+
+    def test_summarize_sharpness_medians_and_skips_errors(self):
+        rows = [
+            {"mode": "preview", "variant": "a", "x": 1.0},
+            {"mode": "preview", "variant": "a", "x": 3.0},
+            {"mode": "preview", "variant": "a", "x": float("nan")},
+            {"mode": "preview", "variant": "a", "error": "boom", "x": 100.0},
+            {"mode": "full", "variant": "a"},
+        ]
+        out = ce.summarize_sharpness(rows, ["x"], ("mode", "variant"))
+        by = {(o["mode"], o["variant"]): o for o in out}
+        self.assertEqual(by[("preview", "a")]["x"], 2.0)
+        self.assertEqual(by[("preview", "a")]["n"], 3)
+        self.assertEqual(by[("preview", "a")]["x_n"], 2)
+        self.assertIsNone(by[("full", "a")]["x"])
+
+    def test_rawpy_finish_reuses_engine_tone(self):
+        # 後段仕上げは engine._apply_tone_array を通る（平坦画像はシャープの影響を受けない）
+        flat = np.full((64, 64, 3), 128, dtype=np.uint8)
+        out = ce.apply_rawpy_finish(flat, 100)
+        self.assertEqual(out.dtype, np.uint8)
+        self.assertLessEqual(int(np.abs(out.astype(int) - 128).max()), 6)
+        edge = np.zeros((64, 64, 3), dtype=np.uint8)
+        edge[:, 32:] = 200
+        sharpened = ce.apply_rawpy_finish(edge, 100)
+        # USM のオーバーシュートでエッジ直近の明側が 200 を超える
+        self.assertGreater(int(sharpened[:, 32, 0].max()), int(sharpened[:, 50, 0].max()))

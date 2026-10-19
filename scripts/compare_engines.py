@@ -23,11 +23,18 @@
 例:
     .venv/bin/python scripts/compare_engines.py \\
       --source-root /Volumes/Backup/100MSDCF --select auto --full --full-limit 5
+
+``--sharpness`` は解像感（ピント甘さ）評価モード。上の 4 枚の代わりに ``SHARPNESS_VARIANTS`` の
+10 バリアント（rawpy 撮影時シャープ ON/OFF、Core Image decoder 8/9 × lens、apple_default、
+CI + rawpy と同じ後段仕上げ）を作り、ROI のシャープネス比・エッジ 10–90% 幅・平坦部ノイズと
+等倍クロップシートを ``sharpness_*.{csv,json,md}`` / ``sheets/`` に出す
+（docs/coreimage-engine-comparison.md §9）。
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import math
@@ -462,6 +469,297 @@ def summarize(rows: list[dict[str, Any]], keys: Iterable[str]) -> list[dict[str,
 
 
 # =============================================================================
+# 解像感（--sharpness）の純粋関数
+# =============================================================================
+
+#: エッジ立ち上がり幅の計測パラメータ。プロファイルは法線方向 ±EDGE_HALF_PX を
+#: EDGE_STEP_PX 刻みで双一次補間し、接線方向に EDGE_ALONG 本平均する（ノイズ抑制）。
+EDGE_HALF_PX = 8.0
+EDGE_STEP_PX = 0.25
+EDGE_ALONG = 5
+#: プラトー（エッジ両側の平坦部）として使う外側の長さ（px）。min/max ではなく外側の
+#: 中央値を使うのは、カメラ JPEG のシャープによるオーバーシュートで幅が縮んで見えるのを避けるため。
+EDGE_PLATEAU_PX = 2.0
+#: エッジとして採用する最小コントラスト（8bit 階調）。
+EDGE_MIN_CONTRAST = 20.0
+#: カメラ JPEG のプロファイルで、プラトーの標準偏差がコントラストのこの割合を超える点は捨てる。
+EDGE_MAX_PLATEAU_STD = 0.12
+#: パワースペクトルの「高周波」帯（cycles/px。0.5 がナイキスト）。
+HF_BAND = (0.25, 0.5)
+#: ISO 帯（低 / 中 / 高）。FBDD Light の境界 800 と撮影時シャープのコアリング上限 1600 に合わせる。
+ISO_BAND_MID_MIN = 800
+ISO_BAND_HIGH_MIN = 1601
+
+
+def laplacian_var(gray: np.ndarray) -> float:
+    """輝度（8bit スケール）の Laplacian 分散。"""
+    return float(cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F).var())
+
+
+def tenengrad(gray: np.ndarray) -> float:
+    """Tenengrad: Sobel（ksize 3）勾配二乗 gx²+gy² の平均（8bit スケール）。"""
+    g = gray.astype(np.float32)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    return float((gx * gx + gy * gy).mean())
+
+
+def highfreq_energy_ratio(gray: np.ndarray, band: tuple[float, float] = HF_BAND) -> float:
+    """Hann 窓付き 2D パワースペクトルで、半径 band（cycles/px）のエネルギー / 全エネルギー（DC 除く）。"""
+    g = gray.astype(np.float64)
+    g = g - g.mean()
+    h, w = g.shape
+    window = np.outer(np.hanning(h), np.hanning(w))
+    power = np.abs(np.fft.fft2(g * window)) ** 2
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.fftfreq(w)[None, :]
+    radius = np.sqrt(fx * fx + fy * fy)
+    total = float(power[radius > 0].sum())
+    if total <= 0:
+        return float("nan")
+    in_band = (radius >= band[0]) & (radius <= band[1])
+    return float(power[in_band].sum() / total)
+
+
+def iso_band(iso: Any) -> str:
+    """ISO を low（<800）/ mid（800〜1600）/ high（>1600）/ unknown に分ける。"""
+    if not isinstance(iso, (int, float)) or not math.isfinite(float(iso)):
+        return "unknown"
+    if iso >= ISO_BAND_HIGH_MIN:
+        return "high"
+    if iso >= ISO_BAND_MID_MIN:
+        return "mid"
+    return "low"
+
+
+def edge_rise_width(
+    profile: np.ndarray,
+    step: float = EDGE_STEP_PX,
+    plateau_px: float = EDGE_PLATEAU_PX,
+    min_contrast: float = EDGE_MIN_CONTRAST,
+) -> float | None:
+    """1D エッジプロファイル（暗→明の向き）から 10–90% 立ち上がり幅（px）を返す。
+
+    プラトーは両端 ``plateau_px`` の中央値。正規化後、中央に最も近い 50% 交差から
+    左へ 10% を、右へ 90% を下回る/上回る最初の点を線形補間で探す。コントラスト不足・
+    向きが逆・交差が見つからない場合は None。
+    """
+    p = np.asarray(profile, dtype=np.float64)
+    m = max(2, int(round(plateau_px / step)))
+    if p.size < 2 * m + 3:
+        return None
+    lo = float(np.median(p[:m]))
+    hi = float(np.median(p[-m:]))
+    if hi - lo < min_contrast:
+        return None
+    q = (p - lo) / (hi - lo)
+    above = q >= 0.5
+    crossings = np.nonzero(above[1:] & ~above[:-1])[0]  # q[i] < .5 <= q[i+1]
+    if crossings.size == 0:
+        return None
+    mid = (p.size - 1) / 2.0
+    i50 = int(crossings[np.argmin(np.abs(crossings - mid))])
+
+    x10 = None
+    for i in range(i50, 0, -1):
+        if q[i - 1] <= 0.1 < q[i]:
+            x10 = (i - 1) + (0.1 - q[i - 1]) / (q[i] - q[i - 1])
+            break
+    x90 = None
+    for i in range(i50 + 1, p.size):
+        if q[i - 1] < 0.9 <= q[i]:
+            x90 = (i - 1) + (0.9 - q[i - 1]) / (q[i] - q[i - 1])
+            break
+    if x10 is None or x90 is None:
+        return None
+    return float((x90 - x10) * step)
+
+
+def sample_profiles(
+    gray: np.ndarray,
+    points: np.ndarray,
+    half: float = EDGE_HALF_PX,
+    step: float = EDGE_STEP_PX,
+    along: int = EDGE_ALONG,
+) -> np.ndarray:
+    """points（N×4: x, y, nx, ny。n は暗→明の単位法線）の法線方向プロファイル（N×L）。
+
+    双一次補間で、接線方向に ``along`` 本（1px 間隔）を平均する。画像外は境界値で埋める。
+    """
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 4)
+    t = np.arange(-half, half + step / 2, step, dtype=np.float32)
+    offsets = np.arange(along, dtype=np.float32) - (along - 1) / 2.0
+    x, y, nx, ny = (pts[:, i][:, None, None] for i in range(4))
+    # 接線 = 法線を 90° 回したもの (-ny, nx)
+    map_x = x + nx * t[None, None, :] - ny * offsets[None, :, None]
+    map_y = y + ny * t[None, None, :] + nx * offsets[None, :, None]
+    n, a, length = pts.shape[0], along, t.size
+    sampled = cv2.remap(
+        gray.astype(np.float32),
+        map_x.reshape(n, a * length).astype(np.float32),
+        map_y.reshape(n, a * length).astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return sampled.reshape(n, a, length).mean(axis=1)
+
+
+def find_edge_points(
+    gray: np.ndarray,
+    box: tuple[int, int, int, int],
+    max_points: int = 24,
+    cell: int = 16,
+    min_coherence: float = 0.8,
+) -> np.ndarray:
+    """box 内から ESF 計測に向く強い直線状エッジ点を選ぶ（N×4: x, y, nx, ny）。
+
+    σ1 ぼかし後の Sobel 勾配で、構造テンソルのコヒーレンス（直線性）が高い点を
+    ``cell`` px ごとに 1 点（勾配最大）拾い、プロファイルが計測可能（両側が平坦・
+    コントラスト十分）なものだけ勾配の強い順に ``max_points`` 点返す。
+    """
+    x0, y0, x1, y1 = box
+    margin = int(math.ceil(EDGE_HALF_PX)) + EDGE_ALONG
+    g = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.0)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    jxx = cv2.GaussianBlur(gx * gx, (0, 0), 2.0)
+    jyy = cv2.GaussianBlur(gy * gy, (0, 0), 2.0)
+    jxy = cv2.GaussianBlur(gx * gy, (0, 0), 2.0)
+    root = np.sqrt((jxx - jyy) ** 2 + 4 * jxy * jxy)
+    coherence = np.where(jxx + jyy > 1e-6, root / np.maximum(jxx + jyy, 1e-6), 0.0) ** 2
+    mag = np.sqrt(gx * gx + gy * gy)
+    h, w = gray.shape[:2]
+    cands: list[tuple[float, int, int]] = []
+    for cy in range(max(y0, margin), min(y1, h - margin), cell):
+        for cx in range(max(x0, margin), min(x1, w - margin), cell):
+            ys = slice(cy, min(cy + cell, y1, h - margin))
+            xs = slice(cx, min(cx + cell, x1, w - margin))
+            m = mag[ys, xs] * (coherence[ys, xs] >= min_coherence)
+            if m.size == 0 or float(m.max()) <= 0:
+                continue
+            iy, ix = np.unravel_index(int(np.argmax(m)), m.shape)
+            cands.append((float(m[iy, ix]), cx + int(ix), cy + int(iy)))
+    cands.sort(reverse=True)
+    if not cands:
+        return np.zeros((0, 4), dtype=np.float32)
+    pts = []
+    for _, px, py in cands:
+        norm = float(mag[py, px])
+        pts.append((px, py, gx[py, px] / norm, gy[py, px] / norm))
+    pts_arr = np.asarray(pts, dtype=np.float32)
+    profiles = sample_profiles(gray, pts_arr)
+    m = max(2, int(round(EDGE_PLATEAU_PX / EDGE_STEP_PX)))
+    keep = []
+    for index, prof in enumerate(profiles):
+        contrast = float(np.median(prof[-m:]) - np.median(prof[:m]))
+        if contrast < EDGE_MIN_CONTRAST:
+            continue
+        if max(prof[:m].std(), prof[-m:].std()) > EDGE_MAX_PLATEAU_STD * contrast:
+            continue
+        # 点そのものがエッジ上にあること（勾配の裾の点を拾わない）: 中央の値が 30〜70% 内
+        center = (float(prof[prof.size // 2]) - float(np.median(prof[:m]))) / contrast
+        if not 0.3 <= center <= 0.7:
+            continue
+        if edge_rise_width(prof) is None:
+            continue
+        keep.append(index)
+        if len(keep) >= max_points:
+            break
+    return pts_arr[keep]
+
+
+def roi_boxes(gray: np.ndarray, size: int, k: int = 3) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """ディテール ROI: σ1 ぼかし後 Laplacian 平均の上位 k ブロック（重ならない）+ 中央 + 左上隅。
+
+    ぼかしてから Laplacian を取るのは、高 ISO で画素ノイズのタイルを「ディテール」と誤認しないため。
+    隅は画像端から size/8 だけ内側（JPEG ブロック・ビネット境界を避ける）。
+    """
+    h, w = gray.shape[:2]
+    s = min(size, w, h)
+    lap = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.0), cv2.CV_32F))
+    integral = cv2.integral(lap)
+    step = max(1, s // 4)
+    scored = []
+    for y in range(0, h - s + 1, step):
+        for x in range(0, w - s + 1, step):
+            total = integral[y + s, x + s] - integral[y, x + s] - integral[y + s, x] + integral[y, x]
+            scored.append((float(total), x, y))
+    scored.sort(reverse=True)
+    boxes: list[tuple[str, tuple[int, int, int, int]]] = []
+    for _, x, y in scored:
+        if len(boxes) >= k:
+            break
+        if all(x + s <= bx0 or bx1 <= x or y + s <= by0 or by1 <= y for _, (bx0, by0, bx1, by1) in boxes):
+            boxes.append((f"detail{len(boxes) + 1}", (x, y, x + s, y + s)))
+    cx, cy = (w - s) // 2, (h - s) // 2
+    boxes.append(("center", (cx, cy, cx + s, cy + s)))
+    inset = s // 8
+    boxes.append(("corner", (inset, inset, inset + s, inset + s)))
+    return boxes
+
+
+def roi_shift(
+    reference: np.ndarray,
+    target: np.ndarray,
+    box: tuple[int, int, int, int],
+    margin: int = 32,
+) -> tuple[float, float, float]:
+    """box（reference 座標）周辺の位相相関で、target 側の平行移動 (dx, dy, response) を推定する。
+
+    target の内容が reference の (x+dx, y+dy) にある、という向き。
+    """
+    h, w = reference.shape[:2]
+    x0, y0, x1, y1 = box
+    x0, y0 = max(0, x0 - margin), max(0, y0 - margin)
+    x1, y1 = min(w, x1 + margin), min(h, y1 + margin)
+    a = reference[y0:y1, x0:x1].astype(np.float32)
+    b = target[y0:y1, x0:x1].astype(np.float32)
+    a = (a - a.mean()) / (a.std() + 1e-6)
+    b = (b - b.mean()) / (b.std() + 1e-6)
+    window = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
+    (dx, dy), response = cv2.phaseCorrelate(a, b, window)
+    return float(dx), float(dy), float(response)
+
+
+def shift_box(box: tuple[int, int, int, int], dx: float, dy: float, width: int, height: int) -> tuple[int, int, int, int]:
+    """box を (dx, dy) だけ動かし、画像内に収める（寸法は保つ）。"""
+    x0, y0, x1, y1 = box
+    s_w, s_h = x1 - x0, y1 - y0
+    nx0 = int(round(min(max(0, x0 + dx), width - s_w)))
+    ny0 = int(round(min(max(0, y0 + dy), height - s_h)))
+    return (nx0, ny0, nx0 + s_w, ny0 + s_h)
+
+
+def median_or_nan(values: Iterable[Any]) -> float:
+    vals = [float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))]
+    return statistics.median(vals) if vals else float("nan")
+
+
+def summarize_sharpness(
+    rows: list[dict[str, Any]],
+    keys: Iterable[str],
+    group_keys: tuple[str, ...] = ("variant", "mode"),
+) -> list[dict[str, Any]]:
+    """group_keys ごとに数値列の中央値（と件数）を出す。エラー行は除く。"""
+    keys = list(keys)
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("error"):
+            continue
+        groups.setdefault(tuple(str(row.get(k)) for k in group_keys), []).append(row)
+    out = []
+    for gkey, group in sorted(groups.items()):
+        item: dict[str, Any] = dict(zip(group_keys, gkey))
+        item["n"] = len(group)
+        for key in keys:
+            vals = [float(r[key]) for r in group if isinstance(r.get(key), (int, float)) and math.isfinite(float(r[key]))]
+            item[key] = statistics.median(vals) if vals else None
+            item[f"{key}_n"] = len(vals)
+        out.append(item)
+    return out
+
+
+# =============================================================================
 # I/O
 # =============================================================================
 
@@ -609,9 +907,22 @@ def worker_rawpy(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     capture_id = validate_capture_id(args.worker_rawpy)
     preview = args.worker_mode == "preview"
+    original_sharpen_params = engine._capture_sharpen_params
+
+    def no_capture_sharpen(long_edge: int, sharpness: float, iso: float | None) -> tuple[float, float, float]:
+        # 撮影時シャープだけを無効化する（gain=0 で _apply_tone_array が USM を飛ばす）。
+        # sharpness は ADJUSTMENT_RANGES で 0.8 未満にできないため、engine は変更せずここで差し替える。
+        sigma, _gain, threshold = original_sharpen_params(long_edge, sharpness, iso)
+        return sigma, 0.0, threshold
+
+    sharpen_patch = (
+        mock.patch.object(engine, "_capture_sharpen_params", no_capture_sharpen)
+        if args.worker_nosharp else contextlib.nullcontext()
+    )
     with mock.patch.object(config, "source_root", return_value=source_root), \
          mock.patch.object(engine, "OUTPUT_ROOT", out_dir), \
-         mock.patch.object(engine, "PREVIEW_ROOT", out_dir):
+         mock.patch.object(engine, "PREVIEW_ROOT", out_dir), \
+         sharpen_patch:
         kwargs: dict[str, Any] = {"preview": preview, "force": True}
         if preview:
             kwargs["max_edge"] = args.max_edge  # 明示しないと preview は 1600px に落ちる
@@ -628,6 +939,7 @@ def worker_rawpy(args: argparse.Namespace) -> None:
         "dark_scene": recipe.get("dark_scene"),
         "iso": recipe.get("iso"),
         "engine_version": engine.ENGINE_VERSION,
+        "capture_sharpen": not args.worker_nosharp,
     }, ensure_ascii=False, default=str))
 
 
@@ -657,8 +969,9 @@ class RunContext:
         self.log.append(line)
 
 
-def run_rawpy(ctx: RunContext, capture_id: str, mode: str) -> dict[str, Any]:
-    out_dir = ctx.out / "rawpy" / mode
+def run_rawpy(ctx: RunContext, capture_id: str, mode: str, *, nosharp: bool = False) -> dict[str, Any]:
+    # nosharp は params_hash が変わらず同名ファイルになるので、出力ディレクトリを分ける。
+    out_dir = ctx.out / ("rawpy_nosharp" if nosharp else "rawpy") / mode
     cmd = [
         sys.executable, str(Path(__file__).resolve()),
         "--source-root", str(ctx.source_root),
@@ -667,6 +980,8 @@ def run_rawpy(ctx: RunContext, capture_id: str, mode: str) -> dict[str, Any]:
         "--worker-out", str(out_dir),
         "--max-edge", str(ctx.max_edge),
     ]
+    if nosharp:
+        cmd.append("--worker-nosharp")
     res = run_timed(cmd)
     payload = res["payload"] or {}
     row: dict[str, Any] = {
@@ -688,17 +1003,26 @@ def run_rawpy(ctx: RunContext, capture_id: str, mode: str) -> dict[str, Any]:
     return row
 
 
-def run_coreimage(ctx: RunContext, capture_id: str, mode: str, lens: bool) -> dict[str, Any]:
+def run_coreimage(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    lens: bool,
+    *,
+    decoder_version: str = CI_DECODER_VERSION,
+    profile: str = "neutral",
+    variant: str | None = None,
+) -> dict[str, Any]:
     out_dir = ctx.out / "coreimage" / mode
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_lens" if lens else ""
+    suffix = f"_{variant}" if variant else ("_lens" if lens else "")
     output = out_dir / f"{capture_id}_{mode}{suffix}.jpg"
     request: dict[str, Any] = {
         "input": str(ctx.source_root / f"{capture_id}.ARW"),
         "output": str(output),
         "mode": mode,
-        "decoder_version": CI_DECODER_VERSION,
-        "settings": {"profile": "neutral", "lens_correction": lens},
+        "decoder_version": decoder_version,
+        "settings": {"profile": profile, "lens_correction": lens},
     }
     if mode == "preview":
         request["max_edge"] = ctx.max_edge
@@ -830,6 +1154,317 @@ METRIC_KEYS = (
 )
 
 
+# =============================================================================
+# 解像感（ピント甘さ）評価モード --sharpness
+# =============================================================================
+
+#: (variant, ラベル)。camera が基準。*_usm は CI 出力に rawpy と同じ後段仕上げ
+#: （engine._apply_tone_array = 撮影時シャープ込み）を Python で適用した派生。
+SHARPNESS_VARIANTS: tuple[tuple[str, str], ...] = (
+    ("camera", "camera JPEG"),
+    ("rawpy", "rawpy current (sharpen ON)"),
+    ("rawpy_nosharp", "rawpy sharpen OFF"),
+    ("ci_v9_l0", "CI neutral v9 lens OFF"),
+    ("ci_v9_l1", "CI neutral v9 lens ON"),
+    ("ci_v8_l0", "CI neutral v8 lens OFF"),
+    ("ci_v8_l1", "CI neutral v8 lens ON"),
+    ("ci_apple_v9_l1", "CI apple_default v9 lens ON"),
+    ("ci_v9_l1_usm", "CI v9 lens ON + rawpy finish"),
+    ("ci_v8_l0_usm", "CI v8 lens OFF + rawpy finish"),
+)
+SHARPNESS_LABELS = dict(SHARPNESS_VARIANTS)
+#: CLI を呼ぶバリアント: variant -> (decoder_version, profile, lens_correction)
+CI_SHARPNESS_REQUESTS: dict[str, tuple[str, str, bool]] = {
+    "ci_v9_l0": ("9", "neutral", False),
+    "ci_v9_l1": ("9", "neutral", True),
+    "ci_v8_l0": ("8", "neutral", False),
+    "ci_v8_l1": ("8", "neutral", True),
+    "ci_apple_v9_l1": ("9", "apple_default", True),
+}
+#: 派生バリアント: variant -> 元にする CI バリアント
+CI_USM_DERIVED: dict[str, str] = {"ci_v9_l1_usm": "ci_v9_l1", "ci_v8_l0_usm": "ci_v8_l0"}
+#: ROI 1 辺 = 出力長辺 × この比（preview 2400px で 240px、full 6000px で 600px = 同じ画角）。
+ROI_FRACTION = 0.1
+#: ROI の位相相関で採用する最小 response。これ未満・ずれが ROI/4 超は「位置合わせ不能」として除外。
+ROI_MIN_RESPONSE = 0.08
+
+SHARPNESS_KEYS = (
+    "lap_ratio_detail", "ten_ratio_detail", "hf_ratio_detail",
+    "lap_ratio_center", "ten_ratio_center", "lap_ratio_corner", "ten_ratio_corner",
+    "edge_width_px", "edge_width_ratio", "edge_n",
+    "flat_noise", "flat_noise_ratio", "roi_excluded",
+)
+
+
+def fit_to_target(rgb: np.ndarray, target: tuple[int, int]) -> tuple[np.ndarray, str]:
+    """各エンジンの縮小経路を評価対象に含めるため、再標本化は避けて寸法だけ合わせる。
+
+    2% 以内の差は中央クロップ / 端の複製で合わせる（"crop"）。それ以上違えば AREA で
+    リサイズし "resampled" を返す（比較の公平性が崩れるので記録する）。
+    """
+    tw, th = target
+    h, w = rgb.shape[:2]
+    if (w, h) == (tw, th):
+        return rgb, "exact"
+    if abs(w - tw) / tw <= 0.02 and abs(h - th) / th <= 0.02:
+        x0, y0 = max(0, (w - tw) // 2), max(0, (h - th) // 2)
+        out = rgb[y0:y0 + th, x0:x0 + tw]
+        pad_y, pad_x = th - out.shape[0], tw - out.shape[1]
+        if pad_y or pad_x:
+            out = np.pad(out, ((pad_y // 2, pad_y - pad_y // 2), (pad_x // 2, pad_x - pad_x // 2), (0, 0)), mode="edge")
+        return np.ascontiguousarray(out), "crop"
+    return resize_to(rgb, target), "resampled"
+
+
+def apply_rawpy_finish(rgb: np.ndarray, iso: Any) -> np.ndarray:
+    """CI 出力（8bit sRGB）へ rawpy 既定プリセットの後段トーン（撮影時シャープ込み）を適用する。
+
+    ロジックは複製せず ``engine._apply_tone_array`` をそのまま呼ぶ（brightness / contrast /
+    saturation / sharpness は DEFAULT_PRESET の値。shadow_lift はリサイズ前段の処理なので含めない）。
+    """
+    from local_raw import engine
+
+    adjustments = engine.resolve_adjustments(engine.DEFAULT_PRESET, None)
+    iso_value = float(iso) if isinstance(iso, (int, float)) else None
+    toned = engine._apply_tone_array(rgb.astype(np.float32) / 255.0, adjustments, iso=iso_value)
+    return np.rint(toned * 255.0).astype(np.uint8)
+
+
+def sharpness_capture(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    features: dict[str, Any],
+    category: str,
+) -> list[dict[str, Any]]:
+    """1 カット × 1 モードを全バリアントで現像し、解像感指標と等倍クロップシートを作る。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
+        jobs["rawpy_nosharp"] = pool.submit(run_rawpy, ctx, capture_id, mode, nosharp=True)
+        for variant, (decoder, profile, lens) in CI_SHARPNESS_REQUESTS.items():
+            jobs[variant] = pool.submit(
+                run_coreimage, ctx, capture_id, mode, lens,
+                decoder_version=decoder, profile=profile, variant=variant,
+            )
+        engine_rows = {name: future.result() for name, future in jobs.items()}
+
+    camera = read_rgb_upright(ctx.source_root / f"{capture_id}.JPG")
+    ch, cw = camera.shape[:2]
+    target = fit_size(cw, ch, ctx.max_edge) if mode == "preview" else (cw, ch)
+    images: dict[str, np.ndarray] = {"camera": resize_to(camera, target)}
+    rows_by_variant: dict[str, dict[str, Any]] = {"camera": {"fit": "camera"}}
+    for name, row in engine_rows.items():
+        row = dict(row)
+        if not row.get("error"):
+            src = read_rgb_upright(Path(row["output"]))
+            row["native_width"], row["native_height"] = src.shape[1], src.shape[0]
+            images[name], row["fit"] = fit_to_target(src, target)
+        rows_by_variant[name] = row
+    iso = features.get("iso")
+    for derived, base_name in CI_USM_DERIVED.items():
+        if base_name in images:
+            images[derived] = apply_rawpy_finish(images[base_name], iso)
+            rows_by_variant[derived] = {"fit": rows_by_variant[base_name].get("fit"), "derived_from": base_name}
+        else:
+            rows_by_variant[derived] = {"error": f"base variant {base_name} unavailable"}
+
+    grays = {name: cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) for name, rgb in images.items()}
+    cam_gray = grays["camera"]
+    roi_size = max(96, int(round(max(target) * ROI_FRACTION)))
+    boxes = roi_boxes(cam_gray, roi_size, k=3)
+    max_shift = roi_size / 4.0
+    edge_points = {
+        label: find_edge_points(cam_gray, box)
+        for label, box in boxes if label != "corner"
+    }
+    cam_profiles = {label: sample_profiles(cam_gray, pts) for label, pts in edge_points.items() if len(pts)}
+    cam_widths = {label: [edge_rise_width(p) for p in prof] for label, prof in cam_profiles.items()}
+
+    def roi_stats(gray: np.ndarray, box: tuple[int, int, int, int]) -> tuple[float, float, float]:
+        x0, y0, x1, y1 = box
+        patch = gray[y0:y1, x0:x1]
+        return laplacian_var(patch), tenengrad(patch), highfreq_energy_ratio(patch)
+
+    cam_roi = {label: roi_stats(cam_gray, box) for label, box in boxes}
+    cam_noise = flat_noise(np.clip(cam_gray, 0, 255).astype(np.uint8))
+
+    base = {
+        "capture_id": capture_id,
+        "mode": mode,
+        "category": category,
+        "iso": iso,
+        "iso_band": iso_band(iso),
+        "lens_model": features.get("lens_model"),
+        "focal_length": features.get("focal_length"),
+        "width": target[0],
+        "height": target[1],
+        "roi_size": roi_size,
+    }
+    shifted_boxes: dict[str, dict[str, tuple[int, int, int, int]]] = {}
+    rows: list[dict[str, Any]] = []
+    for variant, _label in SHARPNESS_VARIANTS:
+        row: dict[str, Any] = {**base, "variant": variant, **rows_by_variant.get(variant, {})}
+        if variant not in grays:
+            row.setdefault("error", "no image")
+            rows.append(row)
+            continue
+        gray = grays[variant]
+        per_label: dict[str, tuple[float, float, float]] = {}
+        widths: list[float] = []
+        width_ratios: list[float] = []
+        excluded = 0
+        shifted_boxes[variant] = {}
+        for label, box in boxes:
+            if variant == "camera":
+                dx = dy = 0.0
+                ok = True
+            else:
+                dx, dy, response = roi_shift(cam_gray, gray, box, margin=int(max_shift))
+                ok = response >= ROI_MIN_RESPONSE and math.hypot(dx, dy) <= max_shift
+            if not ok:
+                excluded += 1
+                continue
+            vbox = shift_box(box, dx, dy, target[0], target[1])
+            shifted_boxes[variant][label] = vbox
+            per_label[label] = roi_stats(gray, vbox)
+            pts = edge_points.get(label)
+            if pts is not None and len(pts):
+                moved = pts.copy()
+                moved[:, 0] += dx
+                moved[:, 1] += dy
+                for w_var, w_cam in zip((edge_rise_width(p) for p in sample_profiles(gray, moved)), cam_widths[label]):
+                    if w_var is not None:
+                        widths.append(w_var)
+                        if w_cam:
+                            width_ratios.append(w_var / w_cam)
+
+        def ratio(label_prefix: str, index: int) -> float:
+            vals = [
+                per_label[label][index] / cam_roi[label][index]
+                for label in per_label
+                if label.startswith(label_prefix) and cam_roi[label][index] > 0
+            ]
+            return median_or_nan(vals)
+
+        noise = flat_noise(np.clip(gray, 0, 255).astype(np.uint8))
+        row.update({
+            "lap_ratio_detail": ratio("detail", 0),
+            "ten_ratio_detail": ratio("detail", 1),
+            "hf_ratio_detail": ratio("detail", 2),
+            "lap_ratio_center": ratio("center", 0),
+            "ten_ratio_center": ratio("center", 1),
+            "lap_ratio_corner": ratio("corner", 0),
+            "ten_ratio_corner": ratio("corner", 1),
+            "lap_detail_abs": median_or_nan(v[0] for k, v in per_label.items() if k.startswith("detail")),
+            "ten_detail_abs": median_or_nan(v[1] for k, v in per_label.items() if k.startswith("detail")),
+            "hf_detail_abs": median_or_nan(v[2] for k, v in per_label.items() if k.startswith("detail")),
+            "edge_width_px": median_or_nan(widths),
+            "edge_width_ratio": median_or_nan(width_ratios),
+            "edge_n": len(widths),
+            "flat_noise": noise,
+            "flat_noise_ratio": noise / cam_noise if cam_noise and math.isfinite(cam_noise) else float("nan"),
+            "roi_excluded": excluded,
+        })
+        rows.append(row)
+
+    # --- 等倍クロップシート（EXIF 無し）: ROI ごとに 2 段 × 5 枚 ---
+    panel = min(roi_size, 320)
+    caption = f"{capture_id}  {mode} {target[0]}x{target[1]}  ISO {iso}  {features.get('lens_model')}  {features.get('focal_length')}mm"
+    for label in ("detail1", "detail2", "center", "corner"):
+        panels = []
+        for variant, vlabel in SHARPNESS_VARIANTS:
+            vbox = shifted_boxes.get(variant, {}).get(label)
+            if vbox is None:
+                crop = np.full((panel, panel, 3), 40, dtype=np.uint8)
+                vlabel = f"{vlabel} (n/a)"
+            else:
+                x0, y0, x1, y1 = vbox
+                ox, oy = x0 + (x1 - x0 - panel) // 2, y0 + (y1 - y0 - panel) // 2
+                crop = images[variant][oy:oy + panel, ox:ox + panel]
+            panels.append((vlabel, crop))
+        if not panels:
+            continue
+        top = labeled_row(panels[:5])
+        bottom = labeled_row(panels[5:])
+        width = max(top.shape[1], bottom.shape[1])
+        stacked = np.vstack([np.pad(r, ((0, 0), (0, width - r.shape[1]), (0, 0)), constant_values=24) for r in (top, bottom)])
+        sheet = labeled_row([("", stacked)], f"{caption}  ROI {label} 1:1 ({panel}px)")
+        save_plain_jpeg(sheet, ctx.out / "sheets" / f"{capture_id}_{mode}_{label}.jpg", quality=95)
+    return rows
+
+
+def sharpness_table_md(summary: list[dict[str, Any]], group_cols: tuple[str, ...]) -> str:
+    """summarize_sharpness の結果を Markdown 表にする（レポート転記用）。"""
+    cols = ("lap_ratio_detail", "ten_ratio_detail", "hf_ratio_detail", "lap_ratio_corner",
+            "edge_width_px", "edge_width_ratio", "flat_noise", "flat_noise_ratio")
+    head = "| " + " | ".join([*group_cols, "n", *cols]) + " |"
+    sep = "|" + "---|" * (len(group_cols) + 1 + len(cols))
+    lines = [head, sep]
+    for item in summary:
+        cells = [str(item.get(c)) for c in group_cols] + [str(item.get("n"))]
+        for c in cols:
+            v = item.get(c)
+            cells.append("—" if v is None else f"{v:.2f}")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def run_sharpness(
+    ctx: RunContext,
+    selection: list[dict[str, Any]],
+    features_by_id: dict[str, dict[str, Any]],
+    full_ids: list[str],
+) -> None:
+    rows: list[dict[str, Any]] = []
+    started = time.monotonic()
+    cat_by_id = {r["capture_id"]: r["category"] for r in selection}
+    jobs = [(r["capture_id"], "preview") for r in selection] + [(cid, "full") for cid in full_ids]
+    for index, (cid, mode) in enumerate(jobs, 1):
+        ctx.say(f"[sharpness] ({index}/{len(jobs)}) {cid} {mode}")
+        try:
+            new_rows = sharpness_capture(ctx, cid, mode, features_by_id[cid], cat_by_id.get(cid, "other"))
+            rows.extend(new_rows)
+            for r in new_rows:
+                if r.get("error"):
+                    ctx.say(f"  ERROR {r['variant']}: {str(r['error'])[:300]}")
+        except Exception as error:  # 1 カットの失敗で全体を止めない
+            rows.append({"capture_id": cid, "mode": mode, "variant": "harness", "error": f"{type(error).__name__}: {error}"})
+            ctx.say(f"  ERROR {type(error).__name__}: {error}")
+        # 途中経過も残す（長時間実行の中断に備える）
+        if index % 5 == 0 or index == len(jobs):
+            fields = sorted({k for r in rows for k in r}, key=lambda k: (k not in ("capture_id", "mode", "variant"), k))
+            with (ctx.out / "sharpness_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+    by_mode = summarize_sharpness(rows, SHARPNESS_KEYS, ("mode", "variant"))
+    by_band = summarize_sharpness(rows, SHARPNESS_KEYS, ("mode", "iso_band", "variant"))
+    errors = [r for r in rows if r.get("error")]
+    summary = {
+        "out": str(ctx.out),
+        "variants": dict(SHARPNESS_VARIANTS),
+        "ci_requests": {k: {"decoder_version": v[0], "profile": v[1], "lens_correction": v[2]} for k, v in CI_SHARPNESS_REQUESTS.items()},
+        "selection_count": len(selection),
+        "full_ids": full_ids,
+        "elapsed_total_s": time.monotonic() - started,
+        "errors": errors,
+        "by_mode": by_mode,
+        "by_mode_iso_band": by_band,
+    }
+    (ctx.out / "sharpness_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    (ctx.out / "sharpness_tables.md").write_text(
+        "## by mode\n\n" + sharpness_table_md(by_mode, ("mode", "variant"))
+        + "\n## by mode x ISO band\n\n" + sharpness_table_md(by_band, ("mode", "iso_band", "variant")),
+        encoding="utf-8")
+    (ctx.out / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    ctx.say(f"[sharpness] 完了: {ctx.out}（エラー {len(errors)} 件）")
+
+
 def environment_info(ctx: RunContext, probe: Path | None) -> dict[str, Any]:
     from local_raw import engine
 
@@ -874,6 +1509,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--full-limit", type=int, default=5, help="--full で回すカット数（0 で全件）")
     parser.add_argument("--full-ids", nargs="*", help="--full で回すカットを明示する")
     parser.add_argument("--no-lens", action="store_true", help="Core Image + lens を省く")
+    parser.add_argument(
+        "--sharpness", action="store_true",
+        help="解像感（ピント甘さ）評価モード: 10 バリアントのシャープネス/エッジ幅/ノイズと等倍クロップを出す",
+    )
     parser.add_argument("--dry-run", action="store_true", help="選定だけ行って終了する")
     parser.add_argument(
         "--features-cache", type=Path,
@@ -885,6 +1524,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--worker-noop", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-mode", choices=["preview", "full"], default="preview", help=argparse.SUPPRESS)
     parser.add_argument("--worker-out", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-nosharp", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if args.worker_noop:
@@ -962,6 +1602,16 @@ def main(argv: list[str] | None = None) -> None:
 
     if not ctx.cli.is_file():
         raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {ctx.cli}")
+
+    if args.sharpness:
+        full_ids = [validate_capture_id(c) for c in (args.full_ids or [])] if args.full else []
+        if args.full and not args.full_ids:
+            full_ids = full_subset(selection, args.full_limit if args.full_limit > 0 else len(selection))
+        unknown = sorted(set(full_ids) - set(features_by_id))
+        if unknown:
+            raise SystemExit(f"--full-ids は選定済みのカットから指定してください: {', '.join(unknown)}")
+        run_sharpness(ctx, selection, features_by_id, full_ids)
+        return
 
     env = environment_info(ctx, source_root / f"{selection[0]['capture_id']}.ARW")
     # 基準値: rawpy ワーカーの常駐コスト、Core Image の初回起動（計測から除外するウォームアップ）
