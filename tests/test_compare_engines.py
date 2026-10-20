@@ -731,3 +731,27 @@ class NightMeasureTests(unittest.TestCase):
         md = ce.table_md([{"mode": "preview", "variant": "a", "n": 2, "x": 1.23456, "y": None, "z": 3}], ("mode", "variant"), ("x", "y", "z"))
         self.assertIn("| preview | a | 2 | 1.235 | — | 3 |", md)
         self.assertEqual(ce.magnify(np.zeros((3, 4, 3), np.uint8), 2).shape, (6, 8, 3))
+
+
+class VariantTableConsistencyTests(unittest.TestCase):
+    """バリアント表・CLI リクエスト表・シートの組が食い違わないこと（表を増やしたときの取りこぼし防止）。"""
+
+    def test_highlight_variants_have_requests_and_sheet_groups(self):
+        names = [v for v, _ in ce.HIGHLIGHT_VARIANTS]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(ce.CI_HIGHLIGHT_REQUESTS), set(names) - {"camera", "rawpy"})
+        # シートの組は比較用に同じバリアント（rawpy）を複数の組に置いてよい
+        grouped = {v for group in ce.HIGHLIGHT_SHEET_GROUPS for v in group}
+        self.assertEqual(grouped, set(names))
+        for decoder, profile, _lens, overrides in ce.CI_HIGHLIGHT_REQUESTS.values():
+            self.assertIn(decoder, ("8", "9"))
+            self.assertIn(profile, ("neutral", "apple_default"))
+            self.assertTrue(set(overrides) <= {"exposure_ev", "extended_dynamic_range", "boost_amount", "boost_shadow_amount",
+                                               "luminance_noise_reduction", "color_noise_reduction", "sharpness_amount", "detail_amount"})
+
+    def test_night_variants_have_requests_and_sheet_groups(self):
+        names = [v for v, _ in ce.NIGHT_VARIANTS]
+        self.assertEqual(set(ce.CI_NIGHT_REQUESTS), set(names) - {"camera", "rawpy"})
+        grouped = [v for group in ce.NIGHT_SHEET_GROUPS for v in group]
+        self.assertEqual(sorted(grouped), sorted(names))
+        self.assertTrue(set(ce.NIGHT_SCALE_VARIANTS) <= set(ce.CI_SCALE_REQUESTS))

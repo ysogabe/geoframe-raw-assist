@@ -2501,6 +2501,9 @@ HIGHLIGHT_VARIANTS: tuple[tuple[str, str], ...] = (
     ("ci_apple_bshadow05", "CI apple boostShadow 0.5"),
     ("ci_apple_bshadow13", "CI apple boostShadow 1.3"),
     ("ci_apple_ev-07", "CI apple exposure -0.7EV"),
+    ("ci_apple_ev-10", "CI apple exposure -1.0EV"),
+    ("ci_apple_ev-15", "CI apple exposure -1.5EV"),
+    ("ci_apple_boost06_ev-07", "CI apple boost 0.6 + -0.7EV"),
 )
 HIGHLIGHT_LABELS = dict(HIGHLIGHT_VARIANTS)
 CI_HIGHLIGHT_REQUESTS: dict[str, tuple[str, str, bool, dict[str, float]]] = {
@@ -2514,11 +2517,15 @@ CI_HIGHLIGHT_REQUESTS: dict[str, tuple[str, str, bool, dict[str, float]]] = {
     "ci_apple_bshadow05": ("9", "apple_default", True, {"boost_shadow_amount": 0.5}),
     "ci_apple_bshadow13": ("9", "apple_default", True, {"boost_shadow_amount": 1.3}),
     "ci_apple_ev-07": ("9", "apple_default", True, {"exposure_ev": -0.7}),
+    "ci_apple_ev-10": ("9", "apple_default", True, {"exposure_ev": -1.0}),
+    "ci_apple_ev-15": ("9", "apple_default", True, {"exposure_ev": -1.5}),
+    "ci_apple_boost06_ev-07": ("9", "apple_default", True, {"boost_amount": 0.6, "exposure_ev": -0.7}),
 }
 HIGHLIGHT_SHEET_GROUPS: tuple[tuple[str, ...], ...] = (
     ("camera", "rawpy", "ci_v9_l1", "ci_apple_v9_l1"),
     ("ci_apple_edr05", "ci_apple_edr10", "ci_apple_edr20", "ci_apple_ev-07"),
     ("ci_apple_boost06", "ci_apple_boost08", "ci_apple_bshadow05", "ci_apple_bshadow13"),
+    ("rawpy", "ci_apple_ev-10", "ci_apple_ev-15", "ci_apple_boost06_ev-07"),
 )
 HIGHLIGHT_KEYS = (
     "clip_r", "clip_g", "clip_b", "clip_any", "clip_all", "magenta_rate", "band_pixels",

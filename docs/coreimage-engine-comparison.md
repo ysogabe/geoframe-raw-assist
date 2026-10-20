@@ -743,30 +743,126 @@ DSC07404_preview_sky_g2、DSC07407_preview_{sky_g1,corner_g1,sky_g3,corner_g2}�
 5. `src-tauri/src/coreimage.rs` の現在の既定（`PROFILE="neutral"`、decoder 9、preview 2400）は、まさに白点が出る組み合わせである。
    #72 で `apple_default` に切り替えるまでは、試験経路のプレビューに白点が出る。
 
-## 13. 逆光・ハイライトの評価（Issue #71、設計書 §4.2）— 道具のみ、実データは未実施
+## 13. 逆光・ハイライトの評価（Issue #71、設計書 §4.2）
 
-- `--highlight` モードを追加した: バリアントは camera / rawpy / neutral v9 / `apple_default` v9 / EDR 0.5, 1.0, 2.0 /
-  boost 0.6, 0.8 / boostShadow 0.5, 1.3 / exposure −0.7EV（いずれも #79 の上書き）。指標は `channel_clip_rates`（R/G/B/any/all の
-  255 画素率）、`clip_boundary_magenta_rate`（クリップ領域の外側 3px の帯で R > G かつ B > G かつ min(R,B) − G ≥ 0.06 の画素率）、
-  §3 の輝度・ΔE。シートはカメラ JPEG のクリップ境界が最も多い 200px 箱の 2 倍拡大（4 バリアントずつ）。
-- **逆光サンプル（`/Volumes/Backup/100MSDCF`、DSC04473 / DSC04607 ほか）は作業開始時・終了前ともマウントされておらず、
-  実データの評価は未実施。** 動作確認として星空の DSC07402 で 1 回回した（`work/engine-comparison/highlight-smoke/`。クリップ率 0.06%
-  の夜景なので結果に意味は無い。エラー 0）。
-- `CIHighlightShadowAdjust.highlightAmount`（後段）は CLI に入れておらず**未評価**。
-- 再実行コマンド（ボリュームが戻ったとき）:
-  `.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF --captures DSC04473 DSC04607 DSC04532 DSC04759 --highlight --full --full-ids DSC04473 DSC04607 --out work/engine-comparison/highlight1`
+### 13.1 目的
+
+ADR 0002「ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない（`apple_default` では未評価）」を実データで確かめ、
+`highlight_recovery` の置き換えレバー（#81）の候補＝`extendedDynamicRangeAmount` / `boostAmount` / `boostShadowAmount` / `exposure`
+を #79 の個別上書きで掃引して、白飛び率・黒つぶれ率・輝度平均の表を残す。後段 `CIHighlightShadowAdjust.highlightAmount` は
+CLI に入れていないため**未評価**（#72 / #73 の後段 CIFilter 連鎖と一緒に扱う）。
+
+### 13.2 手順（再現コマンド）
+
+```sh
+.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF \
+  --captures DSC04473 DSC04607 DSC04532 DSC04705 DSC04579 DSC04604 DSC04754 DSC04432 DSC04746 DSC04462 \
+  --highlight --full --full-ids DSC04473 DSC04607 DSC04705 --out work/engine-comparison/highlight1
+```
+
+- 実行: 2026-10-20、§1 と同じマシン。10 カット × preview（2400px）+ 3 カット × full。所要約 7 分、エラー 0。
+  出力は `work/engine-comparison/highlight1/`（`highlight_metrics.csv` / `highlight_summary.json` / `highlight_tables.md` /
+  `sheets/<ID>_<mode>_clip_g{1..4}.jpg`（カメラ JPEG のクリップ境界が最も多い 200px 箱を 2 倍、4 バリアントずつ）/ `<ID>_<mode>_overview.jpg`）。
+- **サンプルの選定**: §2 の逆光 2 カット（DSC04473 / DSC04607）に、選定用特徴量キャッシュ（`work/engine-comparison/features.json`、
+  カメラ JPEG 1/8 縮小の輝度 >0.95 の割合 `bright_frac`）の上位から、同じ分の連写を避けて 8 カットを足した。
+  いずれも Sigma 10-18mm か 30mm で、位置情報は使っていない。
+
+  | ID | ISO | 選定理由（bright_frac / 暗部） | 内容（目視） |
+  |---|---|---|---|
+  | DSC04473 | 200 | §2 の逆光（白 11.4% / 暗部 12.2%） | 曇天の空抜けの木立・遊歩道 |
+  | DSC04607 | 100 | §2 の逆光（白 10.4% / 暗部 11.3%） | 明るい曇り空と雲 |
+  | DSC04532 | 100 | §2 の逆光・薄明（白 10.4% / 暗部 32.4%、0.4s） | 夜明けの空（橙〜桃色の雲） |
+  | DSC04705 | 100 | bright_frac 最大 40.0% | 青空と白い雲（昼） |
+  | DSC04579 | 100 | bright_frac 27.0%（6 時台） | 朝の明るい空 |
+  | DSC04604 | 100 | bright_frac 19.7%（7 時台） | 朝の空 |
+  | DSC04754 | 100 | bright_frac 16.7%、10mm | 曇天の空を含む風景 |
+  | DSC04432 | 2000 | `backlit`（白 15.7% / 暗部 15.8%）、室内 | 窓からの強い光 |
+  | DSC04746 | 100 | `backlit`（白 11.0% / 暗部 10.7%） | 空抜けの前景 |
+  | DSC04462 | 400 | bright_frac 10.8%、30mm | 明るい屋外 |
+
+### 13.3 バリアント
+
+camera / rawpy（現行、既定プリセット `neutral_recovery` = `highlight_recovery` 60 → rawpy `HighlightMode.Blend`）/ `ci_v9_l1`（neutral）/
+`ci_apple_v9_l1`（基本路線）と、`apple_default` v9 lens ON に #79 の上書きを 1 つずつ加えたもの: `extended_dynamic_range` 0.5 / 1.0 / 2.0、
+`boost_amount` 0.6 / 0.8、`boost_shadow_amount` 0.5 / 1.3、`exposure_ev` −0.7 / −1.0 / −1.5、`boost_amount` 0.6 + `exposure_ev` −0.7。
+`applied` で確認した `apple_default` の既定（ISO 100〜2000）は EDR 0・boost 1.0・boostShadow 0.9。
+
+### 13.4 指標の定義
+
+| 指標 | 定義 |
+|---|---|
+| clip_any / clip_r / clip_g / clip_b / clip_all | いずれか / 各チャンネル / 全チャンネルが 255 の画素率（`channel_clip_rates`） |
+| magenta_rate | クリップ領域（いずれかのチャンネル 255）の外側 3px の帯で、R > G かつ B > G かつ min(R,B) − G ≥ 0.06 の画素率（`clip_boundary_magenta_rate`）。帯が無ければ NaN |
+| clip_low / mean_luma / p99_luma / camera_luma_diff / camera_delta_e76 | §3 と同じ |
+
+### 13.5 集計（preview 2400px、10 カット中央値。括弧は最小..最大）
+
+| variant | clip_any | clip_b | clip_r | clip_all | magenta_rate | clip_low | camera_luma_diff | ΔE76 |
+|---|---|---|---|---|---|---|---|---|
+| camera | 3.0% (0.02..28.2) | 2.2% | 2.4% | 1.3% | 0 | 0 | — | — |
+| rawpy（現行、highlight_recovery 60） | **1.8% (1.2..25.1)** | 1.6% | 1.5% | 1.2% | 0 (0..0.070) | 1.0% | **−0.128 (−0.248..+0.015)** | 14.2 |
+| ci_v9_l1（neutral） | 13.4% | 11.5% | 7.1% | 3.0% | 0 | 0.1% | +0.013 | 5.9 |
+| **ci_apple_v9_l1** | **13.0% (7.1..38.4)** | 11.0% | 6.3% | 1.7% | 0 (0..0.004) | 0.4% | **+0.008 (−0.066..+0.023)** | 5.7 |
+| ci_apple_edr05 / edr10 / edr20 | 16.5% / 18.0% / 20.5% | 13.9 / 15.0 / 17.1% | 14.3 / 15.6 / 18.1% | 11.6 / 12.7 / 14.9% | 0 | 0.4% | +0.010 / +0.012 / +0.015 | 5.9 / 6.1 / 6.6 |
+| ci_apple_boost06 / boost08 | 11.4% / 12.0% | 9.6 / 10.1% | 3.7 / 4.7% | 0.8 / 1.0% | 0 | 0.4% | −0.016 / −0.004 | 5.5 / 5.4 |
+| ci_apple_bshadow05 / bshadow13 | 13.0% / 13.0% | 11.0% | 6.3% | 1.7% | 0 | 1.0 / 0.4% | 0.000 / +0.009 | 6.0 / 5.7 |
+| ci_apple_ev-07 | 3.6% (0..18.7) | 0.8% | 2.6% | 0.4% | 0 | 1.0% | −0.067 (−0.131..−0.053) | 7.8 |
+| ci_apple_ev-10 | 2.2% (0..10.5) | 0.4% | 1.8% | 0.2% | 0 | 1.4% | −0.098 | 11.0 |
+| ci_apple_ev-15 | 0.05% (0..6.1) | 0.05% | 0.05% | 0.04% | 0 | 2.2% | −0.150 | 16.5 |
+| ci_apple_boost06_ev-07 | 2.7% (0..15.9) | 0.6% | 2.0% | 0.2% | 0 | 0.8% | −0.090 | 10.1 |
+
+カット単位（preview）で白飛び率が rawpy 以下 / カメラ JPEG 以下だったカット数: `ci_apple_v9_l1` **2 / 0**（10 中）、ev −0.7 で 8 / 8、
+ev −1.0 で 8 / 9、ev −1.5 で 10 / 10、boost 0.6 + ev −0.7 で 8 / 9。
+
+full（3 カット中央値）: camera clip_any 1.8%、rawpy 1.6%（luma −0.111）、`ci_apple_v9_l1` 9.6%（+0.002）、ev −0.7 0.1%（−0.069）、
+ev −1.0 0.04%、boost 0.6 + ev −0.7 0.04%（−0.088）、EDR 1.0 15.0%。magenta_rate は full で rawpy 0.0001、`apple_default` 0.003、
+ev −1.0 0.002（いずれも帯の 1% 未満）。
+
+### 13.6 目視所見（2 倍拡大クロップ、EXIF なし）
+
+見たシート: `highlight1/sheets/` の DSC04473_preview_{overview,clip_g1}、DSC04473_full_clip_g4、DSC04607_preview_{clip_g1,clip_g3}、
+DSC04532_preview_clip_g1、DSC04705_preview_{clip_g1,clip_g4}、DSC04579_preview_clip_g2、DSC04432_preview_clip_g1（9 枚。ブラインドではない）。
+
+- **rawpy 現行は全体が暗い**（カメラ比 −0.13、最大 −0.25）。`neutral_recovery` の `highlight_recovery` 60（Blend）で空の階調は残る
+  （DSC04705 の青空と雲、DSC04607 の雲の筋）が、画面全体の明るさを下げて得ているもの。
+- **`apple_default` はカメラ JPEG と同じ明るさだが、明るい空の青チャンネルが先に飽和する**（clip_b がカメラの 5 倍）。DSC04607 /
+  DSC04579 の空は CI ではほぼ白一色になり、カメラ JPEG に残る薄い階調（雲の濃淡）が無い。DSC04473 の空抜けも CI は白く抜ける
+  （カメラは薄い灰色が残る）。
+- **偽色（マゼンタ）**: rawpy は DSC04532（夜明けの空）で地平線付近の白飛び境界に黄〜マゼンタの縁（magenta_rate 0.070）、DSC04432
+  （室内の窓）で白飛び部に黄〜シアンの虹状の帯が出る。**`apple_default` ではどちらも出ない**（0.000〜0.004）。DSC04532 の桃色の雲の
+  階調は CI がカメラ JPEG に最も近い。
+- **EDR（0.5〜2.0）は白飛びを増やす**（全チャンネル同時のクリップが 1.7% → 12〜15%）。SDR 出力では EDR はハイライトを明るく押し上げる
+  方向に働き、保持ではない。boost 0.6 / 0.8 と boostShadow は白飛び率をほとんど動かさない（boost 0.6 で 13.0 → 11.4%）。
+- **`exposure` を下げると白飛びはカメラ JPEG 並み以下になる**（−0.7EV で 3.6%、−1.0EV で 2.2%）。DSC04705 の青空は −1.0EV で雲の形、
+  −1.5EV で rawpy 並みの階調が戻る。ただし画面全体が暗くなる（−0.7EV でカメラ比 −0.067、−1.5EV で −0.150 ≒ rawpy 現行と同じ暗さ）。
+  ハイライトだけを落とすレバーは今回の CLI の範囲には無い。
+
+### 13.7 結論（#71 の判断材料）
+
+1. **白飛び率は、既定のままの `apple_default` が rawpy 現行より明確に多い**（中央値 13.0% vs 1.8%、10 カット中 8 で多い）。
+   ただし rawpy 現行は `highlight_recovery` 60 と auto_bright の組み合わせで画面全体がカメラ比 −0.13 暗く、「同じ明るさでの比較」ではない。
+   `apple_default` はカメラ JPEG と同じ明るさ（+0.008）で、カメラ JPEG（3.0%）よりも白飛びが多い。差の主体は明るい空の青チャンネル。
+2. **偽色は `apple_default` の方が少ない**（rawpy の白飛び境界のマゼンタ・虹状の帯は CI には出ない）。ADR 0002 の判断材料表の
+   「境界にマゼンタの偽色が出るカットあり」は CI では解消する。
+3. **`highlight_recovery` の置き換えレバーとして使えるのは `exposure`（負方向）だけ**。EDR は逆効果、boost / boostShadow は効かない。
+   `exposure` −0.7〜−1.0EV で白飛び率はカメラ JPEG・rawpy 現行以下になるが、全体が暗くなるので、`shadow_lift` / `brightness`
+   （#73 の後段）で中間調を戻す組み合わせが要る。後段の `CIHighlightShadowAdjust.highlightAmount` は未評価で、これが入れば
+   「明るさを保ったままハイライトだけ落とす」レバーになりうる【推測】。
 
 ## 14. ADR 0002 の移行条件への判定案と後続 Issue への示唆
 
 | 条件 | 判定案 | 根拠 |
 |---|---|---|
 | 夜景・星空・長秒で破綻が無い。`apple_default` の NR が星を消さない | **満たしている（このサンプルの範囲で）** | §10.7: 星の残存率 ≥ 0.991（rawpy 以上）、空の輝度差 ±0.016、空ノイズ・色ノイズは rawpy 以下、塗りつぶし・白点なし（目視・数値）。限界は §15 |
-| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない | **未確認のまま**（道具は用意、サンプル未マウント） | §13 |
+| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない | **条件付き**: 偽色は rawpy より少ない（満たす）。白飛び率は既定の `apple_default` では rawpy 現行より多く（13.0% vs 1.8%、カメラ JPEG 3.0%）、`exposure` を −0.7〜−1.0EV 下げたときだけ rawpy 以下になる。「明るさを保ったまま白飛びを減らす」レバーは未評価（`CIHighlightShadowAdjust`） | §13.7 |
 
 後続 Issue への示唆:
 
-- **#81（`highlight_recovery` の置き換え）**: 実データは無いが、`apple_default` の EDR は ISO 3200/6400 で既定 0 なので「EDR を
-  上げる」レバーは既定からの追加になる。`--highlight` の掃引表（EDR / boost / boostShadow / exposure）がそのまま材料になる。
+- **#81（`highlight_recovery` の置き換え）**: §13 の掃引で、**EDR は白飛びを増やし（逆効果）、boost / boostShadow はほぼ効かず、
+  効くのは `exposure` の負方向だけ**。救済系プリセット（`highlight_rescue` 90 / `backlit_rescue` 80 / `sunset_glow` 70）は
+  設計書 §3.1 の案 (iii)「`exposure` を下げ `shadow_lift` を上げる」構成が現実的で、案 (i)（EDR / boost の再定義）は採れない。
+  案 (ii) の `CIHighlightShadowAdjust.highlightAmount` は未評価のまま（#72 / #73 で後段が CLI に入ったときに `--highlight` に足す）。
+  rawpy 現行の白飛びの少なさは画面全体が −0.13 暗いことで得ているので、置き換え後のプリセット値は「同じ明るさで比べる」こと。
 - **#83（ブラケット合成）**: §11 のとおり露出差の保存とレンズ補正の幾何一致（カメラ内補正と 1 px 以内）は満たす。合成品質は同一構図の
   サンプルが無く未確認。CI sRGB tiff16 → OpenCV Mertens の足場（B3）は `bracket_pair_eval` として動いており、原寸対応と
   実ブラケットでの確認が残る。
@@ -791,5 +887,7 @@ DSC07404_preview_sky_g2、DSC07407_preview_{sky_g1,corner_g1,sky_g3,corner_g2}�
 - 白点の scale 掃引は 2 カット、原因の切り分けは「どの設定で消えるか」までで、デコーダ内部の機構は分からない（非公開）。
   OS 更新で変わりうる（#75 の対象）。
 - 露出差の保存は三脚ブラケットが無く、動いたペア 1 組と別構図 2 組での確認。合成品質は未確認。
-- ハイライト（#71）は実データ未実施。`CIHighlightShadowAdjust` は未評価。
-- 目視は 15 枚のシート・2 倍拡大パッチ（160px）で、ブラインド比較ではない。
+- ハイライト（#71）は 10 カット（うち 8 は明るい空が主役。太陽そのもの・夜景の点光源・夕景の太陽は無い）。`CIHighlightShadowAdjust` は未評価。
+  rawpy と `apple_default` の白飛び率は明るさが違う状態での比較で、同じ明るさに揃えた比較（CI の `exposure` −1.5EV が rawpy 現行と
+  ほぼ同じ暗さになる）は exposure 行で代用している。
+- 目視は §10 で 15 枚、§13 で 9 枚のシート（2 倍拡大パッチ）で、ブラインド比較ではない。
