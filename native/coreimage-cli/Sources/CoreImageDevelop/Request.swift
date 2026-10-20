@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.2.0"
+public let cliVersion = "0.3.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {
@@ -82,6 +82,8 @@ public struct DevelopRequest: Equatable {
     /// nil = そのファイルで使える最新の decoderVersion。
     public var decoderVersion: String?
     public var settings: Settings
+    /// アプリのスライダー 9 キー（Issue #73）。nil = 指定なし（0.2.0 と同じ処理）。
+    public var adjustments: Adjustments? = nil
 }
 
 /// stdin の JSON を構文・値域だけで検証する（ファイルシステムには触れない）。
@@ -103,6 +105,7 @@ public enum RequestParser {
 
     static let topLevelKeys: Set<String> = [
         "input", "output", "mode", "max_edge", "format", "jpeg_quality", "output_color_space", "decoder_version", "settings",
+        "adjustments",
     ]
     static let settingsKeys: Set<String> = [
         "exposure_ev", "neutral_temperature", "neutral_tint", "lens_correction", "profile",
@@ -208,6 +211,10 @@ public enum RequestParser {
         }
 
         let settings = try parseSettings(dict["settings"])
+        let adjustments = try parseAdjustments(dict["adjustments"])
+        if adjustments != nil {
+            try validateAdjustmentsAgainstSettings(dict["settings"], settings)
+        }
 
         guard input.pathExtension.lowercased() == "arw" else {
             throw DevelopError(.invalidRequest, "input must be a Sony .ARW file")
@@ -218,7 +225,8 @@ public enum RequestParser {
 
         return DevelopRequest(
             input: input, output: output, mode: mode, maxEdge: maxEdge, format: format,
-            jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings
+            jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings,
+            adjustments: adjustments
         )
     }
 
@@ -271,6 +279,59 @@ public enum RequestParser {
             entry.set(&settings, amount)
         }
         return settings
+    }
+
+    /// `adjustments`（省略可・null は省略と同じ）。指定時は 9 キーすべて必須、未知キー・値域外・型違いは
+    /// INVALID_REQUEST（クランプしない）。bool は数値として受けない。
+    static func parseAdjustments(_ raw: Any?) throws -> Adjustments? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        guard let dict = raw as? [String: Any] else {
+            throw DevelopError(.invalidRequest, "adjustments must be a JSON object")
+        }
+        try rejectUnknownKeys(dict, allowed: Adjustments.allKeys, context: "adjustments")
+        let missing = Adjustments.allKeys.filter { key in
+            guard let value = dict[key] else { return true }
+            return value is NSNull
+        }.sorted()
+        if !missing.isEmpty {
+            throw DevelopError(.invalidRequest, "adjustments requires all 9 keys; missing: \(missing.joined(separator: ", "))")
+        }
+        var adjustments = Adjustments()
+        for entry in Adjustments.numericKeys {
+            guard let value = number(dict[entry.key]!), entry.range.contains(value) else {
+                throw DevelopError(
+                    .invalidRequest,
+                    "adjustments.\(entry.key) must be a number in \(entry.range.lowerBound)...\(entry.range.upperBound)"
+                )
+            }
+            entry.set(&adjustments, value)
+        }
+        guard let string = dict["noise_reduction"] as? String, let mode = NoiseReduction(rawValue: string) else {
+            throw DevelopError(.invalidRequest, "adjustments.noise_reduction must be \"off\", \"light\" or \"full\"")
+        }
+        adjustments.noiseReduction = mode
+        return adjustments
+    }
+
+    /// `adjustments` 指定時の settings との整合（設計書 §4.1）。
+    /// - profile は apple_default のみ（写像が apple_default の既定値基準のため。省略時の neutral も不可）
+    /// - settings.exposure_ev / neutral_temperature / neutral_tint は**値に関わらず指定自体**を拒否（null は省略扱い）
+    /// - 個別上書き 7 キーは同時指定可（adjustments の写像の後に適用される）
+    static func validateAdjustmentsAgainstSettings(_ rawSettings: Any?, _ settings: Settings) throws {
+        guard settings.profile == .appleDefault else {
+            throw DevelopError(.invalidRequest, "adjustments requires settings.profile \"apple_default\"")
+        }
+        guard let dict = rawSettings as? [String: Any] else { return }
+        let conflicting = ["exposure_ev", "neutral_temperature", "neutral_tint"].filter { key in
+            guard let value = dict[key] else { return false }
+            return !(value is NSNull)
+        }
+        if !conflicting.isEmpty {
+            throw DevelopError(
+                .invalidRequest,
+                "adjustments cannot be combined with settings.\(conflicting.joined(separator: ", settings."))"
+            )
+        }
     }
 
     static func rejectUnknownKeys(_ dict: [String: Any], allowed: Set<String>, context: String) throws {

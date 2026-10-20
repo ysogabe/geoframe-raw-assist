@@ -127,4 +127,74 @@ final class SmokeTests: XCTestCase {
         // 元 ARW には GPS があるが、出力には書かない。
         XCTAssertNil(props[kCGImagePropertyGPSDictionary as String])
     }
+
+    // MARK: adjustments（CLI 0.3.0、Issue #73）
+
+    private func adjustmentsRequest(_ input: String, _ output: URL, settings extra: String = "", _ adjustments: String) -> String {
+        """
+        {"input":"\(input)","output":"\(output.path)","mode":"preview","max_edge":600,"decoder_version":"9",
+         "settings":{"profile":"apple_default","lens_correction":true\(extra)},"adjustments":\(adjustments)}
+        """
+    }
+
+    static let identityAdjustments = #"{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":60,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}"#
+
+    func testAdjustmentsReportDefaultsPostAndIgnored() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        let output = directory.appendingPathComponent("adj.jpg")
+        let adjustments = #"{"exposure":0.5,"wb_temp":30,"shadow_lift":15,"highlight_recovery":60,"brightness":1.1,"contrast":1.03,"saturation":1.02,"sharpness":1.4,"noise_reduction":"full"}"#
+        let response = try run(adjustmentsRequest(input, output, adjustments))
+        let report = try XCTUnwrap(response.adjustments_applied)
+        XCTAssertEqual(report.ignored, ["highlight_recovery"])
+        XCTAssertEqual(report.guards, [])
+        XCTAssertEqual(response.applied.profile, "apple_default")
+        XCTAssertEqual(response.applied.exposure, 0.5, accuracy: 1e-6)
+        // wb_temp > 0 は K を上げる（暖色側）。tint は既定のまま。
+        XCTAssertGreaterThan(response.applied.neutral_temperature, report.defaults.neutral_temperature)
+        XCTAssertEqual(response.applied.neutral_tint, report.defaults.neutral_tint, accuracy: 1e-4)
+        XCTAssertEqual(report.post.wb.k0, report.defaults.neutral_temperature)
+        // sharpness > 1 はデコーダ内シャープを既定のまま、増分を USM で足す。
+        XCTAssertEqual(response.applied.sharpness_amount, report.defaults.sharpness_amount, accuracy: 1e-6)
+        XCTAssertGreaterThan(report.post.usm.gain, 0)
+        XCTAssertEqual(report.post.usm.long_edge, 600)
+        // full は既定より強い NR。
+        XCTAssertGreaterThan(response.applied.luminance_noise_reduction_amount, report.defaults.luminance_noise_reduction_amount)
+        XCTAssertGreaterThanOrEqual(response.applied.color_noise_reduction_amount, 0.3 - 1e-6)
+        XCTAssertEqual(report.post.shadow_lift, 0.15, accuracy: 1e-12)
+        XCTAssertEqual(report.post.noise_reduction, "full")
+        XCTAssertTrue(encodeJSONLine(response).contains("\"adjustments_applied\":{"))
+    }
+
+    func testIdentityAdjustmentsKeepDecoderDefaults() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        let plain = try run("""
+        {"input":"\(input)","output":"\(directory.appendingPathComponent("plain.jpg").path)","mode":"preview","max_edge":600,
+         "decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true}}
+        """)
+        XCTAssertNil(plain.adjustments_applied)
+        let identity = try run(adjustmentsRequest(input, directory.appendingPathComponent("identity.jpg"), Self.identityAdjustments))
+        let report = try XCTUnwrap(identity.adjustments_applied)
+        // 恒等の adjustments は filter に何も書かない → applied は既定リクエストと同じ。
+        XCTAssertEqual(encodeJSONLine(identity.applied), encodeJSONLine(plain.applied))
+        XCTAssertEqual(report.defaults.sharpness_amount, plain.applied.sharpness_amount)
+        XCTAssertEqual(report.defaults.luminance_noise_reduction_amount, plain.applied.luminance_noise_reduction_amount)
+        XCTAssertEqual(report.defaults.neutral_temperature, plain.applied.neutral_temperature)
+        XCTAssertEqual(report.post.usm.gain, 0)
+    }
+
+    func testWhiteDotGuardFiresOnlyWithAdjustments() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        let overrides = #","luminance_noise_reduction":0,"sharpness_amount":0"#
+        let guarded = try run(adjustmentsRequest(input, directory.appendingPathComponent("guard.jpg"), settings: overrides, Self.identityAdjustments))
+        XCTAssertEqual(guarded.adjustments_applied?.guards, ["white_dot_sharpness_floor"])
+        XCTAssertEqual(guarded.applied.sharpness_amount, 0.1, accuracy: 1e-6)
+        XCTAssertEqual(guarded.applied.luminance_noise_reduction_amount, 0)
+        // adjustments 無しの評価用リクエストには触れない（白点を意図的に再現できること）。
+        let raw = try run("""
+        {"input":"\(input)","output":"\(directory.appendingPathComponent("noguard.jpg").path)","mode":"preview","max_edge":600,
+         "decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true\(overrides)}}
+        """)
+        XCTAssertEqual(raw.applied.sharpness_amount, 0)
+        XCTAssertNil(raw.adjustments_applied)
+    }
 }

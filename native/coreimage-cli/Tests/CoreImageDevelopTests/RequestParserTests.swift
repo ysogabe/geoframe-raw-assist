@@ -367,3 +367,129 @@ final class WriterTests: XCTestCase {
         XCTAssertFalse(line.contains("\n"))
     }
 }
+
+/// `adjustments`（CLI 0.3.0、設計書 §4.1）の解析・値域・排他。
+final class AdjustmentsRequestParserTests: XCTestCase {
+    static let base = #""input":"/a/x.ARW","output":"/b/o.jpg","mode":"preview","decoder_version":"9""#
+    static let appleDefault = #""settings":{"profile":"apple_default","lens_correction":true}"#
+    static let fullAdjustments: [String: String] = [
+        "exposure": "0.5", "wb_temp": "-20", "shadow_lift": "15", "highlight_recovery": "60", "brightness": "1.1",
+        "contrast": "1.03", "saturation": "1.02", "sharpness": "1.04", "noise_reduction": "\"full\"",
+    ]
+
+    private func adjustmentsJSON(_ overrides: [String: String?] = [:]) -> String {
+        var entries = Self.fullAdjustments
+        for (key, value) in overrides {
+            entries[key] = value
+        }
+        let body = entries.keys.sorted().map { "\"\($0)\":\(entries[$0]!)" }.joined(separator: ",")
+        return "{\(body)}"
+    }
+
+    private func request(adjustments: String, settings: String = appleDefault) -> String {
+        "{\(Self.base),\(settings),\"adjustments\":\(adjustments)}"
+    }
+
+    private func parse(_ json: String) throws -> DevelopRequest {
+        try RequestParser.parse(Data(json.utf8))
+    }
+
+    private func assertInvalid(_ json: String, contains fragment: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try parse(json), file: file, line: line) { error in
+            XCTAssertEqual((error as? DevelopError)?.code, .invalidRequest, file: file, line: line)
+            let message = (error as? DevelopError)?.message ?? ""
+            XCTAssertTrue(message.contains(fragment), "message: \(message)", file: file, line: line)
+        }
+    }
+
+    func testFullAdjustmentsAreParsed() throws {
+        let request = try parse(request(adjustments: adjustmentsJSON()))
+        let adjustments = try XCTUnwrap(request.adjustments)
+        XCTAssertEqual(adjustments, Adjustments(
+            exposure: 0.5, wbTemp: -20, shadowLift: 15, highlightRecovery: 60, brightness: 1.1,
+            contrast: 1.03, saturation: 1.02, sharpness: 1.04, noiseReduction: .full
+        ))
+        XCTAssertEqual(request.settings.profile, .appleDefault)
+    }
+
+    func testAdjustmentsAreOptionalAndNullMeansOmitted() throws {
+        XCTAssertNil(try parse("{\(Self.base),\(Self.appleDefault)}").adjustments)
+        XCTAssertNil(try parse("{\(Self.base),\(Self.appleDefault),\"adjustments\":null}").adjustments)
+        // 既定リクエスト（adjustments 無し）は neutral のままでよい（0.2.0 と同じ）。
+        XCTAssertNil(try parse("{\(Self.base)}").adjustments)
+    }
+
+    func testAllNineKeysAreRequired() {
+        for key in Self.fullAdjustments.keys {
+            var entries = Self.fullAdjustments
+            entries.removeValue(forKey: key)
+            let body = entries.keys.sorted().map { "\"\($0)\":\(entries[$0]!)" }.joined(separator: ",")
+            assertInvalid(request(adjustments: "{\(body)}"), contains: "missing: \(key)")
+            assertInvalid(request(adjustments: adjustmentsJSON([key: "null"])), contains: "missing: \(key)")
+        }
+        assertInvalid(request(adjustments: "{}"), contains: "requires all 9 keys")
+    }
+
+    func testUnknownKeyAndShapeAreRejected() {
+        assertInvalid(request(adjustments: adjustmentsJSON(["vibrance": "1"])), contains: "unknown adjustments key(s): vibrance")
+        assertInvalid(request(adjustments: "[]"), contains: "adjustments must be a JSON object")
+        assertInvalid(request(adjustments: "1"), contains: "adjustments must be a JSON object")
+    }
+
+    func testRangesAreCheckedWithoutClamping() throws {
+        // 境界値は通る。
+        let low = adjustmentsJSON([
+            "exposure": "-2", "wb_temp": "-100", "shadow_lift": "0", "highlight_recovery": "0", "brightness": "0.7",
+            "contrast": "0.8", "saturation": "0", "sharpness": "0.8", "noise_reduction": "\"off\"",
+        ])
+        XCTAssertNoThrow(try parse(request(adjustments: low)))
+        let high = adjustmentsJSON([
+            "exposure": "2", "wb_temp": "100", "shadow_lift": "100", "highlight_recovery": "100", "brightness": "1.4",
+            "contrast": "1.4", "saturation": "1.5", "sharpness": "1.6", "noise_reduction": "\"light\"",
+        ])
+        XCTAssertNoThrow(try parse(request(adjustments: high)))
+        // 範囲外はクランプせず拒否。
+        let outside: [(String, String)] = [
+            ("exposure", "2.01"), ("exposure", "-2.5"), ("wb_temp", "101"), ("shadow_lift", "-1"),
+            ("highlight_recovery", "100.5"), ("brightness", "0.69"), ("contrast", "1.5"), ("saturation", "-0.1"),
+            ("sharpness", "0.79"), ("sharpness", "1.61"),
+        ]
+        for (key, value) in outside {
+            assertInvalid(request(adjustments: adjustmentsJSON([key: value])), contains: "adjustments.\(key) must be a number")
+        }
+    }
+
+    func testTypesAreStrict() {
+        assertInvalid(request(adjustments: adjustmentsJSON(["exposure": "true"])), contains: "adjustments.exposure")
+        assertInvalid(request(adjustments: adjustmentsJSON(["contrast": "\"1\""])), contains: "adjustments.contrast")
+        assertInvalid(request(adjustments: adjustmentsJSON(["noise_reduction": "\"medium\""])), contains: "noise_reduction")
+        assertInvalid(request(adjustments: adjustmentsJSON(["noise_reduction": "1"])), contains: "noise_reduction")
+    }
+
+    func testAdjustmentsRequireAppleDefaultProfile() {
+        assertInvalid(request(adjustments: adjustmentsJSON(), settings: #""settings":{"profile":"neutral"}"#), contains: "apple_default")
+        // settings 省略 = neutral なので不可。
+        assertInvalid("{\(Self.base),\"adjustments\":\(adjustmentsJSON())}", contains: "apple_default")
+        assertInvalid(request(adjustments: adjustmentsJSON(), settings: #""settings":{"lens_correction":true}"#), contains: "apple_default")
+    }
+
+    func testAdjustmentsAreExclusiveWithExposureAndWhiteBalanceSettings() throws {
+        // 値に関わらず指定自体が排他（0 でも不可）。null は省略扱いで通る。
+        for (key, value) in [("exposure_ev", "0"), ("exposure_ev", "0.5"), ("neutral_temperature", "5200"), ("neutral_tint", "0")] {
+            let settings = "\"settings\":{\"profile\":\"apple_default\",\"\(key)\":\(value)}"
+            assertInvalid(request(adjustments: adjustmentsJSON(), settings: settings), contains: "cannot be combined with settings.\(key)")
+        }
+        let nulls = #""settings":{"profile":"apple_default","exposure_ev":null,"neutral_temperature":null,"neutral_tint":null}"#
+        XCTAssertNotNil(try parse(request(adjustments: adjustmentsJSON(), settings: nulls)).adjustments)
+        // adjustments が無ければ従来どおり指定できる。
+        XCTAssertEqual(try parse("{\(Self.base),\"settings\":{\"profile\":\"apple_default\",\"exposure_ev\":0.5}}").settings.exposureEV, 0.5)
+    }
+
+    func testIndividualOverridesCanBeCombined() throws {
+        let settings = #""settings":{"profile":"apple_default","luminance_noise_reduction":0,"sharpness_amount":0}"#
+        let request = try parse(request(adjustments: adjustmentsJSON(), settings: settings))
+        XCTAssertNotNil(request.adjustments)
+        XCTAssertEqual(request.settings.luminanceNoiseReduction, 0)
+        XCTAssertEqual(request.settings.sharpnessAmount, 0)
+    }
+}

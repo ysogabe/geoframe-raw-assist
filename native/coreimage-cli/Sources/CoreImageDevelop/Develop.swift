@@ -70,6 +70,70 @@ public struct SuccessResponse: Encodable {
     public let elapsed_ms: ElapsedMS
     public let applied: Applied
     public let source: SourceInfo
+    /// `adjustments` 指定時だけ値を持つ（Issue #73）。nil のときはキー自体を出さない（synthesized Encodable は
+    /// Optional を encodeIfPresent で書く）。既定リクエストの応答は 0.2.0 と同じキー集合のまま。
+    public var adjustments_applied: AdjustmentsApplied? = nil
+}
+
+/// `adjustments` をどう解釈したか（応答のトップレベル `adjustments_applied`。設計書 §4.2）。
+/// `applied` は変えない（最終的に filter から読み戻した値はそちらに載る）。
+public struct AdjustmentsApplied: Encodable {
+    /// profile 適用直後・adjustments 適用前に filter から読み戻した値（= apple_default の既定値）。
+    public struct Defaults: Encodable {
+        public let sharpness_amount: Double
+        public let luminance_noise_reduction_amount: Double
+        public let color_noise_reduction_amount: Double
+        public let neutral_temperature: Double
+        public let neutral_tint: Double
+    }
+
+    public struct USM: Encodable {
+        public let sigma: Double
+        public let gain: Double
+        public let coring: Double
+        public let long_edge: Int
+        /// 撮影 ISO。不明なら null（キーは常に出す）。
+        public let iso: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case sigma, gain, coring, long_edge, iso
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(sigma, forKey: .sigma)
+            try container.encode(gain, forKey: .gain)
+            try container.encode(coring, forKey: .coring)
+            try container.encode(long_edge, forKey: .long_edge)
+            try container.encode(iso, forKey: .iso)
+        }
+    }
+
+    public struct WB: Encodable {
+        /// 基準の色温度（profile 適用後の読み戻し = 撮影時 WB）。
+        public let k0: Double
+        /// 実際に掛けた mired の変化量（1e6/K − 1e6/K0。wb_temp > 0 で負 = 暖色側）。
+        public let mired_shift: Double
+        public let mired_per_unit: Double
+    }
+
+    /// 後段に実際に使った値。
+    public struct Post: Encodable {
+        public let shadow_lift: Double
+        public let brightness: Double
+        public let contrast: Double
+        public let saturation: Double
+        public let usm: USM
+        public let wb: WB
+        public let noise_reduction: String
+    }
+
+    public let defaults: Defaults
+    public let post: Post
+    /// 受理したが効かせなかったキー（現状 `highlight_recovery` 固定。代替は #81）。
+    public let ignored: [String]
+    /// 発動したガード（例: `white_dot_sharpness_floor`）。
+    public let guards: [String]
 }
 
 public struct ErrorBody: Encodable {
@@ -166,10 +230,65 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     filter.isDraftModeEnabled = false
 
     applyProfile(request.settings, to: filter)
-    applyOverrides(request.settings, to: filter)
 
-    guard let image = filter.outputImage else {
+    // adjustments 指定時だけ、設計書 §3.2 の手順 3〜6 と 8 を挟む。無ければ 0.2.0 と同じ処理（素通し）。
+    var adjustmentsPlan: AdjustmentsDecoderPlan?
+    var guards: [String] = []
+    if let adjustments = request.adjustments {
+        let defaults = readDefaults(filter)
+        adjustmentsPlan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
+        applyOverrides(request.settings, to: filter)
+        // 白点ガード: 白点ガード ＞ 明示の settings.* ＞ adjustments の写像 ＞ profile（§4.2 の優先順位）。
+        if WhiteDotGuard.needsGuard(
+            luminanceNoiseReduction: filter.luminanceNoiseReductionAmount,
+            sharpness: filter.sharpnessAmount,
+            scaleFactor: filter.scaleFactor
+        ) {
+            filter.sharpnessAmount = max(filter.sharpnessAmount, WhiteDotGuard.sharpnessFloor)
+            guards.append(WhiteDotGuard.name)
+        }
+    } else {
+        applyOverrides(request.settings, to: filter)
+    }
+
+    guard let decoded = filter.outputImage else {
         throw DevelopError(.renderFailed, "CIRAWFilter produced no output image")
+    }
+    var image = decoded
+    var adjustmentsApplied: AdjustmentsApplied?
+    if let adjustments = request.adjustments, let plan = adjustmentsPlan {
+        let decodedExtent = decoded.extent.integral
+        let longEdge = Int(max(decodedExtent.width, decodedExtent.height))
+        let iso = isoSpeed(from: filter.properties)
+        let base = captureSharpenBase(longEdge: longEdge, iso: iso.map(Double.init))
+        let params = PostChainParameters(
+            lift: adjustments.shadowLift / 100.0,
+            brightness: adjustments.brightness,
+            contrast: adjustments.contrast,
+            saturation: adjustments.saturation,
+            usmSigma: base.sigma,
+            usmGain: usmGainForCoreImage(sharpness: adjustments.sharpness, base: base),
+            usmCoring: base.coring
+        )
+        image = try PostChain.apply(decoded, params)
+        adjustmentsApplied = AdjustmentsApplied(
+            defaults: plan.defaults.encodable,
+            post: AdjustmentsApplied.Post(
+                shadow_lift: params.lift,
+                brightness: params.brightness,
+                contrast: params.contrast,
+                saturation: params.saturation,
+                usm: AdjustmentsApplied.USM(
+                    sigma: params.usmSigma, gain: params.usmGain, coring: params.usmCoring, long_edge: longEdge, iso: iso
+                ),
+                wb: AdjustmentsApplied.WB(
+                    k0: plan.defaults.neutralTemperature, mired_shift: plan.miredShift, mired_per_unit: WhiteBalanceMapping.miredPerUnit
+                ),
+                noise_reduction: adjustments.noiseReduction.rawValue
+            ),
+            ignored: Adjustments.ignoredKeys,
+            guards: guards
+        )
     }
     let extent = image.extent.integral
     guard extent.width > 0, extent.height > 0, extent.width.isFinite, extent.height.isFinite else {
@@ -200,7 +319,7 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     let properties = filter.properties
     let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
     let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
-    let iso = (exif?[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber])?.first?.intValue
+    let iso = isoSpeed(from: properties)
     let sourceOrientation = filter.orientation.rawValue
 
     let applied = Applied(
@@ -253,8 +372,83 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
             native_width: Int(native.width),
             native_height: Int(native.height),
             orientation: sourceOrientation
-        )
+        ),
+        adjustments_applied: adjustmentsApplied
     )
+}
+
+/// filter.properties の EXIF から撮影 ISO を読む（無ければ nil）。
+func isoSpeed(from properties: [AnyHashable: Any]) -> Int? {
+    let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
+    return (exif?[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber])?.first?.intValue
+}
+
+/// profile 適用直後に filter から読み戻した既定値（§3.2 手順 3）。
+public struct DecoderDefaults: Equatable {
+    public var sharpnessAmount: Double
+    public var luminanceNoiseReduction: Double
+    public var colorNoiseReduction: Double
+    public var neutralTemperature: Double
+    public var neutralTint: Double
+
+    var encodable: AdjustmentsApplied.Defaults {
+        AdjustmentsApplied.Defaults(
+            sharpness_amount: sharpnessAmount,
+            luminance_noise_reduction_amount: luminanceNoiseReduction,
+            color_noise_reduction_amount: colorNoiseReduction,
+            neutral_temperature: neutralTemperature,
+            neutral_tint: neutralTint
+        )
+    }
+}
+
+func readDefaults(_ filter: CIRAWFilter) -> DecoderDefaults {
+    DecoderDefaults(
+        sharpnessAmount: readable(filter.sharpnessAmount),
+        luminanceNoiseReduction: readable(filter.luminanceNoiseReductionAmount),
+        colorNoiseReduction: readable(filter.colorNoiseReductionAmount),
+        neutralTemperature: readable(filter.neutralTemperature),
+        neutralTint: readable(filter.neutralTint)
+    )
+}
+
+/// `applyAdjustmentsDecoder` が filter に書いた内容の要約（応答用）。
+struct AdjustmentsDecoderPlan {
+    let defaults: DecoderDefaults
+    let miredShift: Double
+}
+
+/// adjustments のデコード段（exposure / wb_temp / sharpness ≤ 1 / noise_reduction）を filter へ書く（§3.3）。
+/// 既定値と同じになる指定（wb_temp 0、sharpness 1.0、noise_reduction light）は filter に書かない
+/// （Float ↔ K の往復などで「変えていないのに画が変わる」ことを避けるため）。highlight_recovery は no-op。
+func applyAdjustmentsDecoder(_ adjustments: Adjustments, defaults: DecoderDefaults, to filter: CIRAWFilter) -> AdjustmentsDecoderPlan {
+    // exposure: CIRAWFilter.exposure（EV、1:1）。settings.exposure_ev とは排他なので profile 側は 0。
+    filter.exposure = Float(adjustments.exposure)
+
+    // wb_temp: 撮影時 WB の K を mired でずらす。tint は触らない。
+    var miredShift = 0.0
+    if adjustments.wbTemp != 0 {
+        let shifted = WhiteBalanceMapping.shift(k0: defaults.neutralTemperature, wbTemp: adjustments.wbTemp)
+        filter.neutralTemperature = Float(shifted.kelvin)
+        miredShift = shifted.miredShift
+    }
+
+    // sharpness ≤ 1: デコーダ内シャープを既定 × s に弱める。> 1 は既定のまま（増分は後段 USM）。
+    if let amount = decoderSharpnessAmount(sharpness: adjustments.sharpness, defaultAmount: defaults.sharpnessAmount) {
+        filter.sharpnessAmount = Float(amount)
+    }
+
+    // noise_reduction: off / light（既定のまま）/ full。
+    let nr = NoiseReductionMapping.amounts(
+        adjustments.noiseReduction,
+        defaultLuminance: defaults.luminanceNoiseReduction,
+        defaultColor: defaults.colorNoiseReduction
+    )
+    if let luminance = nr.luminance { filter.luminanceNoiseReductionAmount = Float(luminance) }
+    if let color = nr.color { filter.colorNoiseReductionAmount = Float(color) }
+
+    // highlight_recovery: 受理するが効かせない（オーナー判断 2。代替は #81）。
+    return AdjustmentsDecoderPlan(defaults: defaults, miredShift: miredShift)
 }
 
 /// profile / settings を filter へ設定する（decoderVersion 設定後に呼ぶこと）。
@@ -449,6 +643,7 @@ public struct Capabilities: Encodable {
     public let probe_input: String?
     public let output_formats: [String: String]
     public let profiles: [String]
+    public let adjustments: AdjustmentsCapability
 
     public init(probe: URL?) {
         let models = CIRAWFilter.supportedCameraModels
@@ -468,5 +663,15 @@ public struct Capabilities: Encodable {
             "tiff16": "16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\"",
         ]
         profiles = [Profile.neutral.rawValue, Profile.appleDefault.rawValue]
+        adjustments = AdjustmentsCapability()
     }
+}
+
+/// `--capabilities` の `adjustments`（設計書 §4.2）。
+public struct AdjustmentsCapability: Encodable {
+    public let supported = true
+    public let ignored = Adjustments.ignoredKeys
+    public let post_kernel = "metal"
+
+    public init() {}
 }
