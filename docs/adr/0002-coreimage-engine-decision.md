@@ -1,6 +1,6 @@
 # ADR 0002: Core Image（CIRAWFilter）エンジンの採否
 
-- ステータス: 提案（オーナー承認待ち）
+- ステータス: 承認（2026-10-20、オーナーの目視判断による。当初の提案から決定を改訂。経緯は末尾の「決定の経緯」）
 - 関連: Issue #65、[ADR 0001](0001-coreimage-raw-poc.md)（CLI の設計）、
   [比較レポート](../coreimage-engine-comparison.md)、[パラメータ対応表](../coreimage-parameter-mapping.md)
 
@@ -26,6 +26,15 @@ Issue #65 では、Swift / Core Image の CLI を Tauri から子プロセスと
 | 調整パラメータ | 現行 Adjustments すべてに対応 | 露出・WB(K/tint) のみ直接。他は後段 CIFilter での再実装が必要 | rawpy 優位 |
 | 依存・配布 | Python + .venv + localhost サーバ | OS 標準のフレームワークのみ（macOS 14 以上） | Core Image 優位（macOS 限定） |
 | 夜景・星空 | 未評価 | 未評価 | **サンプル 0 件で判断不能** |
+| 目視（オーナー、等倍クロップ） | 偽色・色ノイズが多い | 好ましい（`apple_default` v9 lens ON） | Core Image 優位（下記） |
+
+### オーナーの目視評価（2026-10-20）
+
+比較レポート §9 の等倍クロップシート（`work/engine-comparison/sharpness1/sheets/`。日中・薄明の屋外と室内のカットのみで、
+夜景・星空は含まない）をオーナーが確認し、**rawpy は偽色・色ノイズが多く、Core Image の方が好ましい**と判断した。
+基本路線とする設定は **CI `apple_default`・decoder 9・レンズ補正 ON**（比較レポートのバリアント名 `ci_apple_v9_l1`）。
+これは数値指標ではなく目視による評価だが、§9 の数値（エッジ幅比 preview 0.95 / 原寸 0.84、ノイズ比 preview 1.02 / 原寸 0.81。
+rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 
 ### 解像感（ピント甘さ）についての要点
 
@@ -40,43 +49,59 @@ Issue #65 では、Swift / Core Image の CLI を Tauri から子プロセスと
   エンジン置き換えよりはるかに小さい変更で効く可能性があり、先に試す価値がある。
   FullSizeViewer が 1600px プレビューを引き伸ばす問題はエンジンと独立した UI の課題。
 
-## 決定（提案）
+## 決定
 
-**現時点では現行エンジン（rawpy）を置き換えない。Core Image は「試験経路」として残し、
-条件を満たしたら段階的に採用範囲を広げる。**
+**Core Image（`apple_default`・decoder 9・レンズ補正 ON）を現像エンジンの基本路線とし、rawpy から段階的に移行する。
+移行の条件（下記）を満たすまでは、本番の現像は rawpy のまま維持する。**
 
-1. 本番の現像（preview / full、プリセット、Adjustments、書き出し）は引き続き rawpy で行う。
-2. Core Image 経路（PR1・PR2）は `GEOFRAME_COREIMAGE_EXPERIMENT=1` のフラグ付きで残す。既定では表示しない。
-3. 次の段階として、**プレビュー（一覧・比較用の軽量現像）を Core Image に置き換えること**を第一候補にする。
-   速度・メモリの差が最も効き、調整パラメータが不要な用途であるため。
-4. Core Image で使う設定は、decoder 9 の平滑化と白点ノイズの原因が分かるまで **decoder 8 を明示的に固定**して基準にする。
-   見た目の仕上げは「neutral + 現行と同じ撮影時シャープ」か「apple_default」の 2 案を候補として並べ、
-   後者を採るなら OS 更新ごとの回帰比較（比較ハーネスの再実行）を前提にする。
-5. ピント甘さへの対策は、エンジン置き換えとは切り離して、まず **rawpy の原寸の撮影時シャープ強度の再調整**を行う。
+1. 基本設定は CIRAWFilter の `apple_default` profile（デコーダ内のシャープ・NR は既定値）、decoder 9、レンズ補正 ON とする。
+   neutral profile（特に decoder 9 の neutral）は原寸で甘く、preview で白点ノイズが出るため本番の基本設定には使わない
+   （白点ノイズは `apple_default` では出ないことを比較レポート §9.6 で確認済み）。
+2. 移行は「プレビュー（一覧・比較用の軽量現像）→ 原寸・書き出し」の順に進める。プレビューは調整パラメータが不要で、
+   速度・メモリの差が最も効くため先に置き換える。原寸・書き出しは Adjustments の対応が揃ってから置き換える。
+3. 移行が終わるまでは、プリセット・Adjustments・書き出し・PSO・ブラケット合成・星景は rawpy で行う。
+   Core Image 経路は当面 `GEOFRAME_COREIMAGE_EXPERIMENT=1` のフラグ付きのまま残し、段階ごとに既定へ切り替える。
+4. `apple_default` の内部パラメータは非公開で OS 更新で変わりうるため、**OS 更新ごとに比較ハーネス
+   （`scripts/compare_engines.py`、`--sharpness` を含む）を再実行して回帰を確認する**ことを常設の運用とする。
+5. rawpy の原寸の撮影時シャープ再調整（当初の提案でピント甘さ対策の第一手としていたもの）は、主対策から外す。
+   移行完了までの暫定改善として必要なら行う（優先度は低）。
 
 ### 置き換えに進む条件
 
-- decoder 9 の平滑化・白点ノイズの原因が分かる、または decoder 8 / apple_default で解像感が rawpy 現行以上であることを再確認している。
-- 夜景・星空・長秒のサンプルで、破綻（ノイズの塗りつぶし、星の消失、色かぶり）が無いことを確認している。
-- 使う範囲の Adjustments（少なくとも exposure / wb_temp / shadow_lift / saturation / sharpness）について、
-  後段処理を含めて現行と同等の結果になる対応が実装・検証されている。
-- macOS 14 / 15 で decoder 9 が使えること、出力が一致することを確認している。
+| 条件 | 状態 |
+|---|---|
+| 解像感が rawpy 現行以上（`apple_default` v9 lens ON） | **満たしている**（比較レポート §9：エッジ幅比 preview 0.95 / 原寸 0.84、rawpy 現行 1.05 / 1.16） |
+| 夜景・星空・長秒のサンプルで破綻（ノイズの塗りつぶし、星の消失、色かぶり）が無い。`apple_default` の NR が星を消さないことを特に確認する | 未確認（最重要） |
+| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない（`apple_default` では未評価。比較レポート §8） | 未確認 |
+| 使う範囲の Adjustments（少なくとも exposure / wb_temp / shadow_lift / saturation / sharpness）について、後段処理を含めて現行と同等の結果になる対応が実装・検証されている（原寸・書き出しの置き換えの条件。プレビューには不要） | 未着手 |
+| macOS 14 / 15 で decoder 9 と `apple_default` が使え、出力が同等である（decoder 9 は必須の依存になった） | 未確認 |
+| OS 更新時の回帰比較の手順が文書化されている | 未着手 |
 
 ## 理由
 
-- 速度とメモリの差は大きく、明るさとノイズの点でもカメラ JPEG に近い。採用の動機としては十分ある。
-- 一方で、原因不明の平滑化があり、夜景・星空（このアプリの重要な被写体）は未評価で、
-  Adjustments の大半が未対応である。今置き換えると、品質と機能の両方で後退する恐れがある。
-- Python エンジンを残せば、既存の機能（プリセット、PSO、ブラケット合成、星景）に影響を与えずに検証を続けられる。
+- 速度（2〜5 倍）とメモリ（約 1/8）の差が大きく、明るさ・ノイズ・解像感（`apple_default`）でカメラ JPEG に近い。
+- オーナーの目視で、rawpy の偽色・色ノイズに対して Core Image の画が好ましいと判断された。
+- 一方で、夜景・星空（このアプリの重要な被写体）は未評価で、Adjustments の大半が未対応である。
+  一度に置き換えると品質と機能の両方で後退する恐れがあるため、条件付きで段階的に移行し、それまでは rawpy を残す。
+
+## 決定の経緯
+
+当初（提案時）は「rawpy を置き換えず、Core Image は試験経路として残す。Core Image を使う場合は decoder 8 を固定し、
+『neutral + 現行と同じ撮影時シャープ』と『apple_default』の 2 案を並べる。ピント甘さはまず rawpy の原寸シャープ再調整で対処する」
+としていた。2026-10-20 にオーナーが等倍クロップを目視し、`apple_default` v9 lens ON を基本路線とすることを決めたため、
+上記の決定に改訂した。decoder 8 固定の理由（decoder 9 neutral の平滑化と白点ノイズ）は `apple_default` には当てはまらない。
 
 ## 後続 Issue の案
 
-採否が承認されたら、次を Issue として立てる。
+優先度順。オーナーの了承後に Issue として立てる。
 
-1. decoder 9 の平滑化（neutral）と、レンズ補正 ON の preview での白点ノイズの原因調査（decoder 8 との比較、ほかのパラメータの影響）。
-2. rawpy の原寸の撮影時シャープ強度の再調整（カメラ比 16% 太いエッジの解消。`engine.SHARPEN_*` を比較ハーネスの `--sharpness` で before/after 比較。ENGINE_VERSION 18）。
-3. 夜景・星空・長秒のサンプルを追加して比較ハーネスを再実行する。
-4. Adjustments から Core Image（CIRAWFilter と後段 CIFilter）への対応の実装（exposure / wb_temp / shadow_lift / saturation / sharpness から）。
-5. プレビュー現像の Core Image 化の設計（キャッシュ、ブラウザモードでの代替、フラグの扱い）。
-6. macOS 14 / 15 での動作確認と、`Package.swift` の対象バージョン（現状 macOS 13）をアプリの最低要件 14.0 に揃える。
+1. 夜景・星空・長秒のサンプルを追加して比較ハーネスを再実行する（`apple_default` v9 lens ON を中心に。星の残り方・NR の塗りつぶしを確認）。
+2. 逆光・ハイライトの比較（`apple_default` の白飛び率・偽色、EDR / ハイライト関連パラメータの影響）。
+3. プレビュー現像の Core Image 化の設計と実装（`apple_default` v9 lens ON。キャッシュ、ブラウザモードでの代替、フラグから既定への切り替え）。
+4. Adjustments から Core Image（CIRAWFilter と後段 CIFilter）への対応の実装（exposure / wb_temp / shadow_lift / saturation / sharpness から。
+   `apple_default` のシャープ・NR と Adjustments の sharpness の関係を含む）。
+5. macOS 14 / 15 での動作確認（decoder 9・`apple_default` の可否と出力差）と、`Package.swift` の対象バージョン（現状 macOS 13）をアプリの最低要件 14.0 に揃える。
+6. OS 更新時の回帰比較の手順化（比較ハーネスの実行手順と合否の目安を文書化）。
 7. `env -u CI npm run tauri:build` の DMG 作成（bundle_dmg.sh）の失敗の調査（#65 とは独立）。
+8. （低）decoder 9 neutral の平滑化と、レンズ補正 ON の preview での白点ノイズの原因調査。
+9. （低・任意）移行完了までの暫定として rawpy の原寸の撮影時シャープ強度の再調整（`engine.SHARPEN_*`、ENGINE_VERSION 18）。

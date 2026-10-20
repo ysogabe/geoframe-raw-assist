@@ -175,7 +175,7 @@ Python エンジンを経由せず、macOS 標準の Core Image（CIRAWFilter）
 - 出力は `<app_data_dir>/coreimage/` だけに書き、原本や既存のキャッシュ・書き出し先には書きません
 - 比較: `.venv/bin/python scripts/compare_engines.py --source-root <フォルダ> --select auto`（出力は `work/engine-comparison/`）
 
-採否と比較結果は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、[比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md) を参照してください。現時点では本番の現像は rawpy のままです。
+採否と比較結果は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、[比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md) を参照してください。現像エンジンは Core Image（`apple_default`・decoder 9・レンズ補正 ON）へ段階的に移行する方針で、移行条件を満たすまで本番の現像は rawpy のままです。
 
 ## 既知の制限
 
