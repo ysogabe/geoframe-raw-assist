@@ -463,7 +463,9 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
 
           {current.preview && (
             <p className="viewer-quality">
-              <span className="preview-tag">プレビュー品質（長辺1600px）</span>
+              <span className="preview-tag">
+                {current.previewEdge ? `プレビュー品質（長辺${current.previewEdge}px）` : "プレビュー品質"}
+              </span>
               <small>本現像すると原寸で比較できます</small>
             </p>
           )}

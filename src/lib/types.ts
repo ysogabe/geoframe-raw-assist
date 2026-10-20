@@ -287,7 +287,15 @@ export type DevelopedResult = {
    * そのまま <img src> に渡すこと。パスとして再構成してはならない。
    */
   output_url: string;
+  /**
+   * 現像したエンジン（凍結後の任意フィールド追加、#72）。Python 由来は未設定（= rawpy）。
+   * Tauri の Core Image プレビューでは "coreimage" が入る。
+   */
+  engine?: DevelopEngine;
 };
+
+/** 現像エンジン（凍結後の追加、#72）。 */
+export type DevelopEngine = "rawpy" | "coreimage";
 
 // ---------------------------------------------------------------------------
 // POST /api/development-candidates — RAW縮小デコード代理による現像候補
