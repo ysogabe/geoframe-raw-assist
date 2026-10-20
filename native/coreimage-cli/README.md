@@ -55,12 +55,11 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
 `supported_decoder_versions` が埋まる（渡さなければキー自体が出ない）。
 
-## アプリからの使い方（試験機能、Issue #65 PR2）
+## アプリからの使い方（Issue #65 PR2、#72/#73 で既定に）
 
 デスクトップアプリ（Tauri）は Python エンジン / `.venv` / localhost HTTP を経由せず、Rust
-（`src-tauri/src/coreimage.rs`）からこの CLI を子プロセスとして直接呼ぶ。既定では無効で、
-環境変数 `GEOFRAME_COREIMAGE_EXPERIMENT=1` で起動したときだけ操作パネルに
-「Core Image 試験現像」ボタンと比較表示（カメラ JPEG / rawpy / Core Image）が出る。
+（`src-tauri/src/coreimage.rs`）からこの CLI を子プロセスとして直接呼ぶ。**プレビュー現像の既定の経路**
+（#72/#73）で、「Core Image プレビュー」のバッジが出る。書き出し・原寸（本現像）は当面 rawpy のまま。
 
 ### ビルド順序
 
@@ -76,15 +75,16 @@ cd src-tauri && cargo test  # ここで初めて通る
 `npm run tauri:dev` / `tauri:build` は beforeDevCommand / beforeBuildCommand で
 `npm run build:coreimage` を先に実行するので、追加の手順は要らない。
 
-### フラグの立て方
+### 切り戻しフラグ
 
 ```sh
-GEOFRAME_COREIMAGE_EXPERIMENT=1 npm run tauri:dev
-open -n --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app"
+GEOFRAME_PREVIEW_ENGINE=rawpy npm run tauri:dev
+open -n --env GEOFRAME_PREVIEW_ENGINE=rawpy "src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app"
 ```
 
-値がちょうど `1` のときだけ有効。無効時は UI に何も出さず、Rust の `develop_coreimage` も
-`EXPERIMENT_DISABLED` で拒否する。ブラウザモード（`npm run dev:raw`）では常に無効。
+値がちょうど `rawpy` のときだけ Python（rawpy）プレビューに切り戻す（Rust の `preview_engine()` が返し、フロントは起動時に 1 回読む）。
+未設定・それ以外は Core Image。旧 `GEOFRAME_COREIMAGE_EXPERIMENT` は廃止した。ブラウザモード（`npm run dev:raw`）は Python プレビューのまま。
+CLI の起動失敗などインフラ側のエラー時は、フロントが自動で Python プレビューにフォールバックする。
 
 ### 動作
 
@@ -93,7 +93,8 @@ open -n --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "src-tauri/target/release/bundle/m
 - capture_id → ARW の解決は `local_raw/source_files.py` と同じ規則（拡張子の大文字小文字揺れ、
   正規表記 `.ARW` 優先、フォルダ外を指すシンボリックリンクは拒否）。
 - リクエストは `mode: "preview"`, `max_edge: 2400`, `format: "jpeg"`, `decoder_version: "9"`,
-  `settings.profile: "neutral"` 固定。
+  `settings: {profile: "apple_default", lens_correction: true}` 固定で、`adjustments` に解決済みの 9 キー全量を渡す
+  （Rust `src-tauri/src/adjustments.rs` がクランプ・正規化）。
 - 出力先は `<app_data_dir>/coreimage/<撮影ID>_<mode>_<ハッシュ16桁>.jpg`。ハッシュはリクエスト
   （出力パス以外）+ `--version` 応答 + ARW のパス・サイズ・mtime の SHA-256。同名ファイルと
   来歴 `<同名>.json`（CLI の応答 JSON そのまま）が揃っていれば再現像しない。

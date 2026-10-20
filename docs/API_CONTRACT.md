@@ -163,9 +163,12 @@ DevelopedResult = {
                     lens_model?:string, flags?:string[], skipped?:string[],
                     focal_length?:number, aperture?:number},
   exif_inherited:boolean,
-  output_url:string
+  output_url:string,
+  engine?:DevelopEngine     // "rawpy" | "coreimage"（#72 で凍結後に追加した任意フィールド。型は src/lib/types.ts）
 }
 ```
+
+- `engine?`: 現像したエンジン。Python（`/api/raw-develop`）の応答には**含まれない**（未設定 = rawpy 扱い）。Tauri の Core Image プレビュー（`src-tauri/src/coreimage.rs` の結果をフロントが `toDevelopedResult` で `DevelopedResult` に詰め替えたもの）では `"coreimage"`。Core Image プレビューでは `adjustments` はフロントが解決した全量をクランプ・float 化したもの、`lens_correction` は CLI の `applied.lens_correction_enabled` から詰める（歪曲・色収差・周辺減光の内訳 `flags` は空。未適用時の `reason` は `coreimage_unsupported`）、`exif_inherited` は常に false（CLI は EXIF を書かない契約）。
 
 - `preview:true` → rawpy `half_size=False`（プレビュー / 本現像とも full-size デモザイクを共有し、画角を一致させる） + `max_edge=1600`、出力先 `outputs/preview/`（2〜5秒）。
 - 本現像は `outputs/developed/`（10〜20秒）。

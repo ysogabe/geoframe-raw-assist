@@ -85,6 +85,18 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 - `apple_default` は明るい空（主に青チャンネル）を白飛びさせやすい。`extended_dynamic_range` を上げると白飛びはむしろ増え、`boost` / `boost_shadow_amount` はほぼ効かない。白飛びを減らすのは `exposure` を下げることで、中間調は `shadow_lift` などで戻す（#81）。
 - `src-tauri/src/coreimage.rs` の試験経路の既定は `neutral`（白点が出る組み合わせ）のままなので、#72 で `apple_default` に切り替える。
 
+## 追補（2026-10-21）: 段階 1「プレビューの CI 化と調整の写像」完了（#72/#73）
+
+- 決定 2・3 の段階 1 を実装した。Tauri のプレビューは既定で Core Image（`apple_default`・decoder 9・レンズ補正 ON）になり、
+  Adjustments の 9 キーを CLI 0.3.0 に写像した（`highlight_recovery` だけは no-op で、代替は #81）。
+  設計は [設計書](../design/coreimage-preview-adjustments.md)、較正結果は [比較レポート §16](../coreimage-engine-comparison.md)、写像は [対応表](../coreimage-parameter-mapping.md) の「#73 での決定」。
+- 上の「置き換えに進む条件」の Adjustments の行は**原寸・書き出し向け**の条件で、引き続き未達（プレビューの検証は §16 で完了）。
+- **プレビュー = Core Image、本現像・書き出し = rawpy の間は、見た目が一致しない場合がある**（明るさの基準、色、ノイズなど）。
+  オーナーは、移行が完了するまでこの不一致を受容した（2026-10-20 判断）。UI には「Core Image プレビュー」のバッジと注記を出す。
+- 切り戻し: 環境変数 `GEOFRAME_PREVIEW_ENGINE=rawpy`（値がちょうど `rawpy` のときだけ）で Python（rawpy）プレビューに戻せる。
+  旧 `GEOFRAME_COREIMAGE_EXPERIMENT` と試験用 UI は廃止した。CLI の起動失敗などインフラ側のエラー時は、自動で Python プレビューにフォールバックする。
+- 決定 3 の「`GEOFRAME_COREIMAGE_EXPERIMENT=1` のフラグ付き」と、注意点の「試験経路の既定は `neutral`」は、この追補で解消済み。
+
 ## 理由
 
 - 速度（2〜5 倍）とメモリ（約 1/8）の差が大きく、明るさ・ノイズ・解像感（`apple_default`）でカメラ JPEG に近い。

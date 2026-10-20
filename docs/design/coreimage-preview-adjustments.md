@@ -6,6 +6,7 @@
 - 関連: Issue #72 / #73（#73 のオーナーコメント: 後段は CLI 内、`noise_reduction` の ISO 帯別表と `highlight_recovery` の代替を #73 の成果物に）、
   #80（プリセットの Rust 移行）、#81（プリセット値再調整・highlight_recovery 置き換え）、#82（CLI バッチ）、#88（暗所判定）、#71（逆光評価。PR #91 で実施、ハイライトの条件は「条件付き」）。
 - 作成: 2026-10-20（設計のみ。コードは書いていない）。
+- 実装後の更新（2026-10-21）: 実装済み。T5 の較正結果（NR full の上限 0.5、§3.7 の閾値、`wb_k0_out_of_range` ガード）を §3.3・§3.7 に反映した。判断の経緯は [比較レポート §16](../coreimage-engine-comparison.md)。
 
 
 ## オーナー判断（2026-10-20 確定）
@@ -37,7 +38,7 @@
 | 原寸・書き出し | **この PR では rawpy のまま**。CLI / Rust は `mode: "full"` を受けられる状態にしておく | ADR の段階方針。原寸には EXIF 継承（CLI は EXIF を書かない契約）と書き出し契約（`outputs/developed/` + レシピ）の設計が別に要る。ただし「プレビュー = CI、書き出し = rawpy」の見え方不一致が生じる（§9 オーナー判断 1） |
 | フラグ | `GEOFRAME_COREIMAGE_EXPERIMENT` は廃止。既定で CI プレビュー有効。切り戻し用に **`GEOFRAME_PREVIEW_ENGINE=rawpy`** を用意 | 既定化が #72 の完了条件 |
 | 既定 profile | `coreimage.rs` の `PROFILE="neutral"` → `apple_default`、`lens_correction: true` を明示。CLI 自身の既定 `neutral` は変えない | neutral v9 preview は白点が出る組み合わせ（比較レポート §12.3）。CLI 既定を変えると回帰スクリプトとハーネスの前提が崩れる |
-| `highlight_recovery` | この PR では **受け取るが無効（no-op）**。`applied.ignored` に載せ、UI に注記。代替レバーは #81（#71 の実データ待ち） | #71 のサンプルがマウントされておらず評価できない（比較レポート §13）。§9 オーナー判断 2 |
+| `highlight_recovery` | この PR では **受け取るが無効（no-op）**。`adjustments_applied.ignored` に載せ、UI に注記。代替レバーは #81（#71 の実データ待ち） | #71 のサンプルがマウントされておらず評価できない（比較レポート §13）。§9 オーナー判断 2 |
 
 ---
 
@@ -289,21 +290,21 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
 | パラメータ | 写像 | 値域・単位 | 応答 `applied` |
 |---|---|---|---|
 | `exposure` (ev) | `filter.exposure = Float(ev)` | −2..2 ⊂ CLI の −5..5 | `exposure` |
-| `wb_temp` (v) | `K0 = defaults.neutralTemperature`（profile 適用後の読み戻し = 撮影時 WB）。`mired = 1e6/K0 − v × MIRED_PER_UNIT`、`K = clamp(1e6/mired, 2000, 50000)`。`filter.neutralTemperature = K`。tint は触らない。`MIRED_PER_UNIT = 0.85`【推測】 | v>0（暖）→ mired 減 → K 増 → 暖色に描く（UI のヒント「青 ←→ 暖」と同方向であることをハーネスで確認） | `neutral_temperature`、`post.wb.k0`, `post.wb.mired_shift` |
+| `wb_temp` (v) | `K0 = defaults.neutralTemperature`（profile 適用後の読み戻し = 撮影時 WB）。`mired = 1e6/K0 − v × MIRED_PER_UNIT`、`K = clamp(1e6/mired, 2000, 50000)`。`filter.neutralTemperature = K`。tint は触らない。`MIRED_PER_UNIT = 0.85`（T5 で較正し据え置き。比較レポート §16.4）。K0 が有限で 2000..50000 の外なら写像を飛ばし `guards: ["wb_k0_out_of_range"]`（`WhiteBalanceMapping.isUsableK0`） | v>0（暖）→ mired 減 → K 増 → 暖色に描く（UI のヒント「青 ←→ 暖」と同方向であることをハーネスで確認） | `neutral_temperature`、`post.wb.k0`, `post.wb.mired_shift` |
 | `shadow_lift` | `lift = v / 100` → `geoframe_tone` | 0..1 | `post.shadow_lift` |
 | `brightness` / `contrast` / `saturation` | そのまま `geoframe_tone` | 契約の値域 | `post.brightness` 等 |
 | `sharpness` (s) | s ≤ 1: `filter.sharpnessAmount = defaults.sharpnessAmount × s`、USM gain 0。s > 1: sharpnessAmount は既定のまま、USM: `sigma, baseGain, coring = captureSharpenParams(longEdge, iso)`（rawpy の定数を移植。長辺は `extent` の長辺）、`gain = min(1.2, baseGain × (s − 1) × 1.5) × isoMult`。ISO は `filter.properties` の EXIF（不明なら coring 0.5/255、減衰なし） | 0.8..1.6 | `sharpness_amount`、`post.usm.{sigma,gain,coring,long_edge,iso}` |
-| `noise_reduction` | off: `(0, 0)`。light: 既定のまま（null）。full: `lum = min(1, max(defaults.lum + 0.3, 0.3))`、`color = max(defaults.color, 0.3)`【推測】 | 0..1 | `luminance_noise_reduction_amount`、`color_noise_reduction_amount` |
+| `noise_reduction` | off: `(0, 0)`。light: 既定のまま（null）。full: `lum = min(0.5, max(defaults.lum + 0.3, 0.3))`、`color = max(defaults.color, 0.3)`（上限 0.5 は T5 で確定。比較レポート §16.4） | 0..1 | `luminance_noise_reduction_amount`、`color_noise_reduction_amount` |
 | `highlight_recovery` | 何もしない | — | `ignored: ["highlight_recovery"]` |
 
-`noise_reduction` の ISO 帯別の初期表（`apple_default` v9、macOS 27.0.1 の既定値から。**暫定**。§3.7 で確定し CLI README に載せる）:
+`noise_reduction` の ISO 帯別の表（`apple_default` v9、macOS 27.0.1 の既定値から。T5 で上限 0.5 に確定済み。CLI README にも同じ表がある）:
 
 | ISO 帯 | 既定（light） lum / color | off | full（暫定） |
 |---|---|---|---|
-| < 800 | ≈0.01 / 0【確認: 対応表 ADR §4 の v9 ISO100 = 0.01】 | 0 / 0 | 0.30 / 0.30 |
-| 800〜1600 | 未計測【推測: 0.05〜0.15】 | 0 / 0 | 既定 + 0.3 / 0.30 |
-| 3200 | 0.241 / 0【確認】 | 0 / 0 | 0.54 / 0.30 |
-| 6400 | 0.357 / 0【確認】 | 0 / 0 | 0.66 / 0.30 |
+| < 800 | ≈0.01 / 0【確認: 対応表 ADR §4 の v9 ISO100 = 0.01】 | 0 / 0 | 0.31 / 0.30 |
+| 800〜1600 | 未計測【推測: 0.05〜0.15】 | 0 / 0 | min(0.5, 既定 + 0.3) / 0.30 |
+| 3200 | 0.241 / 0【確認】 | 0 / 0 | 0.50 / 0.30（旧暫定 0.541） |
+| 6400 | 0.357 / 0【確認】 | 0 / 0 | 0.50 / 0.30（旧暫定 0.657） |
 
 - `light` を既定にする根拠: rawpy の `light` は ISO<800 で Off、以上で Light（【確認】`_fbdd_mode_for`）。`apple_default` の輝度 NR も低 ISO でほぼ 0、高 ISO で効く同じ形。
 - `full` の合否は「rawpy full と同じノイズ量」ではない（rawpy full の空ノイズはカメラ比 1.72 で CI 既定 1.05 より多い【確認: §10.5】）。「light より目に見えて滑らかで、塗りつぶし・星の消失が無い」を基準にする（§3.7）。
@@ -352,6 +353,8 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
 
 #### 比較ハーネス（`scripts/compare_engines.py` に `--adjustments` モードを追加）
 
+> 下表の「合否の目安【推測】」列は**設計時の暫定値**。T5（2026-10-20〜21、昼 6 + 星空 3 カット）で確定した最終値は表の後ろの「確定した閾値」を正とする（根拠は比較レポート §16、定数は `scripts/compare_engines.py` の `ADJ_*` / `RB_PIXEL_RANGE` / `IMPULSE_REFERENCE_RATIO`）。
+
 対象カット: 日中低 ISO 3（例 DSC04670 / DSC04651 / DSC04872）、高 ISO 2（DSC04430 / DSC04453）、星空 2（DSC07415 / DSC07407）、逆光（マウントされていれば DSC04473）。preview 2400px。
 
 | パラメータ | 掃引 | rawpy と比べる指標（方向と大きさ） | CI 内オラクル | 合否の目安【推測】 |
@@ -364,6 +367,20 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
 | noise_reduction | off / light / full | 星空セットの `sky_noise_ratio` / `sky_chroma_noise` / `star_recall` / `sky_hf_ratio`（§10.4） | — | off > light > full の順にノイズが減る。full でも `star_recall ≥ 0.99`、`sky_hf_ratio ≥ 0.7 × camera`（塗りつぶし防止）。表の値はここで確定 |
 | 白点 | off + 既定 / off + `sharpness_amount: 0`（明示上書き → ガード発動） | `impulse_vs_full` | — | 全ケースで ≤ 10/枚（§10.5 の `ci_apple_v9_l1` と同水準） |
 | 既定リクエスト回帰 | `adjustments` 無し | `scripts/coreimage-regression-applied.sh` | — | 27.0.1 baseline と差分 0 件 |
+
+**確定した閾値（T5、比較レポート §16.3〜§16.5）**
+
+| チェック | 暫定 | 確定 | 定数 |
+|---|---|---|---|
+| exposure ±1 EV の log2 差（絶対値） | ±1.0 の ±0.15 | ±1.0 の **±0.4**（粗い健全性確認。指標自身の偏りで rawpy も ±1.15〜1.21 を読む） | `ADJ_EXPOSURE_STOP_TOL = 0.4` |
+| exposure の大きさ（新設） | — | CI の log2 差 / rawpy の log2 差が **0.8..1.25**（実測 0.81〜1.18） | `ADJ_EXPOSURE_RATIO_RANGE` |
+| wb_temp ±60 の R/B 比 | rawpy 比 0.7〜1.4 | 同左。ただし測る画像自身の最大チャンネルが **0.05..0.9** の画素だけを使う（飽和画素は WB を動かしても R/B が動かない） | `ADJ_WB_RATIO_RANGE = (0.7, 1.4)`、`RB_PIXEL_RANGE = (0.05, 0.9)` |
+| sharpness 1.0 のエッジ幅（カメラ比） | 0.95 ± 0.05 | 0.95 ± **0.15**（`sharpness_ci_10_edge_ratio`。実測 0.87〜1.02） | `ADJ_SHARP_BASELINE_WIDTH = 0.95`、`ADJ_SHARP_BASELINE_TOL = 0.15` |
+| sharpness 1.6 の flat_noise | カメラ比 1.5 以内 | **identity（1.0）比** ≤ 1.5（`sharpness_ci_16_flat_noise_vs_identity`。実測 1.00〜1.21。カメラ比は参考値として残す） | `ADJ_SHARP16_NOISE_MAX = 1.5` |
+| NR full の星の残存率 | `star_recall ≥ 0.99` | `≥ 0.99` **または** light から `max(0.01, 1.5/n)` 以上減らない（相対条件） | `ADJ_NR_FULL_RECALL_MIN = 0.99`、`ADJ_NR_FULL_RECALL_DROP_MAX = 0.01`、`ADJ_NR_FULL_RECALL_DROP_POINTS = 1.5` |
+| NR full の空の高周波比 | `sky_hf_ratio ≥ 0.7 × camera` | camera 比 **0.5 以上**、または light 比 **0.9 以上** | `ADJ_NR_FULL_HF_MIN = 0.5`、`ADJ_NR_FULL_HF_VS_LIGHT_MIN = 0.9` |
+| 白点（`impulse_vs_full`） | ≤ 10/枚 | ≤ 10/枚（変更なし）。ただし基準側でも 3x3 メディアン比 `24 × 0.5 = 12` 以上明るい点は数えない（昼の葉の照り返しの誤検出を除く。全呼び出しで適用） | `ADJ_IMPULSE_MAX = 10`、`IMPULSE_REFERENCE_RATIO = 0.5` |
+| その他（方向・単調・オラクル・ガード・既定リクエスト回帰・処理時間 1.5 倍以内） | §3.7 のまま | 変更なし（全合格） | — |
 
 - オラクル比較は設計書 §2.1 の中間案（CLI の sRGB tiff16 → Python 後段）をそのまま検証に使う。`apply_rawpy_finish` の実装パターンを流用する。
 - 出力は `work/engine-comparison/adjustments1/`（gitignore）に `adjustments_metrics.csv` / `adjustments_summary.json` / `sheets/`。純粋関数（R/B 比、暗部増分）は `tests/test_compare_engines.py` に追加。
@@ -418,7 +435,7 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
       "noise_reduction": "light"
     },
     "ignored": ["highlight_recovery"],
-    "guards": []                         // 例: ["white_dot_sharpness_floor"]
+    "guards": []                         // 例: ["white_dot_sharpness_floor"]、["wb_k0_out_of_range"]
   }
 }
 ```
@@ -442,7 +459,8 @@ pub struct CoreImagePreviewResult {
     pub params_hash: String,                 // hash16
     pub decoder_version: String, pub cli_version: String, pub macos_version: String,
     pub adjustments: Value,                  // Rust が正規化（クランプ・float 化）した全量
-    pub applied: Value,                      // CLI の applied そのまま（post / ignored / guards を含む）
+    pub applied: Value,                      // CLI の applied そのまま（キーを足さない。§4.2）
+    pub adjustments_applied: Value,          // CLI のトップレベル adjustments_applied（defaults / post / ignored / guards）そのまま。調整が無い・CLI が返さない場合は null
     pub source: Value,                       // CLI の source（lens_model / iso / camera_model）
 }
 ```
@@ -533,7 +551,7 @@ env -u CI npm run tauri:dev                                # 手動確認
 1. 原寸・書き出しの Core Image 化（`coreimage/full/`、EXIF 継承（CLI に `inherit_exif_from` を足すか Rust で継承）、`ExportItem` / マニフェストとの接続、`outputs/developed/` との共存）。#73 の検証と #81 の後。
 2. `GEOFRAME_PREVIEW_ENGINE` 切り戻しフラグの撤去（安定後）。
 3. キャッシュ上限・削除方針の見直し（実使用量を見て）。
-4. （既存）#81: `highlight_recovery` の代替、プリセット値の再調整。この PR の `applied.ignored` と `--adjustments` ハーネスを材料にする。
+4. （既存）#81: `highlight_recovery` の代替、プリセット値の再調整。この PR の `adjustments_applied.ignored` と `--adjustments` ハーネスを材料にする。
 5. （既存）#88: 暗所判定の扱い。CI プレビューと rawpy 原寸の明るさ差の主要因の 1 つ。
 
 ---
@@ -550,7 +568,7 @@ env -u CI npm run tauri:dev                                # 手動確認
 | # | 事項 | 選択肢 | 設計書の案 | 影響 |
 |---|---|---|---|---|
 | 1 | **プレビュー = Core Image、本現像・書き出し = rawpy** の不一致を移行期間として受け入れるか | (a) 受け入れ、バッジ・注記で明示し後続 Issue で原寸を切り替える。(b) 原寸も同時に CI に切り替える（EXIF 継承・書き出し契約の設計が増え、#81 前に画が確定しない）。(c) 既定化を #81 まで待つ | **(a)** | PR の範囲。(a) を取るなら「見たものと書き出す物が違う」ことを README / UI に明記 |
-| 2 | **`highlight_recovery` をこの PR では無効（no-op）にする**こと（#73 コメントは代替の決定を #73 の成果物に求めているが、#71 の実データが無い） | (a) 無効 + `applied.ignored` + UI 注記、代替は #81。(b) 暫定で EDR / boost を割り当てる（未評価のまま出す）。(c) 逆光サンプルを用意してから #73 を進める | **(a)** | 救済系 3 プリセットのプレビューが rawpy と異なる（スライダーは効かない） |
+| 2 | **`highlight_recovery` をこの PR では無効（no-op）にする**こと（#73 コメントは代替の決定を #73 の成果物に求めているが、#71 の実データが無い） | (a) 無効 + `adjustments_applied.ignored` + UI 注記、代替は #81。(b) 暫定で EDR / boost を割り当てる（未評価のまま出す）。(c) 逆光サンプルを用意してから #73 を進める | **(a)** | 救済系 3 プリセットのプレビューが rawpy と異なる（スライダーは効かない） |
 | 3 | `CoreImageExperiment`（3 面比較 UI）と `GEOFRAME_COREIMAGE_EXPERIMENT` の削除 | 削除 / 残す | **削除**（比較はハーネスで） | UI 項目の消失 |
 | 4 | プレビュー長辺 2400px（rawpy は 1600） | 2400 / 1600 | **2400**（baseline と同一、CI は速い） | キャッシュ容量 約 1.5〜2 倍、原寸ビューアの見え方 |
 | 5 | `sharpness` のハイブリッド写像（≤1.0 はデコーダ内シャープを弱める、>1.0 は増分を USM で足す）と「1.0 = `apple_default` 既定」の意味づけ | 案どおり / 「常に既定 + USM」/ 「常にデコーダのみ（>1 は効かない）」 | **ハイブリッド** | スライダーの体感。PSO の `_SHARPNESS_SEARCH_MAX` 導出（#86）に影響 |
