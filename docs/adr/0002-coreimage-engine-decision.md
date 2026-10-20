@@ -75,8 +75,8 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 | 夜景・星空・長秒のサンプルで破綻（ノイズの塗りつぶし、星の消失、色かぶり）が無い。`apple_default` の NR が星を消さないことを特に確認する | 未確認（最重要） |
 | ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない（`apple_default` では未評価。比較レポート §8） | 未確認 |
 | 使う範囲の Adjustments（少なくとも exposure / wb_temp / shadow_lift / saturation / sharpness）について、後段処理を含めて現行と同等の結果になる対応が実装・検証されている（原寸・書き出しの置き換えの条件。プレビューには不要） | 未着手 |
-| 最新の macOS で decoder 9 と `apple_default` が使える（decoder 9 は必須の依存になった。古い macOS の個別検証は不要） | 未確認 |
-| OS 更新時の回帰比較の手順が文書化されている | 未着手 |
+| 最新の macOS で decoder 9 と `apple_default` が使える（decoder 9 は必須の依存になった。古い macOS の個別検証は不要） | **満たしている**（2026-10-20、macOS 27.0.1。CLI 単体と `tauri:build` した .app の同梱 CLI。#74） |
+| OS 更新時の回帰比較の手順が文書化されている | **満たしている**（[回帰確認手順](../coreimage-regression-check.md)とベースライン。#75） |
 
 ## 理由
 
