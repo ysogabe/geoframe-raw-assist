@@ -39,6 +39,12 @@ CI + rawpy と同じ後段仕上げ）を作り、ROI のシャープネス比�
 リニア輝度比が 2^ΔEV に沿うか・レンズ補正の幾何がフレーム間で一致するか・Mertens 合成の見え方を記録する。
 ``--highlight`` は逆光・ハイライトの評価モード（Issue #71、設計書 §4.2）。チャンネル別クリップ率・クリップ境界の
 マゼンタ寄り画素率と、EDR / boost / boostShadow の掃引（#79 の個別上書き）を出す。
+``--adjustments`` は Adjustments の評価モード（Issue #72 / #73、設計書 coreimage-preview-adjustments.md §3.7）。
+CLI 0.3.0 の ``adjustments`` を ``ADJ_SWEEP_VARIANTS`` で 1 パラメータずつ掃引し、rawpy（``--worker-adjustments`` で
+同じ値を渡す）と効く方向・大きさを比べる。後段（shadow_lift / brightness / contrast / saturation / USM）は
+tiff16 sRGB 同士で Python の後段をオラクルにして ΔE76 を測り（``ADJ_ORACLE_VARIANTS``）、白点の ``impulse_vs_full``・
+既定リクエスト（adjustments 無し）の ``applied`` 回帰も確かめる。CLI が 0.3.0 未満なら開始前に止まる。
+``--dry-run`` ではリクエストを組んで §4.1 の契約を検査し ``adjustments_plan.json`` に書くだけ（CLI は呼ばない）。
 ARW / JPG の拡張子は大文字小文字を問わない（``local_raw.source_files`` で解決）。
 """
 
@@ -929,6 +935,7 @@ def worker_rawpy(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     capture_id = validate_capture_id(args.worker_rawpy)
     preview = args.worker_mode == "preview"
+    overrides = parse_worker_adjustments(args.worker_adjustments)
     original_sharpen_params = engine._capture_sharpen_params
 
     def no_capture_sharpen(long_edge: int, sharpness: float, iso: float | None) -> tuple[float, float, float]:
@@ -946,6 +953,8 @@ def worker_rawpy(args: argparse.Namespace) -> None:
          mock.patch.object(engine, "PREVIEW_ROOT", out_dir), \
          sharpen_patch:
         kwargs: dict[str, Any] = {"preview": preview, "force": True}
+        if overrides is not None:
+            kwargs["adjustments"] = overrides  # 既定プリセットへの上書き（engine.resolve_adjustments が検証・クランプ）
         if preview:
             kwargs["max_edge"] = args.max_edge  # 明示しないと preview は 1600px に落ちる
         result = engine.develop_raw(capture_id, engine.DEFAULT_PRESET, **kwargs)
@@ -962,7 +971,21 @@ def worker_rawpy(args: argparse.Namespace) -> None:
         "iso": recipe.get("iso"),
         "engine_version": engine.ENGINE_VERSION,
         "capture_sharpen": not args.worker_nosharp,
+        "adjustments": result.get("adjustments"),
     }, ensure_ascii=False, default=str))
+
+
+def parse_worker_adjustments(text: str | None) -> dict[str, Any] | None:
+    """``--worker-adjustments`` の JSON（Adjustments の部分 / 全量の上書き）を dict にする。省略時は None。"""
+    if text is None:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"--worker-adjustments が JSON ではありません: {error}") from None
+    if not isinstance(value, dict):
+        raise SystemExit("--worker-adjustments は JSON オブジェクトで指定してください")
+    return value
 
 
 def worker_noop(_: argparse.Namespace) -> None:
@@ -991,9 +1014,22 @@ class RunContext:
         self.log.append(line)
 
 
-def run_rawpy(ctx: RunContext, capture_id: str, mode: str, *, nosharp: bool = False) -> dict[str, Any]:
+def run_rawpy(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    *,
+    nosharp: bool = False,
+    adjustments: dict[str, Any] | None = None,
+    variant: str | None = None,
+) -> dict[str, Any]:
+    """rawpy ワーカーを 1 回呼ぶ。``adjustments`` は既定プリセットへの上書き（``--worker-adjustments``）。"""
     # nosharp は params_hash が変わらず同名ファイルになるので、出力ディレクトリを分ける。
-    out_dir = ctx.out / ("rawpy_nosharp" if nosharp else "rawpy") / mode
+    # adjustments 指定時もバリアントごとに分ける（レシピ JSON を取り違えないため）。
+    if adjustments is not None:
+        out_dir = ctx.out / "rawpy_adj" / (variant or "adjusted") / mode
+    else:
+        out_dir = ctx.out / ("rawpy_nosharp" if nosharp else "rawpy") / mode
     cmd = [
         sys.executable, str(Path(__file__).resolve()),
         "--source-root", str(ctx.source_root),
@@ -1004,6 +1040,8 @@ def run_rawpy(ctx: RunContext, capture_id: str, mode: str, *, nosharp: bool = Fa
     ]
     if nosharp:
         cmd.append("--worker-nosharp")
+    if adjustments is not None:
+        cmd += ["--worker-adjustments", json.dumps(adjustments, ensure_ascii=False, sort_keys=True)]
     res = run_timed(cmd)
     payload = res["payload"] or {}
     row: dict[str, Any] = {
@@ -1025,6 +1063,55 @@ def run_rawpy(ctx: RunContext, capture_id: str, mode: str, *, nosharp: bool = Fa
     return row
 
 
+def coreimage_request(
+    input_path: Path,
+    output: Path,
+    mode: str,
+    lens: bool,
+    *,
+    decoder_version: str = CI_DECODER_VERSION,
+    profile: str = "neutral",
+    overrides: dict[str, float] | None = None,
+    output_format: str = "jpeg",
+    output_color_space: str | None = None,
+    max_edge: int | None = None,
+    adjustments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """CLI リクエスト JSON を組み立てる（純粋）。既定引数のままなら 0.2.0 と同じリクエスト。
+
+    ``adjustments`` は CLI 0.3.0 のトップレベル ``adjustments``（設計書 §4.1。9 キー全量）。
+    """
+    settings: dict[str, Any] = {"profile": profile, "lens_correction": lens}
+    if overrides:
+        settings.update(overrides)
+    request: dict[str, Any] = {
+        "input": str(input_path),
+        "output": str(output),
+        "mode": mode,
+        "decoder_version": decoder_version,
+        "settings": settings,
+    }
+    if output_format != "jpeg":
+        request["format"] = output_format
+    if output_color_space:
+        request["output_color_space"] = output_color_space
+    if mode == "preview" and max_edge:
+        request["max_edge"] = max_edge
+    if adjustments is not None:
+        request["adjustments"] = dict(adjustments)
+    return request
+
+
+def coreimage_output_path(ctx: "RunContext", capture_id: str, mode: str, lens: bool, *, variant: str | None = None,
+                          output_format: str = "jpeg", max_edge: int | None = None) -> Path:
+    """run_coreimage の出力パス（ディレクトリは作らない）。"""
+    suffix = f"_{variant}" if variant else ("_lens" if lens else "")
+    edge = max_edge if (mode == "preview" and max_edge and max_edge != ctx.max_edge) else None
+    if edge:
+        suffix += f"_e{edge}"
+    return ctx.out / "coreimage" / mode / f"{capture_id}_{mode}{suffix}.{'tif' if output_format == 'tiff16' else 'jpg'}"
+
+
 def run_coreimage(
     ctx: RunContext,
     capture_id: str,
@@ -1038,36 +1125,22 @@ def run_coreimage(
     output_format: str = "jpeg",
     output_color_space: str | None = None,
     max_edge: int | None = None,
+    adjustments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Core Image CLI を 1 回呼ぶ。
 
     ``overrides`` は CLI の settings 個別上書きキー（``luminance_noise_reduction`` 等。Issue #79）。
     ``output_format`` が ``tiff16`` のときは ``.tif`` に書き、``output_color_space``（srgb / display_p3）を渡せる。
     ``max_edge`` は preview の長辺（省略時 ``ctx.max_edge``）。既定引数のままなら従来と同じリクエストになる。
+    ``adjustments`` は CLI 0.3.0 の ``adjustments``（9 キー全量、``profile="apple_default"`` が必要。#72 / #73）。
     """
-    out_dir = ctx.out / "coreimage" / mode
-    out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"_{variant}" if variant else ("_lens" if lens else "")
-    edge = max_edge if (mode == "preview" and max_edge and max_edge != ctx.max_edge) else None
-    if edge:
-        suffix += f"_e{edge}"
-    output = out_dir / f"{capture_id}_{mode}{suffix}.{'tif' if output_format == 'tiff16' else 'jpg'}"
-    settings: dict[str, Any] = {"profile": profile, "lens_correction": lens}
-    if overrides:
-        settings.update(overrides)
-    request: dict[str, Any] = {
-        "input": str(source_file(ctx.source_root, capture_id, "ARW")),
-        "output": str(output),
-        "mode": mode,
-        "decoder_version": decoder_version,
-        "settings": settings,
-    }
-    if output_format != "jpeg":
-        request["format"] = output_format
-    if output_color_space:
-        request["output_color_space"] = output_color_space
-    if mode == "preview":
-        request["max_edge"] = max_edge or ctx.max_edge
+    output = coreimage_output_path(ctx, capture_id, mode, lens, variant=variant, output_format=output_format, max_edge=max_edge)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    request = coreimage_request(
+        source_file(ctx.source_root, capture_id, "ARW"), output, mode, lens,
+        decoder_version=decoder_version, profile=profile, overrides=overrides, output_format=output_format,
+        output_color_space=output_color_space, max_edge=(max_edge or ctx.max_edge), adjustments=adjustments,
+    )
     res = run_timed([str(ctx.cli)], stdin=json.dumps(request))
     payload = res["payload"] or {}
     row: dict[str, Any] = {
@@ -1097,7 +1170,42 @@ def run_coreimage(
         "ci_boost": applied.get("boost_amount"),
         "ci_boost_shadow": applied.get("boost_shadow_amount"),
     })
+    if adjustments is not None:
+        row.update(adjustments_applied_summary(payload))
     return row
+
+
+def adjustments_applied_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """CLI 0.3.0 応答の ``adjustments_applied``（設計書 §4.2）を CSV 向けの平らな列にする（純粋）。"""
+    adj = payload.get("adjustments_applied")
+    if not isinstance(adj, dict):
+        return {"ci_adjustments_applied": False}
+    defaults = adj.get("defaults") or {}
+    post = adj.get("post") or {}
+    usm = post.get("usm") or {}
+    wb = post.get("wb") or {}
+    return {
+        "ci_adjustments_applied": True,
+        "ci_adj_guards": ";".join(str(g) for g in adj.get("guards") or []),
+        "ci_adj_ignored": ";".join(str(g) for g in adj.get("ignored") or []),
+        "ci_def_sharpness": defaults.get("sharpness_amount"),
+        "ci_def_lum_nr": defaults.get("luminance_noise_reduction_amount"),
+        "ci_def_color_nr": defaults.get("color_noise_reduction_amount"),
+        "ci_def_temperature": defaults.get("neutral_temperature"),
+        "ci_post_shadow_lift": post.get("shadow_lift"),
+        "ci_post_brightness": post.get("brightness"),
+        "ci_post_contrast": post.get("contrast"),
+        "ci_post_saturation": post.get("saturation"),
+        "ci_post_nr": post.get("noise_reduction"),
+        "ci_usm_sigma": usm.get("sigma"),
+        "ci_usm_gain": usm.get("gain"),
+        "ci_usm_coring": usm.get("coring"),
+        "ci_usm_long_edge": usm.get("long_edge"),
+        "ci_usm_iso": usm.get("iso"),
+        "ci_wb_k0": wb.get("k0"),
+        "ci_wb_mired_shift": wb.get("mired_shift"),
+        "ci_wb_mired_per_unit": wb.get("mired_per_unit"),
+    }
 
 
 def compare_capture(
@@ -2625,6 +2733,917 @@ def run_highlight(ctx: RunContext, selection: list[dict[str, Any]], features_by_
 
 
 
+# =============================================================================
+# Adjustments 評価モード --adjustments（Issue #72 / #73、設計書 coreimage-preview-adjustments.md §3.7）
+# =============================================================================
+
+#: adjustments を受けられる CLI の最小版（設計書 §4.1 / §4.2）。
+ADJUSTMENTS_MIN_CLI = (0, 3, 0)
+#: 既定リクエストの回帰比較に使う baseline（scripts/coreimage-regression-applied.sh と同じ）。
+ADJ_BASELINE_JSON = PROJECT_ROOT / "docs" / "coreimage-baseline" / "applied-params-macos-27.0.1.json"
+#: baseline 比較で見ないキー（回帰スクリプトと同じ。preview の長辺で変わる / 来歴だけの値）。
+ADJ_BASELINE_SKIP = ("orientation_handling", "scale_factor")
+#: 掃引の起点。デコード段は恒等（exposure 0・wb 0・sharpness 1.0 = apple_default 既定・NR light = 既定）、
+#: 後段は無効（lift 0・b/c/s 1.0）。1 パラメータずつ動かして効きを分離する。
+ADJ_IDENTITY: dict[str, Any] = {
+    "exposure": 0.0, "wb_temp": 0.0, "shadow_lift": 0.0, "highlight_recovery": 0.0,
+    "brightness": 1.0, "contrast": 1.0, "saturation": 1.0, "sharpness": 1.0, "noise_reduction": "light",
+}
+#: 掃引バリアント: (variant, パラメータ, 値, ラベル)。identity は全パラメータの基準。
+#: 値は設計書 §3.7 の表（exposure ±1、wb ±60、lift 45、b 0.7/1.4、c 0.8/1.4、s 0/1.5、sharp 0.8/1.6、NR off/full）。
+ADJ_SWEEP_VARIANTS: tuple[tuple[str, str | None, Any, str], ...] = (
+    ("identity", None, None, "identity"),
+    ("exp_m1", "exposure", -1.0, "exposure -1"),
+    ("exp_p1", "exposure", 1.0, "exposure +1"),
+    ("wb_m60", "wb_temp", -60.0, "wb_temp -60"),
+    ("wb_p60", "wb_temp", 60.0, "wb_temp +60"),
+    ("lift_45", "shadow_lift", 45.0, "shadow_lift 45"),
+    ("bright_07", "brightness", 0.7, "brightness 0.7"),
+    ("bright_14", "brightness", 1.4, "brightness 1.4"),
+    ("contrast_08", "contrast", 0.8, "contrast 0.8"),
+    ("contrast_14", "contrast", 1.4, "contrast 1.4"),
+    ("sat_0", "saturation", 0.0, "saturation 0"),
+    ("sat_15", "saturation", 1.5, "saturation 1.5"),
+    ("sharp_08", "sharpness", 0.8, "sharpness 0.8"),
+    ("sharp_16", "sharpness", 1.6, "sharpness 1.6"),
+    ("nr_off", "noise_reduction", "off", "NR off"),
+    ("nr_full", "noise_reduction", "full", "NR full"),
+)
+ADJ_SWEEP_LABELS = {v: label for v, _, _, label in ADJ_SWEEP_VARIANTS}
+#: パラメータ -> rawpy と方向・大きさを比べる指標（各エンジン内で identity との差を取る）。
+ADJ_PARAM_METRICS: dict[str, tuple[str, ...]] = {
+    "exposure": ("exposure_stops", "log2_mean_linear"),
+    "wb_temp": ("rb_ln_neutral",),
+    "shadow_lift": ("dark_mean_luma",),
+    "brightness": ("mean_luma", "std_luma", "ab_std"),
+    "contrast": ("mean_luma", "std_luma", "ab_std"),
+    "saturation": ("mean_luma", "std_luma", "ab_std"),
+    "sharpness": ("edge_width_ratio", "flat_noise"),
+    "noise_reduction": ("sky_noise", "sky_chroma_noise", "sky_hf_ratio", "star_recall", "flat_noise"),
+}
+#: 白点（impulse_vs_full）を数えるバリアント: variant -> settings 個別上書き。
+#: nr_off_sh0 は adjustments + sharpness_amount 0 の明示上書きで CLI の白点ガードを発動させる（§3.4）。
+ADJ_WHITE_DOT_VARIANTS: dict[str, dict[str, float]] = {
+    "identity": {},
+    "nr_off": {},
+    "nr_off_sh0": {"sharpness_amount": 0.0},
+}
+ADJ_WHITE_DOT_GUARD = "white_dot_sharpness_floor"
+#: 後段オラクル: (variant, 後段の上書き, 種別)。デコード段は identity のまま tiff16 sRGB で出し、
+#: adjustments 無しの tiff16 sRGB に Python の後段（_apply_shadow_lift_array + _apply_tone_array）を掛けたものと比べる。
+#: "tone" が合否対象（USM 無し）。"tone+usm" は CLI が応答した post.usm（σ・gain・coring）で Python の USM を
+#: 再現した参考比較（ガウス実装差があるので合否は参考扱い）。"preset" は既定プリセットの値（実行時に解決）。
+ADJ_ORACLE_VARIANTS: tuple[tuple[str, dict[str, Any] | str, str], ...] = (
+    ("or_lift_45", {"shadow_lift": 45.0}, "tone"),
+    ("or_lift_100", {"shadow_lift": 100.0}, "tone"),
+    ("or_bright_07", {"brightness": 0.7}, "tone"),
+    ("or_bright_14", {"brightness": 1.4}, "tone"),
+    ("or_contrast_08", {"contrast": 0.8}, "tone"),
+    ("or_contrast_14", {"contrast": 1.4}, "tone"),
+    ("or_sat_0", {"saturation": 0.0}, "tone"),
+    ("or_sat_15", {"saturation": 1.5}, "tone"),
+    ("or_combo", {"shadow_lift": 30.0, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3}, "tone"),
+    ("or_sharp_16", {"sharpness": 1.6}, "tone+usm"),
+    ("or_preset", "preset", "tone+usm"),
+)
+#: オラクルの暫定閾値（設計書 §3.7）: ΔE76 の中央値 ≤ 0.3、チャンネル差の p99 ≤ 1/255。
+ORACLE_DE76_MEDIAN_MAX = 0.3
+ORACLE_CHANNEL_P99_MAX = 1.0 / 255.0
+#: その他の合否の目安（設計書 §3.7。すべて暫定）
+ADJ_EXPOSURE_STOP_TOL = 0.15
+ADJ_WB_RATIO_RANGE = (0.7, 1.4)
+ADJ_SHARP_BASELINE_WIDTH = 0.95
+ADJ_SHARP_BASELINE_TOL = 0.05
+ADJ_SHARP16_NOISE_MAX = 1.5
+ADJ_NR_FULL_RECALL_MIN = 0.99
+ADJ_NR_FULL_HF_MIN = 0.7
+ADJ_IMPULSE_MAX = 10
+ADJ_ELAPSED_RATIO_MAX = 1.5
+#: 近中立タイル（カメラ JPEG で彩度下位 10%）と暗部（輝度下位 25%）
+NEUTRAL_TILE_BLOCK = 32
+NEUTRAL_TILE_FRACTION = 0.1
+NEUTRAL_TILE_LUMA = (0.08, 0.92)
+DARK_FRACTION = 0.25
+ADJ_KEYS = (
+    "exposure_stops", "log2_mean_linear", "rb_ln_neutral", "dark_mean_luma", "mean_luma", "std_luma", "ab_std",
+    "edge_width_ratio", "edge_width_px", "flat_noise", "flat_noise_ratio",
+    "sky_noise", "sky_noise_ratio", "sky_chroma_noise", "sky_hf_ratio", "star_recall", "impulse_count", "impulse_vs_full",
+    "engine_elapsed_s", "wall_s",
+)
+
+
+def adjustments_for(variant: str) -> dict[str, Any]:
+    """掃引バリアントの Adjustments 9 キー全量（identity に 1 パラメータだけ上書き）。"""
+    for name, param, value, _label in ADJ_SWEEP_VARIANTS:
+        if name == variant:
+            out = dict(ADJ_IDENTITY)
+            if param is not None:
+                out[param] = value
+            return out
+    if variant in ADJ_WHITE_DOT_VARIANTS and variant.startswith("nr_off"):
+        return {**ADJ_IDENTITY, "noise_reduction": "off"}
+    raise KeyError(f"未知の adjustments バリアントです: {variant}")
+
+
+def oracle_adjustments(post: dict[str, Any] | str, preset: dict[str, Any] | None = None) -> dict[str, Any]:
+    """オラクル用 Adjustments: デコード段は identity に固定し、後段（lift / b / c / s / sharpness）だけ動かす。
+
+    ``post == "preset"`` のときは ``preset``（既定プリセットの解決済み値）の後段キーを使う。
+    exposure / wb_temp / noise_reduction は identity のまま（デコード段を恒等に保つ）。
+    """
+    source = preset if post == "preset" else post
+    if not isinstance(source, dict):
+        raise ValueError("preset のオラクルには既定プリセットの値が必要です")
+    out = dict(ADJ_IDENTITY)
+    for key in ("shadow_lift", "brightness", "contrast", "saturation", "sharpness", "highlight_recovery"):
+        if key in source:
+            out[key] = float(source[key])
+    return out
+
+
+def parse_cli_version(value: Any) -> tuple[int, ...] | None:
+    """"0.3.0" -> (0, 3, 0)。読めなければ None。"""
+    if not isinstance(value, str):
+        return None
+    match = re.match(r"^\s*(\d+)\.(\d+)(?:\.(\d+))?", value)
+    if not match:
+        return None
+    return tuple(int(g or 0) for g in match.groups())
+
+
+def adjustments_cli_problem(version: Any, capabilities: Any) -> str | None:
+    """CLI の ``--version`` / ``--capabilities`` 応答から、--adjustments を回せない理由を返す（回せれば None）。"""
+    if not isinstance(version, dict) or version.get("error") or not version.get("cli_version"):
+        detail = version.get("error") if isinstance(version, dict) else version
+        return f"Core Image CLI のバージョンを取得できません（--version: {detail}）"
+    parsed = parse_cli_version(version.get("cli_version"))
+    need = ".".join(str(v) for v in ADJUSTMENTS_MIN_CLI)
+    if parsed is None or parsed < ADJUSTMENTS_MIN_CLI:
+        return (f"Core Image CLI {version.get('cli_version')} は adjustments に未対応です（{need} 以上が必要）。"
+                "CLI を更新して npm run build:coreimage で再ビルドしてください")
+    adj = capabilities.get("adjustments") if isinstance(capabilities, dict) else None
+    if not isinstance(adj, dict) or adj.get("supported") is not True:
+        return (f"Core Image CLI {version.get('cli_version')} の --capabilities に adjustments.supported: true がありません"
+                "（設計書 §4.2）")
+    return None
+
+
+def validate_adjustments_request(request: dict[str, Any]) -> list[str]:
+    """ハーネスが組んだ CLI リクエストが設計書 §4.1 の凍結契約に沿うかを確かめる（純粋。問題の一覧を返す）。"""
+    from local_raw.presets import ADJUSTMENT_KEYS, ADJUSTMENT_RANGES, NOISE_REDUCTION_CHOICES
+
+    adj = request.get("adjustments")
+    if adj is None:
+        return []
+    problems: list[str] = []
+    settings = request.get("settings") or {}
+    if not isinstance(adj, dict):
+        return ["adjustments がオブジェクトではありません"]
+    if settings.get("profile") != "apple_default":
+        problems.append("adjustments は profile apple_default のときだけ指定できます")
+    for key in ("exposure_ev", "neutral_temperature", "neutral_tint"):
+        if key in settings:
+            problems.append(f"adjustments と settings.{key} は同時に指定できません")
+    missing = sorted(set(ADJUSTMENT_KEYS) - set(adj))
+    unknown = sorted(set(adj) - set(ADJUSTMENT_KEYS))
+    if missing:
+        problems.append(f"adjustments のキーが足りません: {', '.join(missing)}")
+    if unknown:
+        problems.append(f"adjustments に未知のキーがあります: {', '.join(unknown)}")
+    for key, (lo, hi) in ADJUSTMENT_RANGES.items():
+        value = adj.get(key)
+        if key not in adj:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            problems.append(f"adjustments.{key} が数値ではありません: {value!r}")
+        elif not (lo <= float(value) <= hi):
+            problems.append(f"adjustments.{key}={value} が値域 {lo}..{hi} の外です")
+    if "noise_reduction" in adj and adj["noise_reduction"] not in NOISE_REDUCTION_CHOICES:
+        problems.append(f"adjustments.noise_reduction が不正です: {adj['noise_reduction']!r}")
+    return problems
+
+
+def mean_linear_luma(rgb8: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """sRGB 8bit をリニア化した Rec.709 輝度の平均（mask があればその画素だけ）。"""
+    lin = luma_of(srgb_to_linear(rgb8.astype(np.float32) / 255.0))
+    sel = lin[mask] if mask is not None else lin
+    return float(sel.mean()) if sel.size else float("nan")
+
+
+def neutral_tile_mask(camera_rgb8: np.ndarray, block: int = NEUTRAL_TILE_BLOCK, fraction: float = NEUTRAL_TILE_FRACTION,
+                      luma_range: tuple[float, float] = NEUTRAL_TILE_LUMA) -> np.ndarray:
+    """カメラ JPEG で彩度（max−min の平均）の下位 ``fraction`` のタイル = 近中立パッチの画素マスク。
+
+    黒つぶれ・白飛びに近いタイル（平均輝度が ``luma_range`` の外）は R/B 比が不安定なので除く。
+    """
+    rgb01 = camera_rgb8.astype(np.float32) / 255.0
+    h, w = rgb01.shape[:2]
+    rows, cols = h // block, w // block
+    mask = np.zeros((h, w), dtype=bool)
+    if rows == 0 or cols == 0:
+        return mask
+    crop = rgb01[: rows * block, : cols * block]
+    tiles = crop.reshape(rows, block, cols, block, 3).swapaxes(1, 2)
+    sat = (tiles.max(axis=4) - tiles.min(axis=4)).mean(axis=(2, 3))
+    luma = luma_of(tiles.reshape(rows, cols, block * block, 3)).mean(axis=2)
+    valid = (luma >= luma_range[0]) & (luma <= luma_range[1])
+    if not np.any(valid):
+        return mask
+    count = max(1, int(round(valid.sum() * fraction)))
+    order = np.argsort(np.where(valid, sat, np.inf), axis=None, kind="stable")[:count]
+    for index in order:
+        r, c = divmod(int(index), cols)
+        mask[r * block:(r + 1) * block, c * block:(c + 1) * block] = True
+    return mask
+
+
+def rb_log_ratio(rgb8: np.ndarray, mask: np.ndarray) -> float:
+    """mask 画素のリニア R 平均 / B 平均の自然対数（暖色ほど大きい）。"""
+    if not mask.any():
+        return float("nan")
+    lin = srgb_to_linear(rgb8.astype(np.float32) / 255.0)
+    r = float(lin[..., 0][mask].mean())
+    b = float(lin[..., 2][mask].mean())
+    return math.log(r / b) if r > 0 and b > 0 else float("nan")
+
+
+def dark_pixel_mask(camera_rgb8: np.ndarray, fraction: float = DARK_FRACTION) -> np.ndarray:
+    """カメラ JPEG の輝度下位 ``fraction`` の画素（暗部）。全バリアントを同じ画素で測るため基準画像で 1 回決める。"""
+    luma = luma_of(camera_rgb8.astype(np.float32) / 255.0)
+    return luma <= np.percentile(luma, fraction * 100.0)
+
+
+def tone_stats(rgb8: np.ndarray) -> dict[str, float]:
+    """平均輝度・輝度の標準偏差（sRGB 0..1）と a*b* の標準偏差（Lab、hypot(std a, std b)）。"""
+    rgb01 = rgb8.astype(np.float32) / 255.0
+    luma = luma_of(rgb01)
+    lab = cv2.cvtColor(rgb01, cv2.COLOR_RGB2Lab)
+    return {
+        "mean_luma": float(luma.mean()),
+        "std_luma": float(luma.std()),
+        "ab_std": float(math.hypot(float(lab[..., 1].std()), float(lab[..., 2].std()))),
+    }
+
+
+def adjustment_image_metrics(rgb8: np.ndarray, neutral_mask: np.ndarray, dark_mask: np.ndarray) -> dict[str, float]:
+    """掃引の方向・大きさを見る基本指標（純粋）。差は呼び出し側が identity と取る。"""
+    lin_mean = mean_linear_luma(rgb8)
+    out = {
+        "log2_mean_linear": math.log2(lin_mean) if lin_mean > 0 else float("nan"),
+        "rb_ln_neutral": rb_log_ratio(rgb8, neutral_mask),
+        "dark_mean_luma": float(luma_of(rgb8.astype(np.float32) / 255.0)[dark_mask].mean()) if dark_mask.any() else float("nan"),
+    }
+    out.update(tone_stats(rgb8))
+    out["flat_noise"] = flat_noise(cv2.cvtColor(rgb8, cv2.COLOR_RGB2GRAY))
+    return out
+
+
+def edge_reference(cam_gray: np.ndarray) -> dict[str, Any]:
+    """カメラ JPEG のエッジ点（ROI ごと）と 10–90% 幅。``edge_width_vs_camera`` の基準（--sharpness と同じ手順）。"""
+    h, w = cam_gray.shape[:2]
+    roi_size = max(96, int(round(max(w, h) * ROI_FRACTION)))
+    boxes = roi_boxes(cam_gray, roi_size, k=3)
+    edge_points = {label: find_edge_points(cam_gray, box) for label, box in boxes if label != "corner"}
+    cam_widths = {label: [edge_rise_width(p) for p in sample_profiles(cam_gray, pts)]
+                  for label, pts in edge_points.items() if len(pts)}
+    return {"boxes": boxes, "edge_points": edge_points, "cam_widths": cam_widths, "max_shift": roi_size / 4.0}
+
+
+def edge_width_vs_camera(ref: dict[str, Any], cam_gray: np.ndarray, gray: np.ndarray) -> dict[str, Any]:
+    """エッジ 10–90% 幅の中央値と、カメラ JPEG との比の中央値（ROI ごとに位相相関で位置合わせ）。"""
+    widths: list[float] = []
+    ratios: list[float] = []
+    for label, box in ref["boxes"]:
+        pts = ref["edge_points"].get(label)
+        if pts is None or not len(pts) or label not in ref["cam_widths"]:
+            continue
+        dx, dy, response = roi_shift(cam_gray, gray, box, margin=int(ref["max_shift"]))
+        if response < ROI_MIN_RESPONSE or math.hypot(dx, dy) > ref["max_shift"]:
+            continue
+        moved = pts.copy()
+        moved[:, 0] += dx
+        moved[:, 1] += dy
+        for w_var, w_cam in zip((edge_rise_width(p) for p in sample_profiles(gray, moved)), ref["cam_widths"][label]):
+            if w_var is not None:
+                widths.append(w_var)
+                if w_cam:
+                    ratios.append(w_var / w_cam)
+    return {"edge_width_px": median_or_nan(widths), "edge_width_ratio": median_or_nan(ratios), "edge_n": len(widths)}
+
+
+def delta_e76_map(rgb01_a: np.ndarray, rgb01_b: np.ndarray) -> np.ndarray:
+    """0..1 float sRGB 2 枚の画素ごとの ΔE76（OpenCV の Lab, D65）。"""
+    if rgb01_a.shape != rgb01_b.shape:
+        raise ValueError("delta_e76_map は同寸の画像が必要です")
+    lab_a = cv2.cvtColor(np.clip(rgb01_a, 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)
+    lab_b = cv2.cvtColor(np.clip(rgb01_b, 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)
+    return np.sqrt(((lab_a - lab_b) ** 2).sum(axis=2))
+
+
+def oracle_compare(ci01: np.ndarray, oracle01: np.ndarray) -> dict[str, Any]:
+    """CI の後段出力とオラクル（Python 後段）の差（純粋）。閾値は ORACLE_* （設計書 §3.7 の暫定値）。"""
+    de = delta_e76_map(ci01, oracle01)
+    diff = np.abs(ci01.astype(np.float32) - oracle01.astype(np.float32))
+    out = {
+        "de76_median": float(np.median(de)),
+        "de76_p99": float(np.percentile(de, 99)),
+        "de76_max": float(de.max()),
+        "chan_abs_mean": float(diff.mean()),
+        "chan_abs_p99": float(np.percentile(diff, 99)),
+        "chan_abs_max": float(diff.max()),
+    }
+    out["pass_de76_median"] = out["de76_median"] <= ORACLE_DE76_MEDIAN_MAX
+    out["pass_chan_p99"] = out["chan_abs_p99"] <= ORACLE_CHANNEL_P99_MAX + 1e-9
+    out["pass"] = out["pass_de76_median"] and out["pass_chan_p99"]
+    return out
+
+
+def post_chain_oracle(base01: np.ndarray, adjustments: dict[str, Any], usm: dict[str, Any] | None = None) -> np.ndarray:
+    """adjustments 無しの CI 出力（tiff16 sRGB、0..1）に rawpy の後段を Python で掛けたオラクル。
+
+    ``engine._apply_shadow_lift_array`` → ``engine._apply_tone_array``（ロジックは複製しない）。USM は
+    ``usm``（CLI が ``adjustments_applied.post.usm`` で返した σ・gain・coring）で差し替え、無ければ gain 0
+    （``rawpy_nosharp`` と同じ手法）。CI の写像（sharpness ≤ 1 はデコーダ側、>1 の増分だけ USM）に合わせるため、
+    rawpy の撮影時シャープの式は使わない。
+    """
+    from unittest import mock
+
+    from local_raw import engine
+
+    sigma = float((usm or {}).get("sigma") or 0.6)
+    gain = float((usm or {}).get("gain") or 0.0)
+    coring = float((usm or {}).get("coring") or 0.0)
+
+    def ci_usm_params(_long_edge: int, _sharpness: float, _iso: float | None) -> tuple[float, float, float]:
+        return sigma, gain, coring
+
+    lifted = engine._apply_shadow_lift_array(base01, float(adjustments["shadow_lift"]))
+    with mock.patch.object(engine, "_capture_sharpen_params", ci_usm_params):
+        return engine._apply_tone_array(lifted, adjustments, iso=None)
+
+
+def applied_diff(expected: dict[str, Any], actual: dict[str, Any], skip: Iterable[str] = ADJ_BASELINE_SKIP,
+                 rel_tol: float = 0.0) -> list[str]:
+    """``applied`` 2 つの差分（キー集合の差も数える。回帰スクリプトと同じ規則）。rel_tol > 0 なら数値は相対誤差で比べる。"""
+    skip = set(skip)
+    diffs = []
+    for key in sorted((set(expected) | set(actual)) - skip):
+        a, b = expected.get(key), actual.get(key)
+        if rel_tol > 0 and isinstance(a, (int, float)) and isinstance(b, (int, float)) \
+                and not isinstance(a, bool) and not isinstance(b, bool):
+            if math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=rel_tol):
+                continue
+        elif a == b:
+            continue
+        diffs.append(f"{key}: {a!r} -> {b!r}")
+    return diffs
+
+
+def sweep_deltas(metrics: dict[str, dict[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """各エンジン内で identity との差を取り、rawpy と CI の方向・大きさを並べる（純粋）。
+
+    ``metrics``: engine（"rawpy" / "ci"）-> variant -> 指標。戻り値は (variant, metric) ごとの行:
+    delta_rawpy, delta_ci, ratio（= delta_ci / delta_rawpy）, direction_match。
+    """
+    rows = []
+    for variant, param, value, _label in ADJ_SWEEP_VARIANTS:
+        if param is None:
+            continue
+        for metric in ADJ_PARAM_METRICS[param]:
+            row: dict[str, Any] = {"variant": variant, "param": param, "value": value, "metric": metric}
+            for engine_name in ("rawpy", "ci"):
+                base = metrics.get(engine_name, {}).get("identity", {}).get(metric)
+                cur = metrics.get(engine_name, {}).get(variant, {}).get(metric)
+                ok = all(isinstance(v, (int, float)) and math.isfinite(float(v)) for v in (base, cur))
+                row[f"delta_{engine_name}"] = float(cur) - float(base) if ok else float("nan")
+            dr, dc = row["delta_rawpy"], row["delta_ci"]
+            row["ratio"] = dc / dr if math.isfinite(dr) and math.isfinite(dc) and dr != 0 else float("nan")
+            row["direction_match"] = direction_match(dr, dc)
+            rows.append(row)
+    return rows
+
+
+#: 「効いていない」とみなす差の大きさ（指標の単位。8bit 量子化・JPEG の揺れより十分小さい）。
+DIRECTION_EPS = 1e-4
+
+
+def direction_match(delta_ref: float, delta: float, eps: float = DIRECTION_EPS) -> bool | None:
+    """基準（rawpy）の差と同じ向きに動いたか。基準が動かなければ None、基準だけ動いて対象が動かなければ False。"""
+    if not (math.isfinite(delta_ref) and math.isfinite(delta)) or abs(delta_ref) <= eps:
+        return None
+    if abs(delta) <= eps:
+        return False
+    return (delta_ref > 0) == (delta > 0)
+
+
+def _num(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else float("nan")
+
+
+def _check(name: str, value: Any, threshold: str, passed: bool | None, **extra: Any) -> dict[str, Any]:
+    return {"check": name, "value": value, "threshold": threshold, "pass": passed, **extra}
+
+
+def adjustment_checks(
+    ci: dict[str, dict[str, Any]],
+    rawpy: dict[str, dict[str, Any]],
+    camera: dict[str, Any],
+    deltas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """設計書 §3.7 の合否の目安（暫定）を 1 カット分評価する（純粋）。測れない項目は pass=None。
+
+    ``ci`` / ``rawpy``: variant -> 指標（white dot の ``nr_off_sh0`` と ``ci_adj_guards`` を含みうる）。
+    ``camera``: カメラ JPEG の指標（flat_noise / sky_hf_ratio）。``deltas``: ``sweep_deltas`` の結果。
+    """
+    checks: list[dict[str, Any]] = []
+    d = {(r["variant"], r["metric"]): r for r in deltas}
+
+    def fin(*values: float) -> bool:
+        return all(math.isfinite(v) for v in values)
+
+    # exposure: CI の log2 差が ±1 の ±0.15 以内・両エンジンで単調（exposure_ratio_stops = 中央 60%・非クリップ画素の
+    # リニア輝度比。測れなければ全画素の log2_mean_linear の差で代える）
+    def stops(variant: str, engine_name: str) -> float:
+        value = _num(d.get((variant, "exposure_stops"), {}).get(f"delta_{engine_name}"))
+        return value if math.isfinite(value) else _num(d.get((variant, "log2_mean_linear"), {}).get(f"delta_{engine_name}"))
+
+    m1, p1 = stops("exp_m1", "ci"), stops("exp_p1", "ci")
+    checks.append(_check("exposure_ci_m1_stops", m1, f"-1±{ADJ_EXPOSURE_STOP_TOL}", abs(m1 + 1) <= ADJ_EXPOSURE_STOP_TOL if fin(m1) else None))
+    checks.append(_check("exposure_ci_p1_stops", p1, f"+1±{ADJ_EXPOSURE_STOP_TOL}", abs(p1 - 1) <= ADJ_EXPOSURE_STOP_TOL if fin(p1) else None))
+    for engine_name in ("ci", "rawpy"):
+        a, b = stops("exp_m1", engine_name), stops("exp_p1", engine_name)
+        checks.append(_check(f"exposure_{engine_name}_monotonic", f"{a:.3f} < 0 < {b:.3f}", "-1 < 0 < +1", (a < 0 < b) if fin(a, b) else None))
+    # wb_temp: rawpy と同方向（+ で R/B 増 = 暖色）、大きさの比 0.7〜1.4
+    lo, hi = ADJ_WB_RATIO_RANGE
+    for variant in ("wb_m60", "wb_p60"):
+        row = d.get((variant, "rb_ln_neutral"), {})
+        dc, ratio = _num(row.get("delta_ci")), _num(row.get("ratio"))
+        expect_sign = 1 if variant == "wb_p60" else -1
+        checks.append(_check(f"{variant}_ci_direction", dc, "+ で R/B 増（暖）" if expect_sign > 0 else "− で R/B 減（青）",
+                             (dc * expect_sign > 0) if fin(dc) else None))
+        checks.append(_check(f"{variant}_direction_vs_rawpy", row.get("direction_match"), "rawpy と同方向", row.get("direction_match")))
+        checks.append(_check(f"{variant}_ratio_vs_rawpy", ratio, f"{lo}..{hi}", (lo <= ratio <= hi) if fin(ratio) else None))
+    # shadow_lift / brightness / contrast / saturation: rawpy と同方向（大きさはオラクルで見る）
+    for variant, metric in (("lift_45", "dark_mean_luma"), ("bright_07", "mean_luma"), ("bright_14", "mean_luma"),
+                            ("contrast_08", "std_luma"), ("contrast_14", "std_luma"), ("sat_0", "ab_std"), ("sat_15", "ab_std")):
+        row = d.get((variant, metric), {})
+        checks.append(_check(f"{variant}_{metric}_direction_vs_rawpy", _num(row.get("ratio")), "同方向（値は ci/rawpy の比）",
+                             row.get("direction_match")))
+    # sharpness: エッジ幅 0.8 > 1.0 > 1.6（単調）、1.6 の flat_noise がカメラ比 1.5 倍以内、1.0 は 0.95±0.05
+    w08, w10, w16 = (_num(ci.get(v, {}).get("edge_width_ratio")) for v in ("sharp_08", "identity", "sharp_16"))
+    checks.append(_check("sharpness_ci_edge_monotonic", f"{w08:.3f} > {w10:.3f} > {w16:.3f}", "0.8 > 1.0 > 1.6",
+                         (w08 > w10 > w16) if fin(w08, w10, w16) else None))
+    checks.append(_check("sharpness_ci_10_edge_ratio", w10, f"{ADJ_SHARP_BASELINE_WIDTH}±{ADJ_SHARP_BASELINE_TOL}",
+                         abs(w10 - ADJ_SHARP_BASELINE_WIDTH) <= ADJ_SHARP_BASELINE_TOL if fin(w10) else None))
+    n16, ncam = _num(ci.get("sharp_16", {}).get("flat_noise")), _num(camera.get("flat_noise"))
+    nratio = n16 / ncam if fin(n16, ncam) and ncam > 0 else float("nan")
+    checks.append(_check("sharpness_ci_16_flat_noise_vs_camera", nratio, f"≤{ADJ_SHARP16_NOISE_MAX}",
+                         nratio <= ADJ_SHARP16_NOISE_MAX if fin(nratio) else None))
+    # noise_reduction: off > light > full（空があれば sky_noise、無ければ flat_noise）、full の星と塗りつぶし
+    key = "sky_noise" if fin(*(_num(ci.get(v, {}).get("sky_noise")) for v in ("nr_off", "identity", "nr_full"))) else "flat_noise"
+    off, light, full = (_num(ci.get(v, {}).get(key)) for v in ("nr_off", "identity", "nr_full"))
+    checks.append(_check("nr_ci_monotonic", f"{off:.3f} > {light:.3f} > {full:.3f}", f"off > light > full（{key}）",
+                         (off > light > full) if fin(off, light, full) else None))
+    recall = _num(ci.get("nr_full", {}).get("star_recall"))
+    has_stars = _num(ci.get("nr_full", {}).get("star_recall_n")) > 0
+    checks.append(_check("nr_ci_full_star_recall", recall, f"≥{ADJ_NR_FULL_RECALL_MIN}",
+                         recall >= ADJ_NR_FULL_RECALL_MIN if fin(recall) and has_stars else None,
+                         light_star_recall=_num(ci.get("identity", {}).get("star_recall"))))
+    hf, hf_cam = _num(ci.get("nr_full", {}).get("sky_hf_ratio")), _num(camera.get("sky_hf_ratio"))
+    checks.append(_check("nr_ci_full_sky_hf_vs_camera", hf / hf_cam if fin(hf, hf_cam) and hf_cam > 0 else float("nan"),
+                         f"≥{ADJ_NR_FULL_HF_MIN}", (hf >= ADJ_NR_FULL_HF_MIN * hf_cam) if fin(hf, hf_cam) else None))
+    # 白点: impulse_vs_full ≤ 10、ガードは nr_off_sh0 だけで発動
+    for variant in ADJ_WHITE_DOT_VARIANTS:
+        imp = _num(ci.get(variant, {}).get("impulse_vs_full"))
+        checks.append(_check(f"white_dot_{variant}_impulse_vs_full", imp, f"≤{ADJ_IMPULSE_MAX}", imp <= ADJ_IMPULSE_MAX if fin(imp) else None))
+        guards = ci.get(variant, {}).get("ci_adj_guards")
+        if isinstance(guards, str):
+            fired = ADJ_WHITE_DOT_GUARD in guards.split(";")
+            expect = variant == "nr_off_sh0"
+            checks.append(_check(f"white_dot_{variant}_guard", guards or "(none)",
+                                 ADJ_WHITE_DOT_GUARD if expect else "発動しない", fired == expect))
+    # highlight_recovery は無効（ignored に載る）
+    ignored = ci.get("identity", {}).get("ci_adj_ignored")
+    if isinstance(ignored, str):
+        checks.append(_check("highlight_recovery_ignored", ignored, "highlight_recovery", "highlight_recovery" in ignored.split(";")))
+    return checks
+
+
+def adjustments_plan(ctx: "RunContext", capture_ids: list[str]) -> list[dict[str, Any]]:
+    """--adjustments で投げるリクエスト / ワーカー呼び出しの一覧（純粋。CLI は呼ばない）。--dry-run で書き出す。"""
+    from local_raw import presets
+
+    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    plan: list[dict[str, Any]] = []
+    for cid in capture_ids:
+        arw = source_file(ctx.source_root, cid, "ARW")
+
+        def ci(variant: str, mode: str, **kw: Any) -> None:
+            out = coreimage_output_path(ctx, cid, mode, True, variant=variant, output_format=kw.get("output_format", "jpeg"))
+            request = coreimage_request(arw, out, mode, True, decoder_version="9", profile="apple_default",
+                                        max_edge=ctx.max_edge, **kw)
+            plan.append({"capture_id": cid, "engine": "coreimage", "variant": variant, "mode": mode,
+                         "request": request, "problems": validate_adjustments_request(request)})
+
+        ci("adj_default", "preview")  # 既定リクエスト（adjustments 無し）の回帰
+        for variant, *_ in ADJ_SWEEP_VARIANTS:
+            ci(f"adj_{variant}", "preview", adjustments=adjustments_for(variant))
+            plan.append({"capture_id": cid, "engine": "rawpy", "variant": variant, "mode": "preview",
+                         "worker_adjustments": adjustments_for(variant), "problems": []})
+        ci("adj_nr_off_sh0", "preview", adjustments=adjustments_for("nr_off_sh0"), overrides=ADJ_WHITE_DOT_VARIANTS["nr_off_sh0"])
+        for variant, overrides in ADJ_WHITE_DOT_VARIANTS.items():
+            ci(f"adj_{variant}", "full", adjustments=adjustments_for(variant), overrides=overrides or None)
+        ci("or_base", "preview", output_format="tiff16", output_color_space="srgb")
+        for variant, post, _kind in ADJ_ORACLE_VARIANTS:
+            ci(variant, "preview", output_format="tiff16", output_color_space="srgb",
+               adjustments=oracle_adjustments(post, preset))
+    return plan
+
+
+def develop_adjustment_variants(ctx: RunContext, capture_id: str, workers: int = 4) -> dict[str, dict[str, Any]]:
+    """1 カット分の現像（rawpy 掃引・CI 掃引・白点・既定・オラクル）。キーは "rawpy:<v>" / "ci:<v>" / "ci_full:<v>" / "or:<v>"。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from local_raw import presets
+
+    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    ci_kw = {"decoder_version": "9", "profile": "apple_default"}
+    jobs: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        jobs["ci:default"] = pool.submit(run_coreimage, ctx, capture_id, "preview", True, variant="adj_default", **ci_kw)
+        for variant, *_ in ADJ_SWEEP_VARIANTS:
+            adj = adjustments_for(variant)
+            jobs[f"rawpy:{variant}"] = pool.submit(run_rawpy, ctx, capture_id, "preview", adjustments=adj, variant=variant)
+            jobs[f"ci:{variant}"] = pool.submit(run_coreimage, ctx, capture_id, "preview", True,
+                                                variant=f"adj_{variant}", adjustments=adj, **ci_kw)
+        jobs["ci:nr_off_sh0"] = pool.submit(run_coreimage, ctx, capture_id, "preview", True, variant="adj_nr_off_sh0",
+                                            adjustments=adjustments_for("nr_off_sh0"),
+                                            overrides=ADJ_WHITE_DOT_VARIANTS["nr_off_sh0"], **ci_kw)
+        for variant, overrides in ADJ_WHITE_DOT_VARIANTS.items():
+            jobs[f"ci_full:{variant}"] = pool.submit(run_coreimage, ctx, capture_id, "full", True, variant=f"adj_{variant}",
+                                                     adjustments=adjustments_for(variant), overrides=overrides or None, **ci_kw)
+        jobs["or:base"] = pool.submit(run_coreimage, ctx, capture_id, "preview", True, variant="or_base",
+                                      output_format="tiff16", output_color_space="srgb", **ci_kw)
+        for variant, post, _kind in ADJ_ORACLE_VARIANTS:
+            jobs[f"or:{variant}"] = pool.submit(run_coreimage, ctx, capture_id, "preview", True, variant=variant,
+                                                output_format="tiff16", output_color_space="srgb",
+                                                adjustments=oracle_adjustments(post, preset), **ci_kw)
+        return {name: future.result() for name, future in jobs.items()}
+
+
+def read_provenance(row: dict[str, Any]) -> dict[str, Any]:
+    """run_coreimage が出力の隣に残した CLI 応答 JSON（無ければ空）。"""
+    if row.get("error") or not row.get("output"):
+        return {}
+    path = Path(row["output"]).with_suffix(".json")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def load_adj_baseline() -> dict[str, dict[str, Any]]:
+    """既定リクエスト回帰の baseline（capture_id -> applied）。無ければ空。"""
+    try:
+        data = json.loads(ADJ_BASELINE_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {c["capture_id"]: c.get("applied") or {} for c in data.get("captures", []) if c.get("capture_id")}
+
+
+def adjustments_capture(
+    ctx: RunContext,
+    capture_id: str,
+    features: dict[str, Any],
+    category: str,
+    baseline: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """1 カットの掃引・オラクル・白点・回帰。戻り値は (指標行, 差分行, オラクル行, チェック行)。"""
+    runs = develop_adjustment_variants(ctx, capture_id)
+    camera = read_rgb_upright(source_file(ctx.source_root, capture_id, "JPG"))
+    ch, cw = camera.shape[:2]
+    target = fit_size(cw, ch, ctx.max_edge)
+    cam_small = resize_to(camera, target)
+    preview_rows = {k: v for k, v in runs.items() if k.startswith(("rawpy:", "ci:"))}
+    images, rows_by_key = load_variant_images(preview_rows, target)
+    images["camera"] = cam_small
+    iso = features.get("iso")
+    base = {"capture_id": capture_id, "mode": "preview", "category": category, "iso": iso,
+            "exposure_time": features.get("exposure_time"), "lens_model": features.get("lens_model"),
+            "width": target[0], "height": target[1]}
+
+    # --- 基本指標（全バリアント同じ画素: 近中立タイル・暗部はカメラ JPEG で決める）
+    neutral = neutral_tile_mask(cam_small)
+    dark = dark_pixel_mask(cam_small)
+    measured: dict[str, dict[str, Any]] = {k: adjustment_image_metrics(img, neutral, dark) for k, img in images.items()}
+    # exposure: 各エンジン内で identity との露出差（--bracket と同じ exposure_ratio_stops）
+    for engine_name in ("rawpy", "ci"):
+        base_key = f"{engine_name}:identity"
+        if base_key not in images:
+            continue
+        measured[base_key]["exposure_stops"] = 0.0
+        for variant in ("exp_m1", "exp_p1"):
+            if f"{engine_name}:{variant}" in images:
+                measured[f"{engine_name}:{variant}"]["exposure_stops"] = exposure_ratio_stops(
+                    images[base_key], images[f"{engine_name}:{variant}"])["stops"]
+    # --- シャープ: エッジ幅（カメラ比）
+    cam_gray = cv2.cvtColor(cam_small, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    ref = edge_reference(cam_gray)
+    for key in ("camera", "rawpy:identity", "rawpy:sharp_08", "rawpy:sharp_16", "ci:identity", "ci:sharp_08", "ci:sharp_16"):
+        if key in images:
+            measured[key].update(edge_width_vs_camera(ref, cam_gray, cv2.cvtColor(images[key], cv2.COLOR_RGB2GRAY).astype(np.float32)))
+    # --- NR / 白点: 夜景指標（空・星・impulse）。impulse_vs_full は同じリクエストの原寸レンダを縮めたものが基準
+    full_imgs = {f"ci:{k.split(':', 1)[1]}": read_rgb_upright(Path(r["output"]))
+                 for k, r in runs.items() if k.startswith("ci_full:") and not r.get("error")}
+    full_refs = {k: resize_to(img, target) for k, img in full_imgs.items()}
+    night_keys = ["camera", *[f"{e}:{v}" for e in ("rawpy", "ci") for v in ("identity", "nr_off", "nr_full")], "ci:nr_off_sh0"]
+    exif = {k: features.get(k) for k in ("iso", "exposure_time", "f_number")}
+    night, _ = night_measure(images, exif, night_keys, full_refs)
+    for key, values in night.items():
+        measured[key].update({k: values.get(k) for k in (
+            "sky_noise", "sky_noise_ratio", "sky_chroma_noise", "sky_hf_ratio", "star_recall", "star_recall_n",
+            "impulse_count", "impulse_vs_full", "point_count")})
+    cam_noise = measured["camera"].get("flat_noise")
+
+    metric_rows: list[dict[str, Any]] = []
+    by_engine: dict[str, dict[str, dict[str, Any]]] = {"rawpy": {}, "ci": {}}
+    for key in sorted(set(rows_by_key) | {"camera"}):
+        engine_name, _, variant = key.partition(":") if key != "camera" else ("camera", "", "camera")
+        row: dict[str, Any] = {**base, "engine": engine_name, "variant": variant or key, **rows_by_key.get(key, {})}
+        if key in measured:
+            row.update(measured[key])
+            if isinstance(cam_noise, float) and cam_noise > 0 and isinstance(row.get("flat_noise"), float):
+                row["flat_noise_ratio"] = row["flat_noise"] / cam_noise
+        else:
+            row.setdefault("error", "no image")
+        if engine_name in by_engine:
+            by_engine[engine_name][variant] = row
+        metric_rows.append(row)
+    deltas = [{**base, **d} for d in sweep_deltas(by_engine)]
+
+    # --- オラクル（tiff16 sRGB 同士、half float のみ。JPEG を挟まない）
+    oracle_rows: list[dict[str, Any]] = []
+    or_base = runs.get("or:base", {})
+    base01 = read_tiff16_rgb(Path(or_base["output"])) if not or_base.get("error") else None
+    worst: tuple[float, str, np.ndarray, np.ndarray] | None = None
+    from local_raw import presets
+
+    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    for variant, post, kind in ADJ_ORACLE_VARIANTS:
+        run = runs.get(f"or:{variant}", {})
+        orow: dict[str, Any] = {**base, "variant": variant, "kind": kind, "gates": kind == "tone",
+                                "wall_s": run.get("wall_s"), "engine_elapsed_s": run.get("engine_elapsed_s")}
+        adj = oracle_adjustments(post, preset)
+        orow.update({f"adj_{k}": adj[k] for k in ("shadow_lift", "brightness", "contrast", "saturation", "sharpness")})
+        if base01 is None or run.get("error"):
+            orow["error"] = run.get("error") or or_base.get("error") or "base unavailable"
+            oracle_rows.append(orow)
+            continue
+        ci01 = read_tiff16_rgb(Path(run["output"]))
+        if ci01.shape != base01.shape:
+            orow["error"] = f"size mismatch {ci01.shape} vs base {base01.shape}"
+            oracle_rows.append(orow)
+            continue
+        usm = ((read_provenance(run).get("adjustments_applied") or {}).get("post") or {}).get("usm")
+        oracle01 = post_chain_oracle(base01, adj, usm if kind == "tone+usm" else None)
+        orow.update({k: run.get(k) for k in ("ci_usm_sigma", "ci_usm_gain", "ci_usm_coring")})
+        orow.update(oracle_compare(ci01, oracle01))
+        oracle_rows.append(orow)
+        if worst is None or orow["de76_p99"] > worst[0]:
+            worst = (orow["de76_p99"], variant, ci01, oracle01)
+
+    # --- 既定リクエストの回帰と、identity の applied がそれと一致するか
+    checks = [{**base, **c} for c in adjustment_checks(by_engine["ci"], by_engine["rawpy"], measured.get("camera", {}), deltas)]
+    default_prov = read_provenance(runs.get("ci:default", {}))
+    identity_prov = read_provenance(runs.get("ci:identity", {}))
+    if default_prov:
+        checks.append({**base, **_check("default_request_no_adjustments_applied", "adjustments_applied" in default_prov,
+                                         "キー自体が無い", "adjustments_applied" not in default_prov)})
+        if capture_id in baseline:
+            diffs = applied_diff(baseline[capture_id], default_prov.get("applied") or {})
+            checks.append({**base, **_check("default_request_vs_baseline", len(diffs), "差分 0 件", not diffs, diffs="; ".join(diffs))})
+        if identity_prov:
+            diffs = applied_diff(default_prov.get("applied") or {}, identity_prov.get("applied") or {}, rel_tol=1e-4)
+            checks.append({**base, **_check("identity_applied_equals_default", len(diffs), "差分 0 件（デコード段が恒等）",
+                                             not diffs, diffs="; ".join(diffs))})
+    # --- 処理時間: adjustments 込みの preview（JPEG）が既定リクエストの 1.5 倍以内
+    t_default = _num(runs.get("ci:default", {}).get("engine_elapsed_s"))
+    t_adj = median_or_nan(runs[f"ci:{v}"].get("engine_elapsed_s") for v, *_ in ADJ_SWEEP_VARIANTS if f"ci:{v}" in runs)
+    ratio = t_adj / t_default if math.isfinite(t_default) and t_default > 0 and math.isfinite(t_adj) else float("nan")
+    checks.append({**base, **_check("elapsed_ratio_vs_default", ratio, f"≤{ADJ_ELAPSED_RATIO_MAX}",
+                                     ratio <= ADJ_ELAPSED_RATIO_MAX if math.isfinite(ratio) else None)})
+
+    adjustments_sheets(ctx, capture_id, images, measured, worst, f"{capture_id}  preview {target[0]}x{target[1]}  ISO {iso}")
+    return metric_rows, deltas, oracle_rows, checks
+
+
+def adjustments_sheets(
+    ctx: RunContext,
+    capture_id: str,
+    images: dict[str, np.ndarray],
+    measured: dict[str, dict[str, Any]],
+    worst: tuple[float, str, np.ndarray, np.ndarray] | None,
+    caption: str,
+) -> None:
+    """パラメータごとの全体シート（上段 rawpy、下段 CI）、シャープ / NR の等倍クロップ、オラクルの最大差分（EXIF 無し）。"""
+    sample = images.get("camera")
+    if sample is None:
+        return
+    small = fit_size(sample.shape[1], sample.shape[0], 360)
+    groups: dict[str, list[str]] = {}
+    for variant, param, _value, _label in ADJ_SWEEP_VARIANTS:
+        if param is not None:
+            groups.setdefault(param, ["identity"]).append(variant)
+    for param, variants in groups.items():
+        stacked = []
+        for engine_name in ("rawpy", "ci"):
+            panels = [(f"{engine_name} {ADJ_SWEEP_LABELS[v]}", resize_to(images[f"{engine_name}:{v}"], small))
+                      for v in variants if f"{engine_name}:{v}" in images]
+            if panels:
+                stacked.append(labeled_row(panels))
+        if stacked:
+            width = max(r.shape[1] for r in stacked)
+            sheet = np.vstack([np.pad(r, ((0, 0), (0, width - r.shape[1]), (0, 0)), constant_values=24) for r in stacked])
+            save_plain_jpeg(labeled_row([("", sheet)], f"{caption}  {param}"), ctx.out / "sheets" / f"{capture_id}_adj_{param}.jpg")
+    # 等倍クロップ（シャープ: ディテール最大の箱、NR / 白点: 空の箱を 2 倍）
+    gray = cv2.cvtColor(sample, cv2.COLOR_RGB2GRAY)
+    box = detail_box(gray, 200)
+    for name, keys, factor, crop_box in (
+        ("sharpness", ("camera", "rawpy:sharp_08", "rawpy:identity", "rawpy:sharp_16", "ci:sharp_08", "ci:identity", "ci:sharp_16"), 1, box),
+        ("nr", ("camera", "rawpy:nr_off", "rawpy:identity", "rawpy:nr_full", "ci:nr_off", "ci:identity", "ci:nr_full", "ci:nr_off_sh0"), 2,
+         best_box_by_mask(flat_tile_mask_pixels(gray), 120)),
+    ):
+        x0, y0, x1, y1 = crop_box
+        panels = []
+        for key in keys:
+            if key not in images:
+                continue
+            m = measured.get(key, {})
+            label = f"{key}\nedge {_num(m.get('edge_width_ratio')):.2f} fn {_num(m.get('flat_noise')):.2f}" if name == "sharpness" else \
+                f"{key}\nsky {_num(m.get('sky_noise')):.2f} imp {m.get('impulse_vs_full', '-')}"
+            panels.append((label, magnify(images[key][y0:y1, x0:x1], factor)))
+        if panels:
+            save_plain_jpeg(labeled_row(panels[:4], f"{caption}  {name} x{factor}"), ctx.out / "sheets" / f"{capture_id}_adj_{name}_a.jpg", quality=95)
+            if panels[4:]:
+                save_plain_jpeg(labeled_row(panels[4:], f"{caption}  {name} x{factor}"), ctx.out / "sheets" / f"{capture_id}_adj_{name}_b.jpg", quality=95)
+    if worst is not None:
+        _p99, variant, ci01, oracle01 = worst
+        h, w = ci01.shape[:2]
+        diff = np.abs(ci01 - oracle01).max(axis=2)
+        cy, cx = np.unravel_index(int(np.argmax(cv2.blur(diff, (31, 31)))), diff.shape)
+        s = min(200, h, w)
+        x0, y0 = int(min(max(0, cx - s // 2), w - s)), int(min(max(0, cy - s // 2), h - s))
+        crop = (slice(y0, y0 + s), slice(x0, x0 + s))
+        heat = to8(np.repeat(np.clip(diff[crop] * 32.0, 0, 1)[..., None], 3, axis=2))
+        panels = [("CI", magnify(to8(ci01[crop]), 2)), ("oracle (Python post)", magnify(to8(oracle01[crop]), 2)),
+                  ("|diff| x32", magnify(heat, 2))]
+        save_plain_jpeg(labeled_row(panels, f"{caption}  oracle worst {variant}"), ctx.out / "sheets" / f"{capture_id}_adj_oracle_worst.jpg", quality=95)
+
+
+def flat_tile_mask_pixels(gray8: np.ndarray) -> np.ndarray:
+    """空（平坦タイル）の画素マスク。NR シートの箱選びに使う。"""
+    return tile_mask_to_pixels(flat_tile_mask(gray8), gray8.shape)
+
+
+def check_summary(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """チェック名ごとの合格 / 不合格 / 測れず の件数（純粋）。"""
+    out: dict[str, dict[str, Any]] = {}
+    for c in checks:
+        item = out.setdefault(c["check"], {"check": c["check"], "threshold": c.get("threshold"), "pass": 0, "fail": 0, "n_a": 0, "failed": []})
+        if c.get("pass") is True:
+            item["pass"] += 1
+        elif c.get("pass") is False:
+            item["fail"] += 1
+            item["failed"].append(c.get("capture_id"))
+        else:
+            item["n_a"] += 1
+    return [out[k] for k in sorted(out)]
+
+
+def run_adjustments(ctx: RunContext, selection: list[dict[str, Any]], features_by_id: dict[str, dict[str, Any]]) -> None:
+    metric_rows: list[dict[str, Any]] = []
+    delta_rows: list[dict[str, Any]] = []
+    oracle_rows: list[dict[str, Any]] = []
+    check_rows: list[dict[str, Any]] = []
+    started = time.monotonic()
+    baseline = load_adj_baseline()
+    for index, row in enumerate(selection, 1):
+        cid = row["capture_id"]
+        ctx.say(f"[adjustments] ({index}/{len(selection)}) {cid}")
+        try:
+            m, d, o, c = adjustments_capture(ctx, cid, features_by_id[cid], row.get("category", "other"), baseline)
+            metric_rows += m
+            delta_rows += d
+            oracle_rows += o
+            check_rows += c
+            for r in m + o:
+                if r.get("error"):
+                    ctx.say(f"  ERROR {r.get('engine', 'oracle')}:{r['variant']}: {str(r['error'])[:300]}")
+            failed = [x["check"] for x in c if x.get("pass") is False]
+            ctx.say(f"  checks: 不合格 {len(failed)} 件" + (f"（{', '.join(failed)}）" if failed else ""))
+        except Exception as error:  # 1 カットの失敗で全体を止めない
+            metric_rows.append({"capture_id": cid, "mode": "preview", "engine": "harness", "variant": "harness",
+                                "error": f"{type(error).__name__}: {error}"})
+            ctx.say(f"  ERROR {type(error).__name__}: {error}")
+        write_rows_csv(ctx.out / "adjustments_metrics.csv", metric_rows, ("capture_id", "engine", "variant"))
+        if delta_rows:
+            write_rows_csv(ctx.out / "adjustments_deltas.csv", delta_rows, ("capture_id", "variant", "metric"))
+        if oracle_rows:
+            write_rows_csv(ctx.out / "adjustments_oracle.csv", oracle_rows, ("capture_id", "variant", "kind"))
+        if check_rows:
+            write_rows_csv(ctx.out / "adjustments_checks.csv", check_rows, ("capture_id", "check", "pass", "value", "threshold"))
+
+    by_variant = summarize_sharpness(metric_rows, ADJ_KEYS, ("engine", "variant"))
+    delta_keys = ("delta_rawpy", "delta_ci", "ratio")
+    by_delta = summarize_sharpness(delta_rows, delta_keys, ("param", "variant", "metric"))
+    oracle_keys = ("de76_median", "de76_p99", "de76_max", "chan_abs_p99", "chan_abs_max")
+    by_oracle = summarize_sharpness(oracle_rows, oracle_keys, ("kind", "variant"))
+    checks = check_summary(check_rows)
+    errors = [r for r in metric_rows + oracle_rows if r.get("error")]
+    from local_raw import presets
+
+    summary = {
+        "out": str(ctx.out),
+        "identity": ADJ_IDENTITY,
+        "sweep_variants": [{"variant": v, "param": p, "value": val, "adjustments": adjustments_for(v)} for v, p, val, _ in ADJ_SWEEP_VARIANTS],
+        "white_dot_variants": ADJ_WHITE_DOT_VARIANTS,
+        "oracle_variants": [{"variant": v, "kind": k, "adjustments": oracle_adjustments(p, presets.resolve_adjustments(presets.DEFAULT_PRESET, None))}
+                            for v, p, k in ADJ_ORACLE_VARIANTS],
+        "ci_settings": {"decoder_version": "9", "profile": "apple_default", "lens_correction": True, "max_edge": ctx.max_edge},
+        "thresholds": {
+            "oracle_de76_median_max": ORACLE_DE76_MEDIAN_MAX, "oracle_channel_p99_max": ORACLE_CHANNEL_P99_MAX,
+            "exposure_stop_tol": ADJ_EXPOSURE_STOP_TOL, "wb_ratio_range": ADJ_WB_RATIO_RANGE,
+            "sharp_baseline_width": ADJ_SHARP_BASELINE_WIDTH, "sharp_baseline_tol": ADJ_SHARP_BASELINE_TOL,
+            "sharp16_noise_max": ADJ_SHARP16_NOISE_MAX, "nr_full_recall_min": ADJ_NR_FULL_RECALL_MIN,
+            "nr_full_hf_min": ADJ_NR_FULL_HF_MIN, "impulse_max": ADJ_IMPULSE_MAX, "elapsed_ratio_max": ADJ_ELAPSED_RATIO_MAX,
+        },
+        "baseline": str(ADJ_BASELINE_JSON.relative_to(PROJECT_ROOT)),
+        "regression_script": "scripts/coreimage-regression-applied.sh <ARW のフォルダ>",
+        "selection_count": len(selection),
+        "elapsed_total_s": time.monotonic() - started,
+        "errors": errors,
+        "checks": checks,
+        "by_variant": by_variant,
+        "by_delta": by_delta,
+        "by_oracle": by_oracle,
+    }
+    (ctx.out / "adjustments_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    md = "## checks（設計書 §3.7 の暫定の目安）\n\n| check | threshold | pass | fail | n/a | failed |\n|---|---|---|---|---|---|\n"
+    md += "".join(f"| {c['check']} | {c['threshold']} | {c['pass']} | {c['fail']} | {c['n_a']} | {', '.join(map(str, c['failed']))} |\n" for c in checks)
+    md += "\n## oracle（tiff16 sRGB、CI 後段 vs Python 後段）\n\n" + table_md(by_oracle, ("kind", "variant"), oracle_keys, digits=4)
+    md += "\n## sweep deltas（identity との差の中央値、ratio = ci / rawpy）\n\n" + table_md(by_delta, ("param", "variant", "metric"), delta_keys, digits=4)
+    md += "\n## by engine x variant\n\n" + table_md(by_variant, ("engine", "variant"), (
+        "exposure_stops", "log2_mean_linear", "rb_ln_neutral", "dark_mean_luma", "mean_luma", "std_luma", "ab_std",
+        "edge_width_ratio", "flat_noise_ratio", "sky_noise", "star_recall", "impulse_vs_full", "engine_elapsed_s"))
+    (ctx.out / "adjustments_tables.md").write_text(md, encoding="utf-8")
+    (ctx.out / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    n_fail = sum(c["fail"] for c in checks)
+    ctx.say(f"[adjustments] 完了: {ctx.out}（エラー {len(errors)} 件、不合格チェック {n_fail} 件）")
+
+
+def cli_probe(cli: Path, *args: str) -> dict[str, Any]:
+    """CLI を ``--version`` / ``--capabilities`` で呼んで最後の JSON 行を返す（失敗時は {"error": ...}）。"""
+    if not cli.is_file():
+        return {"error": f"CLI がありません: {cli}"}
+    try:
+        proc = subprocess.run([str(cli), *args], capture_output=True, text=True, timeout=60)
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception as error:  # noqa: BLE001
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+
+def adjustments_dry_run(ctx: RunContext, capture_ids: list[str]) -> None:
+    """--adjustments --dry-run: CLI を呼ばずにリクエストを組み、§4.1 の契約検査と CLI 版の確認だけ行う。"""
+    plan = adjustments_plan(ctx, capture_ids)
+    problems = [(p["capture_id"], p["variant"], p["mode"], msg) for p in plan for msg in p["problems"]]
+    version = cli_probe(ctx.cli, "--version")
+    capabilities = cli_probe(ctx.cli, "--capabilities") if not version.get("error") else {}
+    cli_problem = adjustments_cli_problem(version, capabilities)
+    payload = {
+        "capture_ids": capture_ids,
+        "cli": str(ctx.cli),
+        "cli_version": version,
+        "cli_ready": cli_problem is None,
+        "cli_problem": cli_problem,
+        "counts": {
+            "coreimage": sum(1 for p in plan if p["engine"] == "coreimage"),
+            "rawpy": sum(1 for p in plan if p["engine"] == "rawpy"),
+        },
+        "contract_problems": [{"capture_id": c, "variant": v, "mode": m, "problem": msg} for c, v, m, msg in problems],
+        "plan": plan,
+    }
+    (ctx.out / "adjustments_plan.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    ctx.say(f"[adjustments] dry-run: CI {payload['counts']['coreimage']} リクエスト / rawpy {payload['counts']['rawpy']} 回"
+            f" → {ctx.out / 'adjustments_plan.json'}")
+    if cli_problem:
+        ctx.say(f"[adjustments] 注意: 実行時はここで止まります — {cli_problem}")
+    if problems:
+        for c, v, m, msg in problems:
+            ctx.say(f"  契約違反 {c} {v} {m}: {msg}")
+        raise SystemExit(f"--adjustments のリクエストが設計書 §4.1 の契約に反します（{len(problems)} 件）")
+
+
 def environment_info(ctx: RunContext, probe: Path | None) -> dict[str, Any]:
     from local_raw import engine
 
@@ -2687,7 +3706,14 @@ def main(argv: list[str] | None = None) -> None:
         "--highlight", action="store_true",
         help="逆光・ハイライトの評価モード（#71）: チャンネル別クリップ率・境界のマゼンタ率・EDR / boost 掃引",
     )
-    parser.add_argument("--dry-run", action="store_true", help="選定だけ行って終了する")
+    parser.add_argument(
+        "--adjustments", action="store_true",
+        help="Adjustments の評価モード（#72 / #73）: 掃引・後段オラクル・白点・既定リクエスト回帰。CLI 0.3.0 以上が必要",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="選定だけ行って終了する（--adjustments では組んだリクエストを adjustments_plan.json に書いて契約を検査する）",
+    )
     parser.add_argument(
         "--features-cache", type=Path,
         help="選定用特徴量の JSON キャッシュ（あれば読み、無ければ書く。work/ 配下を推奨）",
@@ -2699,6 +3725,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--worker-mode", choices=["preview", "full"], default="preview", help=argparse.SUPPRESS)
     parser.add_argument("--worker-out", help=argparse.SUPPRESS)
     parser.add_argument("--worker-nosharp", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-adjustments", help=argparse.SUPPRESS)  # 既定プリセットへの上書き（JSON オブジェクト）
     args = parser.parse_args(argv)
 
     if args.worker_noop:
@@ -2771,11 +3798,21 @@ def main(argv: list[str] | None = None) -> None:
         selection_payload = {"selection": selection}
     (out / "selection.json").write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     ctx.say(f"選定 {len(selection)} カット: " + ", ".join(f"{r['capture_id']}({r['category']})" for r in selection))
+    if args.adjustments and args.dry_run:
+        adjustments_dry_run(ctx, [r["capture_id"] for r in selection])
+        return
     if args.dry_run:
         return
 
     if not ctx.cli.is_file():
         raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {ctx.cli}")
+    if args.adjustments:
+        problem = adjustments_cli_problem(cli_probe(ctx.cli, "--version"), cli_probe(ctx.cli, "--capabilities"))
+        if problem:
+            raise SystemExit(f"--adjustments を実行できません: {problem}")
+        run_adjustments(ctx, selection, features_by_id)
+        if not (args.sharpness or args.night or args.highlight or args.bracket):
+            return
 
     if args.sharpness or args.night or args.highlight:
         full_ids = [validate_capture_id(c) for c in (args.full_ids or [])] if args.full else []

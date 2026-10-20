@@ -755,3 +755,344 @@ class VariantTableConsistencyTests(unittest.TestCase):
         grouped = [v for group in ce.NIGHT_SHEET_GROUPS for v in group]
         self.assertEqual(sorted(grouped), sorted(names))
         self.assertTrue(set(ce.NIGHT_SCALE_VARIANTS) <= set(ce.CI_SCALE_REQUESTS))
+
+
+# --- Adjustments 評価モード（--adjustments、設計書 coreimage-preview-adjustments.md §3.7 / §4.1 / §4.2）--------
+
+
+def _srgb8_from_linear(lin):
+    """リニア 0..1 → sRGB 8bit（IEC 61966-2-1）。"""
+    lin = np.clip(np.asarray(lin, dtype=np.float64), 0, 1)
+    srgb = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * lin ** (1 / 2.4) - 0.055)
+    return np.rint(srgb * 255).astype(np.uint8)
+
+
+class AdjustmentsContractTests(unittest.TestCase):
+    def test_adjustments_for_overrides_one_key_on_identity(self):
+        self.assertEqual(ce.adjustments_for("identity"), ce.ADJ_IDENTITY)
+        adj = ce.adjustments_for("wb_p60")
+        self.assertEqual(adj["wb_temp"], 60.0)
+        self.assertEqual({k: v for k, v in adj.items() if k != "wb_temp"},
+                         {k: v for k, v in ce.ADJ_IDENTITY.items() if k != "wb_temp"})
+        self.assertEqual(ce.adjustments_for("nr_off_sh0")["noise_reduction"], "off")
+        with self.assertRaises(KeyError):
+            ce.adjustments_for("nope")
+
+    def test_identity_keeps_decode_stage_at_defaults(self):
+        # §3.3: exposure 0 / wb 0 / sharpness 1.0（= apple_default 既定）/ NR light（= 既定）でデコード段は恒等
+        self.assertEqual(ce.ADJ_IDENTITY["exposure"], 0.0)
+        self.assertEqual(ce.ADJ_IDENTITY["wb_temp"], 0.0)
+        self.assertEqual(ce.ADJ_IDENTITY["sharpness"], 1.0)
+        self.assertEqual(ce.ADJ_IDENTITY["noise_reduction"], "light")
+
+    def test_request_without_adjustments_is_unchanged(self):
+        req = ce.coreimage_request(Path("/x/DSC00001.ARW"), Path("/o/a.jpg"), "preview", True,
+                                   profile="apple_default", max_edge=2400)
+        self.assertEqual(req, {"input": "/x/DSC00001.ARW", "output": "/o/a.jpg", "mode": "preview", "decoder_version": "9",
+                               "settings": {"profile": "apple_default", "lens_correction": True}, "max_edge": 2400})
+        full = ce.coreimage_request(Path("/x/a.ARW"), Path("/o/a.tif"), "full", False, output_format="tiff16",
+                                    output_color_space="srgb", max_edge=2400)
+        self.assertNotIn("max_edge", full)
+        self.assertEqual((full["format"], full["output_color_space"]), ("tiff16", "srgb"))
+
+    def test_every_planned_request_satisfies_frozen_contract(self):
+        for variant, *_ in ce.ADJ_SWEEP_VARIANTS:
+            req = ce.coreimage_request(Path("/x/a.ARW"), Path("/o/a.jpg"), "preview", True, profile="apple_default",
+                                       adjustments=ce.adjustments_for(variant), max_edge=2400)
+            self.assertEqual(ce.validate_adjustments_request(req), [], variant)
+            self.assertEqual(len(req["adjustments"]), 9)
+        preset = {"shadow_lift": 15.0, "brightness": 1.0, "contrast": 1.03, "saturation": 1.02, "sharpness": 1.04,
+                  "highlight_recovery": 60.0, "exposure": 0.5, "wb_temp": -3.0, "noise_reduction": "full"}
+        for variant, post, _kind in ce.ADJ_ORACLE_VARIANTS:
+            adj = ce.oracle_adjustments(post, preset)
+            req = ce.coreimage_request(Path("/x/a.ARW"), Path("/o/a.tif"), "preview", True, profile="apple_default",
+                                       adjustments=adj, output_format="tiff16", output_color_space="srgb", max_edge=2400)
+            self.assertEqual(ce.validate_adjustments_request(req), [], variant)
+
+    def test_validate_adjustments_request_reports_violations(self):
+        good = {"settings": {"profile": "apple_default"}, "adjustments": dict(ce.ADJ_IDENTITY)}
+        self.assertEqual(ce.validate_adjustments_request(good), [])
+        self.assertEqual(ce.validate_adjustments_request({"settings": {"profile": "neutral"}}), [])  # adjustments 無しは対象外
+
+        def problems(settings=None, **adj):
+            a = {**ce.ADJ_IDENTITY, **adj}
+            a = {k: v for k, v in a.items() if v is not None}
+            return ce.validate_adjustments_request({"settings": settings or {"profile": "apple_default"}, "adjustments": a})
+
+        self.assertTrue(problems({"profile": "neutral"}))
+        self.assertTrue(problems({"profile": "apple_default", "exposure_ev": 0.5}))
+        self.assertTrue(problems({"profile": "apple_default", "neutral_temperature": 5000}))
+        self.assertEqual(problems({"profile": "apple_default", "luminance_noise_reduction": 0.0}), [])  # 個別上書きは可
+        self.assertTrue(problems(exposure=2.5))
+        self.assertTrue(problems(saturation=True))  # bool は数値として受けない
+        self.assertTrue(problems(noise_reduction="strong"))
+        self.assertTrue(problems(sharpness=None))  # 9 キー必須
+        self.assertTrue(problems(extra=1.0))  # 未知キー
+
+    def test_oracle_adjustments_keeps_decode_identity(self):
+        preset = {"exposure": 1.0, "wb_temp": 30.0, "noise_reduction": "full", "shadow_lift": 15.0, "brightness": 1.0,
+                  "contrast": 1.03, "saturation": 1.02, "sharpness": 1.04, "highlight_recovery": 60.0}
+        adj = ce.oracle_adjustments("preset", preset)
+        self.assertEqual((adj["exposure"], adj["wb_temp"], adj["noise_reduction"]), (0.0, 0.0, "light"))
+        self.assertEqual((adj["shadow_lift"], adj["contrast"], adj["sharpness"]), (15.0, 1.03, 1.04))
+        self.assertEqual(ce.oracle_adjustments({"brightness": 1.4})["brightness"], 1.4)
+        with self.assertRaises(ValueError):
+            ce.oracle_adjustments("preset", None)
+
+    def test_cli_version_gate(self):
+        self.assertEqual(ce.parse_cli_version("0.3.0"), (0, 3, 0))
+        self.assertEqual(ce.parse_cli_version("0.10"), (0, 10, 0))
+        self.assertIsNone(ce.parse_cli_version(None))
+        caps = {"adjustments": {"supported": True, "ignored": ["highlight_recovery"], "post_kernel": "metal"}}
+        self.assertIsNone(ce.adjustments_cli_problem({"cli_version": "0.3.0"}, caps))
+        self.assertIsNone(ce.adjustments_cli_problem({"cli_version": "0.4.1"}, caps))
+        old = ce.adjustments_cli_problem({"cli_version": "0.2.0"}, {})
+        self.assertIn("0.2.0", old)
+        self.assertIn("0.3.0", old)
+        self.assertIn("adjustments.supported", ce.adjustments_cli_problem({"cli_version": "0.3.0"}, {"ok": True}))
+        self.assertIn("取得できません", ce.adjustments_cli_problem({"error": "CLI がありません"}, {}))
+
+    def test_parse_worker_adjustments(self):
+        self.assertIsNone(ce.parse_worker_adjustments(None))
+        self.assertEqual(ce.parse_worker_adjustments('{"exposure": 1}'), {"exposure": 1})
+        with self.assertRaises(SystemExit):
+            ce.parse_worker_adjustments("[1]")
+        with self.assertRaises(SystemExit):
+            ce.parse_worker_adjustments("{bad")
+
+    def test_adjustments_applied_summary_flattens_response(self):
+        payload = {"adjustments_applied": {
+            "defaults": {"sharpness_amount": 1.0, "luminance_noise_reduction_amount": 0.241},
+            "post": {"shadow_lift": 0.15, "usm": {"sigma": 0.6, "gain": 0.12, "coring": 0.0, "long_edge": 2400, "iso": 100},
+                     "wb": {"k0": 5749.2, "mired_shift": 0.0, "mired_per_unit": 0.85}, "noise_reduction": "light"},
+            "ignored": ["highlight_recovery"], "guards": ["white_dot_sharpness_floor"]}}
+        flat = ce.adjustments_applied_summary(payload)
+        self.assertTrue(flat["ci_adjustments_applied"])
+        self.assertEqual(flat["ci_adj_guards"], "white_dot_sharpness_floor")
+        self.assertEqual(flat["ci_adj_ignored"], "highlight_recovery")
+        self.assertEqual((flat["ci_usm_gain"], flat["ci_wb_k0"], flat["ci_def_lum_nr"]), (0.12, 5749.2, 0.241))
+        self.assertEqual(ce.adjustments_applied_summary({"ok": True}), {"ci_adjustments_applied": False})
+
+    def test_applied_diff(self):
+        a = {"sharpness_amount": 1.0, "neutral_temperature": 5749.221, "scale_factor": 0.4, "profile": "apple_default"}
+        self.assertEqual(ce.applied_diff(a, dict(a, scale_factor=0.5)), [])  # scale_factor は見ない
+        self.assertEqual(len(ce.applied_diff(a, dict(a, neutral_temperature=5749.2211))), 1)
+        self.assertEqual(ce.applied_diff(a, dict(a, neutral_temperature=5749.2211), rel_tol=1e-4), [])
+        self.assertEqual(len(ce.applied_diff(a, {**a, "new_key": 1})), 1)  # キー集合の差も数える
+        self.assertEqual(len(ce.applied_diff(a, dict(a, profile="neutral"), rel_tol=1e-4)), 1)
+
+    def test_adjustments_plan_builds_valid_requests_without_cli(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "src"
+            root.mkdir()
+            (root / "DSC00001.arw").write_bytes(b"")
+            (root / "DSC00001.JPG").write_bytes(b"")
+            ctx = ce.RunContext(source_root=root, out=Path(tmp) / "out", cli=Path(tmp) / "missing", max_edge=2400)
+            plan = ce.adjustments_plan(ctx, ["DSC00001"])
+            self.assertFalse((Path(tmp) / "out").exists())  # 計画だけ（何も書かない）
+        self.assertTrue(all(not p["problems"] for p in plan))
+        ci = [p for p in plan if p["engine"] == "coreimage"]
+        rawpy = [p for p in plan if p["engine"] == "rawpy"]
+        self.assertEqual(len(rawpy), len(ce.ADJ_SWEEP_VARIANTS))
+        self.assertEqual(len(ci), 1 + len(ce.ADJ_SWEEP_VARIANTS) + 1 + len(ce.ADJ_WHITE_DOT_VARIANTS) + 1 + len(ce.ADJ_ORACLE_VARIANTS))
+        default = next(p for p in ci if p["variant"] == "adj_default")
+        self.assertNotIn("adjustments", default["request"])
+        self.assertTrue(default["request"]["input"].endswith("DSC00001.arw"))
+        sh0 = next(p for p in ci if p["variant"] == "adj_nr_off_sh0" and p["mode"] == "preview")
+        self.assertEqual(sh0["request"]["settings"]["sharpness_amount"], 0.0)
+        self.assertEqual(sh0["request"]["adjustments"]["noise_reduction"], "off")
+        oracle = [p for p in ci if p["variant"].startswith("or_")]
+        self.assertTrue(all(p["request"].get("format") == "tiff16" and p["request"].get("output_color_space") == "srgb" for p in oracle))
+        # 出力ファイル名が衝突しない
+        outputs = [p["request"]["output"] for p in ci]
+        self.assertEqual(len(outputs), len(set(outputs)))
+
+
+class AdjustmentMetricTests(unittest.TestCase):
+    def test_one_stop_is_one_in_log2_mean_linear(self):
+        rng = np.random.default_rng(1)
+        lin = rng.uniform(0.02, 0.4, (64, 64, 1)).repeat(3, axis=2)
+        a, b = _srgb8_from_linear(lin), _srgb8_from_linear(lin * 2)
+        diff = math.log2(ce.mean_linear_luma(b)) - math.log2(ce.mean_linear_luma(a))
+        self.assertAlmostEqual(diff, 1.0, delta=0.02)
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[:8] = True
+        self.assertGreater(ce.mean_linear_luma(a, mask), 0)
+
+    def test_neutral_tiles_and_rb_ratio(self):
+        img = np.zeros((64, 128, 3), dtype=np.uint8)
+        img[:, :64] = (120, 120, 120)  # 中立
+        img[:, 64:] = (200, 60, 40)    # 高彩度
+        mask = ce.neutral_tile_mask(img, block=32, fraction=0.5)
+        self.assertTrue(mask[:, :64].all())
+        self.assertFalse(mask[:, 64:].any())
+        self.assertAlmostEqual(ce.rb_log_ratio(img, mask), 0.0, places=6)
+        warm = img.copy()
+        warm[:, :64] = (140, 120, 100)
+        self.assertGreater(ce.rb_log_ratio(warm, mask), 0.1)
+        self.assertTrue(math.isnan(ce.rb_log_ratio(img, np.zeros((64, 128), dtype=bool))))
+        # 黒つぶれ・白飛びタイルは近中立に選ばない
+        dark = np.zeros((64, 64, 3), dtype=np.uint8)
+        self.assertFalse(ce.neutral_tile_mask(dark, block=32).any())
+
+    def test_dark_mask_and_tone_stats(self):
+        ramp = np.tile(np.linspace(0, 255, 100).astype(np.uint8)[None, :, None], (10, 1, 3))
+        dark = ce.dark_pixel_mask(ramp, 0.25)
+        self.assertAlmostEqual(float(dark.mean()), 0.25, delta=0.02)
+        self.assertTrue(dark[:, :20].all() and not dark[:, 30:].any())
+        gray = ce.tone_stats(ramp)
+        self.assertAlmostEqual(gray["ab_std"], 0.0, delta=0.5)
+        color = ramp.copy()
+        color[:, :50, 0] = 255
+        self.assertGreater(ce.tone_stats(color)["ab_std"], 5.0)
+        m = ce.adjustment_image_metrics(ramp, np.ones((10, 100), dtype=bool), dark)
+        self.assertLess(m["dark_mean_luma"], 0.15)
+        self.assertTrue({"log2_mean_linear", "rb_ln_neutral", "mean_luma", "std_luma", "ab_std", "flat_noise"} <= set(m))
+
+    def test_oracle_compare_thresholds(self):
+        rng = np.random.default_rng(2)
+        img = rng.uniform(0.05, 0.95, (32, 32, 3)).astype(np.float32)
+        same = ce.oracle_compare(img, img.copy())
+        self.assertTrue(same["pass"])
+        self.assertEqual(same["de76_median"], 0.0)
+        half_lsb = ce.oracle_compare(img, img + 0.5 / 255)
+        self.assertTrue(half_lsb["pass_chan_p99"])
+        off = ce.oracle_compare(img, np.clip(img + 3 / 255, 0, 1))
+        self.assertFalse(off["pass_chan_p99"])
+        self.assertFalse(off["pass"])
+        with self.assertRaises(ValueError):
+            ce.delta_e76_map(img, img[:16])
+
+    def test_post_chain_oracle_matches_rawpy_formula(self):
+        x = np.tile(np.linspace(0, 1, 256, dtype=np.float32)[None, :, None], (4, 1, 3))
+        x[..., 0] *= 0.8  # 色を少し付ける（彩度の式を通す）
+        adj = {**ce.ADJ_IDENTITY, "shadow_lift": 45.0, "brightness": 1.1, "contrast": 1.2, "saturation": 1.3}
+        out = ce.post_chain_oracle(x, adj)
+        # 設計書 §3.2 の geoframe_tone と同じ式（lift = v/100、2.0 = SHADOW_LIFT_GAIN/255）
+        y = np.clip(x + 0.45 * 2.0 * x * (1 - x) ** 2, 0, 1) * 1.1
+        y = (y - 0.5) * 1.2 + 0.5
+        luma = (y * np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)).sum(axis=2, keepdims=True)
+        y = np.clip(luma + (y - luma) * 1.3, 0, 1)
+        self.assertLess(float(np.abs(out - y).max()), 1e-5)
+        # identity は恒等（USM 無し）
+        self.assertLess(float(np.abs(ce.post_chain_oracle(x, ce.ADJ_IDENTITY) - x).max()), 1e-6)
+        # USM を渡すとエッジで値が変わる（CLI の post.usm を再現する経路）
+        edge = np.zeros((32, 32, 3), dtype=np.float32)
+        edge[:, 16:] = 0.6
+        sharp = ce.post_chain_oracle(edge, ce.ADJ_IDENTITY, {"sigma": 0.8, "gain": 0.5, "coring": 0.0})
+        self.assertGreater(float(sharp[:, 16, 0].max()), 0.6)
+
+
+def _sweep_metrics(ci_scale=1.0, wb_sign=1.0):
+    """sweep_deltas / adjustment_checks 用の合成指標（rawpy と CI）。"""
+    def engine(scale, sign):
+        out = {"identity": {"exposure_stops": 0.0, "log2_mean_linear": -3.0, "rb_ln_neutral": 0.0, "dark_mean_luma": 0.1,
+                            "mean_luma": 0.4, "std_luma": 0.2, "ab_std": 10.0, "edge_width_ratio": 0.95, "flat_noise": 2.0,
+                            "sky_noise": 3.0, "star_recall": 1.0, "star_recall_n": 30, "sky_hf_ratio": 0.5,
+                            "impulse_vs_full": 0, "ci_adj_guards": "", "ci_adj_ignored": "highlight_recovery"}}
+        base = out["identity"]
+        out["exp_m1"] = {**base, "exposure_stops": -1.0 * scale, "log2_mean_linear": -4.0}
+        out["exp_p1"] = {**base, "exposure_stops": 1.0 * scale, "log2_mean_linear": -2.0}
+        out["wb_m60"] = {**base, "rb_ln_neutral": -0.2 * sign * scale}
+        out["wb_p60"] = {**base, "rb_ln_neutral": 0.2 * sign * scale}
+        out["lift_45"] = {**base, "dark_mean_luma": 0.15}
+        out["bright_07"] = {**base, "mean_luma": 0.3}
+        out["bright_14"] = {**base, "mean_luma": 0.55}
+        out["contrast_08"] = {**base, "std_luma": 0.16}
+        out["contrast_14"] = {**base, "std_luma": 0.28}
+        out["sat_0"] = {**base, "ab_std": 0.0}
+        out["sat_15"] = {**base, "ab_std": 15.0}
+        out["sharp_08"] = {**base, "edge_width_ratio": 1.05}
+        out["sharp_16"] = {**base, "edge_width_ratio": 0.85, "flat_noise": 2.6}
+        out["nr_off"] = {**base, "sky_noise": 4.0, "impulse_vs_full": 2}
+        out["nr_full"] = {**base, "sky_noise": 2.0, "star_recall": 0.995, "sky_hf_ratio": 0.4}
+        out["nr_off_sh0"] = {**base, "impulse_vs_full": 3, "ci_adj_guards": "white_dot_sharpness_floor"}
+        return out
+    return {"rawpy": engine(1.0, 1.0), "ci": engine(ci_scale, wb_sign)}
+
+
+class AdjustmentCheckTests(unittest.TestCase):
+    def test_direction_match(self):
+        self.assertTrue(ce.direction_match(0.2, 0.1))
+        self.assertFalse(ce.direction_match(0.2, -0.1))
+        self.assertFalse(ce.direction_match(0.2, 0.0))  # rawpy は効いて CI は効かない = 不一致
+        self.assertIsNone(ce.direction_match(0.0, 0.3))  # 基準が動かなければ判定しない
+        self.assertIsNone(ce.direction_match(float("nan"), 0.3))
+
+    def test_sweep_deltas_ratio_and_direction(self):
+        rows = ce.sweep_deltas(_sweep_metrics(ci_scale=1.2))
+        by = {(r["variant"], r["metric"]): r for r in rows}
+        wb = by[("wb_p60", "rb_ln_neutral")]
+        self.assertAlmostEqual(wb["delta_rawpy"], 0.2)
+        self.assertAlmostEqual(wb["ratio"], 1.2)
+        self.assertTrue(wb["direction_match"])
+        self.assertAlmostEqual(by[("exp_m1", "exposure_stops")]["delta_ci"], -1.2)
+        # 掃引した全パラメータが行を持つ
+        self.assertEqual({r["param"] for r in rows}, set(ce.ADJ_PARAM_METRICS))
+        reversed_wb = {(r["variant"], r["metric"]): r for r in ce.sweep_deltas(_sweep_metrics(wb_sign=-1.0))}
+        self.assertFalse(reversed_wb[("wb_p60", "rb_ln_neutral")]["direction_match"])
+
+    def _checks(self, metrics, camera=None):
+        deltas = ce.sweep_deltas(metrics)
+        checks = ce.adjustment_checks(metrics["ci"], metrics["rawpy"], camera or {"flat_noise": 2.0, "sky_hf_ratio": 0.5}, deltas)
+        return {c["check"]: c for c in checks}
+
+    def test_checks_pass_on_good_synthetic_metrics(self):
+        checks = self._checks(_sweep_metrics())
+        failed = [k for k, c in checks.items() if c["pass"] is False]
+        self.assertEqual(failed, [])
+        self.assertTrue(checks["white_dot_nr_off_sh0_guard"]["pass"])
+        self.assertTrue(checks["white_dot_identity_guard"]["pass"])
+        self.assertTrue(checks["highlight_recovery_ignored"]["pass"])
+        self.assertTrue(checks["sharpness_ci_edge_monotonic"]["pass"])
+        self.assertTrue(checks["nr_ci_monotonic"]["pass"])
+
+    def test_checks_fail_on_wrong_direction_magnitude_and_impulses(self):
+        bad = _sweep_metrics(ci_scale=1.6, wb_sign=-1.0)
+        bad["ci"]["nr_off_sh0"]["impulse_vs_full"] = 40
+        bad["ci"]["nr_off_sh0"]["ci_adj_guards"] = ""
+        bad["ci"]["nr_full"]["star_recall"] = 0.9
+        checks = self._checks(bad)
+        for name in ("exposure_ci_m1_stops", "exposure_ci_p1_stops", "wb_p60_ci_direction", "wb_p60_direction_vs_rawpy",
+                     "wb_p60_ratio_vs_rawpy", "white_dot_nr_off_sh0_impulse_vs_full", "white_dot_nr_off_sh0_guard",
+                     "nr_ci_full_star_recall"):
+            self.assertIs(checks[name]["pass"], False, name)
+
+    def test_checks_unmeasurable_are_none(self):
+        metrics = _sweep_metrics()
+        for v in ("identity", "sharp_08", "sharp_16"):
+            metrics["ci"][v]["edge_width_ratio"] = float("nan")
+        metrics["ci"]["nr_full"]["star_recall_n"] = 0
+        checks = self._checks(metrics, camera={"flat_noise": float("nan"), "sky_hf_ratio": float("nan")})
+        self.assertIsNone(checks["sharpness_ci_edge_monotonic"]["pass"])
+        self.assertIsNone(checks["sharpness_ci_10_edge_ratio"]["pass"])
+        self.assertIsNone(checks["sharpness_ci_16_flat_noise_vs_camera"]["pass"])
+        self.assertIsNone(checks["nr_ci_full_star_recall"]["pass"])
+        self.assertIsNone(checks["nr_ci_full_sky_hf_vs_camera"]["pass"])
+
+    def test_check_summary_counts(self):
+        rows = [{"check": "a", "pass": True, "capture_id": "DSC00001"}, {"check": "a", "pass": False, "capture_id": "DSC00002"},
+                {"check": "b", "pass": None, "capture_id": "DSC00001"}]
+        summary = {s["check"]: s for s in ce.check_summary(rows)}
+        self.assertEqual((summary["a"]["pass"], summary["a"]["fail"], summary["a"]["failed"]), (1, 1, ["DSC00002"]))
+        self.assertEqual(summary["b"]["n_a"], 1)
+
+
+class AdjustmentVariantTableTests(unittest.TestCase):
+    def test_sweep_table_is_consistent(self):
+        names = [v for v, *_ in ce.ADJ_SWEEP_VARIANTS]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(names[0], "identity")
+        params = {p for _, p, _, _ in ce.ADJ_SWEEP_VARIANTS if p is not None}
+        self.assertEqual(params, set(ce.ADJ_PARAM_METRICS))
+        self.assertNotIn("highlight_recovery", params)  # 受理するが無効（§3.1）。掃引しない
+        self.assertTrue(set(ce.ADJ_WHITE_DOT_VARIANTS) <= set(names) | {"nr_off_sh0"})
+        oracle = [v for v, _, _ in ce.ADJ_ORACLE_VARIANTS]
+        self.assertEqual(len(oracle), len(set(oracle)))
+        self.assertTrue(all(k in ("tone", "tone+usm") for _, _, k in ce.ADJ_ORACLE_VARIANTS))
+        # "tone" のオラクルは USM を使わない（sharpness 1.0 のまま）
+        for _v, post, kind in ce.ADJ_ORACLE_VARIANTS:
+            if kind == "tone":
+                self.assertEqual(ce.oracle_adjustments(post)["sharpness"], 1.0)
