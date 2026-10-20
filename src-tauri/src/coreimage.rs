@@ -1,27 +1,29 @@
-//! Core Image 試験現像（Issue #65 PR2）。
+//! Core Image プレビュー現像（Issue #72 / #73。設計書
+//! `docs/design/coreimage-preview-adjustments.md` §2・§4.3）。
 //!
 //! Python サーバ / `.venv` / localhost HTTP を一切経由せず、Rust から Swift CLI
 //! `geoframe-ci-develop`（`native/coreimage-cli`、Tauri の externalBin）を子プロセスとして
-//! 直接呼ぶ。CLI の入出力契約は `native/coreimage-cli/README.md` と
-//! `docs/adr/0001-coreimage-raw-poc.md` を参照。
+//! 直接呼ぶ。CLI の入出力契約は `native/coreimage-cli/README.md` と設計書 §4.1・§4.2。
 //!
-//! - 環境変数 `GEOFRAME_COREIMAGE_EXPERIMENT=1` のときだけ有効。無効なら
-//!   `develop_coreimage` 自体を拒否する（UI からボタンを消すだけに頼らない）。
-//!   Python 側の `config.json` にはフラグを足さない。
+//! - 既定でプレビューは Core Image。`GEOFRAME_PREVIEW_ENGINE=rawpy` のときだけ
+//!   `preview_engine()` が `"rawpy"` を返し、フロントは Python のプレビューに戻す。
 //! - `config.json`（Python の `local_raw/config.py` と同じファイル）は `source_root` を
 //!   **読むだけ**。書き込みは Python 側の責務のまま。
 //! - capture_id → ARW の解決は `local_raw/source_files.py` と同じ規則の再実装。
-//! - 出力先は `<app_data_dir>/coreimage/` 配下で Rust が決める（フロントからパスは受けない）。
-//!   元の ARW / JPG と、Python 側のキャッシュ・書き出し先には書かない。
+//! - 出力先は `<app_data_dir>/coreimage/preview/` 配下で Rust が決める（フロントからパスは
+//!   受けない）。元の ARW / JPG と、Python 側のキャッシュ・書き出し先には書かない。
+//! - Adjustments は `crate::adjustments::normalize_adjustments` で検証・正規化してから
+//!   CLI へ全量を渡す。写像（Adjustments → CIRAWFilter / 後段）はすべて CLI 側。
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -29,37 +31,50 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
-/// 試験機能を有効にする環境変数。値がちょうど `"1"` のときだけ有効。
-pub const EXPERIMENT_ENV: &str = "GEOFRAME_COREIMAGE_EXPERIMENT";
+use crate::adjustments::normalize_adjustments;
+
+/// プレビューの現像エンジンを切り戻す環境変数。値がちょうど `"rawpy"` のときだけ rawpy。
+pub const PREVIEW_ENGINE_ENV: &str = "GEOFRAME_PREVIEW_ENGINE";
 
 /// externalBin の名前（tauri-build が実行ファイルの隣へ triple 無しの名前でコピーする）。
 const SIDECAR_NAME: &str = "geoframe-ci-develop";
 
 /// 出力ディレクトリ名（`<app_data_dir>/coreimage/`）。tauri.conf.json の
-/// `assetProtocol.scope`（`$APPDATA/coreimage/**`）と一致させること。
+/// `assetProtocol.scope`（`$APPDATA/coreimage/**`）と一致させること。モードごとに
+/// サブディレクトリ（`preview/`、将来の `full/`）を切る。
 const OUTPUT_DIR_NAME: &str = "coreimage";
 
 /// 現像 1 回のウォッチドッグ。超えたら子プロセスを kill してエラーにする。
+/// スロットの待ち時間は含めない（子プロセスの起動から数える）。
 const DEVELOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// `--version` は即答するはずなので短めに切る。
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// アプリから CLI へ渡す固定値。decoder_version は OS 更新で既定値が変わりうるので明示する
-/// （README「アプリからは明示指定を推奨」）。
+/// アプリから CLI へ渡す固定値（設計書 §2.2）。decoder_version は OS 更新で既定値が
+/// 変わりうるので明示する。profile は `apple_default`（neutral v9 preview は白点が出る）。
+/// CLI 自身の既定（neutral）は変えない。
 const DECODER_VERSION: &str = "9";
-const PROFILE: &str = "neutral";
+const PROFILE: &str = "apple_default";
+const LENS_CORRECTION: bool = true;
 const PREVIEW_MAX_EDGE: u32 = 2400;
 const FORMAT: &str = "jpeg";
 
-/// 古い一時ファイルとみなすまでの時間（掃除の対象。`cleanup_stale_temps`）。
+/// これより古い `.tmp` は放置された一時ファイルとみなして消す。現像 1 回のウォッチドッグ
+/// （60 秒）より十分長く取り、走行中の現像の一時ファイルには触れない。
 const STALE_TEMP_AGE: Duration = Duration::from_secs(10 * 60);
 
-/// キャッシュ名ハッシュの入力形式の版。ハッシュ入力の組み立てを変えたら上げる。
-const CACHE_KEY_SCHEMA: u32 = 1;
+/// キャッシュ名ハッシュの入力形式の版。ハッシュ入力の組み立てや、Rust 側の
+/// Adjustments 正規化規則（クランプ・float 化）を変えたら上げる。
+/// 1: 試験経路（#65）。2: adjustments を含む request 全量の正規形（#72）。
+const CACHE_KEY_SCHEMA: u32 = 2;
 
-pub fn experiment_enabled() -> bool {
-    matches!(std::env::var(EXPERIMENT_ENV).as_deref(), Ok("1"))
-}
+/// キャッシュ上限（設計書 §2.3、オーナー判断 8）。件数は `.jpg` + `.json` の組を 1 件と数える。
+/// 超えたら mtime の古い組から消して上限の 80% まで落とす。
+const CACHE_MAX_ENTRIES: usize = 600;
+const CACHE_MAX_BYTES: u64 = 1_500_000_000;
+
+/// CLI の実行待ちに並べる件数（走行中の 1 本を除く）。超えたら BUSY（設計書 §2.4）。
+const MAX_WAITING: usize = 2;
 
 /// フロントへ返すエラー。CLI の `error.code` / `message` はそのまま詰め替える。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -69,7 +84,7 @@ pub struct CoreImageError {
 }
 
 impl CoreImageError {
-    fn new(code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
             message: message.into(),
@@ -78,14 +93,18 @@ impl CoreImageError {
 }
 
 /// 現像モード。自由文字列を CLI の JSON へ流さないよう enum で受ける。
+/// この PR のコマンドは preview だけを使う。full（原寸）は後続 Issue で使うので残す
+/// （設計書 §3.6「CLI / Rust は mode: full を受けられる形を保つ」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DevelopMode {
     Preview,
+    #[allow(dead_code)]
     Full,
 }
 
 impl DevelopMode {
+    /// CLI の `mode` 値であり、出力サブディレクトリ名でもある。
     fn as_str(self) -> &'static str {
         match self {
             DevelopMode::Preview => "preview",
@@ -94,21 +113,36 @@ impl DevelopMode {
     }
 }
 
-/// `develop_coreimage` の応答（フロントの `CoreImageResult` と一致させること）。
+/// `develop_preview_coreimage` の応答（設計書 §4.3。フロントの `CoreImagePreviewResult` と
+/// 同名フィールド）。
 #[derive(Debug, Clone, Serialize)]
-pub struct CoreImageResult {
+pub struct CoreImagePreviewResult {
     pub capture_id: String,
-    pub mode: DevelopMode,
     /// 出力 JPEG の絶対パス（フロントは `convertFileSrc` で表示 URL にする）。
     pub output_path: String,
+    /// 来歴 JSON（CLI 応答の全文）の絶対パス。
+    pub provenance_path: String,
     pub width: u64,
     pub height: u64,
     /// CLI の `elapsed_ms`（`decode` / `render_encode` / `total`）。キャッシュヒット時は
     /// 最初に現像したときの値。
     pub elapsed_ms: Value,
     pub cache_hit: bool,
+    /// キャッシュ鍵（hash16）。ファイル名にも入る。
+    pub params_hash: String,
     pub decoder_version: String,
     pub cli_version: String,
+    pub macos_version: String,
+    /// Rust が正規化（クランプ・float 化）した Adjustments 全量。
+    pub adjustments: Value,
+    /// CLI の `applied` そのまま。
+    pub applied: Value,
+    /// CLI 0.3.0 のトップレベル `adjustments_applied`（defaults / post / ignored / guards）
+    /// そのまま。CLI が返さなければ（0.2.0 など）null。§4.3 の `applied` のコメントと §4.2 の
+    /// 食い違いは §4.2 を正とし、このフィールドを足す（メイン決定 2026-10-20）。
+    pub adjustments_applied: Value,
+    /// CLI の `source`（lens_model / iso / camera_model 等）。
+    pub source: Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +431,12 @@ fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
 // CLI バージョン（キャッシュキーの一部）
 // ---------------------------------------------------------------------------
 
-/// `--version` の応答 1 行（cli_version + macOS バージョンを含む）と cli_version。
+/// `--version` の応答（cli_version + macOS バージョンを含む）の正規形と、その中の 2 値。
 #[derive(Debug, Clone)]
 struct CliVersion {
     fingerprint: String,
     cli_version: String,
+    macos_version: String,
 }
 
 /// sidecar ごとに `--version` の結果を覚えておく（プロセス寿命中は変わらない前提）。
@@ -423,15 +458,18 @@ fn cli_version(sidecar: &Path) -> Result<CliVersion, CoreImageError> {
     if response.get("ok") != Some(&Value::Bool(true)) || !output.status.success() {
         return Err(cli_error(&response, output.status));
     }
-    let cli_version = response
-        .get("cli_version")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    // JSON を正規化し直して指紋にする（空白や改行の差でキャッシュが割れないように）。
+    let text = |key: &str| {
+        response
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    // 応答全文を正規形にして指紋にする（空白・キー順の差でキャッシュが割れないように）。
     let version = CliVersion {
-        fingerprint: response.to_string(),
-        cli_version,
+        fingerprint: canonical_json(&response),
+        cli_version: text("cli_version"),
+        macos_version: text("macos_version"),
     };
     let mut guard = CACHE
         .lock()
@@ -441,11 +479,18 @@ fn cli_version(sidecar: &Path) -> Result<CliVersion, CoreImageError> {
 }
 
 // ---------------------------------------------------------------------------
-// 現像本体
+// リクエストとキャッシュ鍵
 // ---------------------------------------------------------------------------
 
 /// CLI へのリクエスト（`output` 以外）。`output` はこれのハッシュから決まるので後で足す。
-fn base_request(input: &Path, mode: DevelopMode) -> serde_json::Map<String, Value> {
+///
+/// `adjustments` は `normalize_adjustments` 済みの全量（None なら CLI 既定の処理。
+/// 0.2.0 互換の経路で、アプリのコマンドからは常に Some で呼ぶ）。
+fn base_request(
+    input: &Path,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+) -> serde_json::Map<String, Value> {
     let mut request = serde_json::Map::new();
     request.insert(
         "input".into(),
@@ -461,31 +506,66 @@ fn base_request(input: &Path, mode: DevelopMode) -> serde_json::Map<String, Valu
         "decoder_version".into(),
         Value::String(DECODER_VERSION.into()),
     );
-    request.insert("settings".into(), json!({ "profile": PROFILE }));
+    request.insert(
+        "settings".into(),
+        json!({ "profile": PROFILE, "lens_correction": LENS_CORRECTION }),
+    );
+    if let Some(adjustments) = adjustments {
+        request.insert("adjustments".into(), adjustments.clone());
+    }
     request
+}
+
+/// キーを再帰的に辞書順へ並べた JSON 文字列。serde_json の `preserve_order` が依存経由で
+/// 有効になっても（Map が挿入順になっても）ハッシュが変わらないようにする。
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        Value::String(key.clone()),
+                        canonical_json(&map[key.as_str()])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
+    }
 }
 
 /// キャッシュ名に使う安定ハッシュ（SHA-256 の先頭 16 桁）。
 ///
-/// std の `DefaultHasher` は実行ごとに値が変わりうるので使わない。入力は
-/// リクエスト（output 以外、input は canonicalize 済みの絶対パス）+ CLI の `--version` 応答 +
-/// ARW の同一性（サイズ + mtime）。パスを含めるのは、`capture_id` がカード／フォルダを
-/// またいで衝突するため（config.py の docstring 参照）。
+/// std の `DefaultHasher` は実行ごとに値が変わりうるので使わない。入力（設計書 §2.3）:
+/// schema、リクエスト全量（output 以外。input は canonicalize 済みの絶対パス、settings、
+/// 正規化後の adjustments）、CLI の `--version` 応答全文（cli_version + macos_version。
+/// OS 更新で apple_default の既定値が変わる懸念を含める）、ARW の同一性（サイズ + mtime）。
+/// パスを含めるのは、`capture_id` がカード／フォルダをまたいで衝突するため。
 fn cache_key(
     request: &serde_json::Map<String, Value>,
     version: &CliVersion,
     size: u64,
     mtime_ns: u128,
 ) -> String {
-    // serde_json の Map はキー順が決定的（BTreeMap、preserve_order 時は挿入順で固定）。
+    let mut request = request.clone();
+    request.remove("output");
     let payload = json!({
         "schema": CACHE_KEY_SCHEMA,
-        "request": request,
+        "request": Value::Object(request),
         "cli": version.fingerprint,
         "input_size": size,
         "input_mtime_ns": mtime_ns.to_string(),
     });
-    let digest = Sha256::digest(payload.to_string().as_bytes());
+    let digest = Sha256::digest(canonical_json(&payload).as_bytes());
     digest
         .iter()
         .take(8)
@@ -493,30 +573,49 @@ fn cache_key(
         .collect()
 }
 
+/// 結果を組み立てるための、応答以外の値。
+struct ResultContext<'a> {
+    capture_id: &'a str,
+    output: &'a Path,
+    provenance: &'a Path,
+    key: &'a str,
+    version: &'a CliVersion,
+    adjustments: Option<&'a Value>,
+}
+
 fn result_from_response(
     response: &Value,
-    capture_id: &str,
-    mode: DevelopMode,
-    output: &Path,
+    context: &ResultContext<'_>,
     cache_hit: bool,
-    version: &CliVersion,
-) -> Option<CoreImageResult> {
-    Some(CoreImageResult {
-        capture_id: capture_id.to_string(),
-        mode,
-        output_path: output.to_string_lossy().into_owned(),
+) -> Option<CoreImagePreviewResult> {
+    let field = |key: &str| response.get(key).cloned().unwrap_or(Value::Null);
+    Some(CoreImagePreviewResult {
+        capture_id: context.capture_id.to_string(),
+        output_path: context.output.to_string_lossy().into_owned(),
+        provenance_path: context.provenance.to_string_lossy().into_owned(),
         width: response.get("width")?.as_u64()?,
         height: response.get("height")?.as_u64()?,
-        elapsed_ms: response.get("elapsed_ms").cloned().unwrap_or(Value::Null),
+        elapsed_ms: field("elapsed_ms"),
         cache_hit,
+        params_hash: context.key.to_string(),
         decoder_version: response
             .get("decoder_version")
             .and_then(Value::as_str)
             .unwrap_or(DECODER_VERSION)
             .to_string(),
-        cli_version: version.cli_version.clone(),
+        // 鍵に --version 全文が入っているので、キャッシュヒットでも現行の版と一致する。
+        cli_version: context.version.cli_version.clone(),
+        macos_version: context.version.macos_version.clone(),
+        adjustments: context.adjustments.cloned().unwrap_or(Value::Null),
+        applied: field("applied"),
+        adjustments_applied: field("adjustments_applied"),
+        source: field("source"),
     })
 }
+
+// ---------------------------------------------------------------------------
+// 出力ディレクトリの掃除（一時ファイル・旧試験出力・LRU）
+// ---------------------------------------------------------------------------
 
 /// 来歴 JSON の一時ファイル名。pid だけだと同一プロセス内の並行書き込みで衝突しうるので、
 /// プロセス内の通し番号も入れる。先頭ドット + `.tmp` は `cleanup_stale_temps` の掃除対象。
@@ -526,27 +625,34 @@ fn provenance_temp_name(file_name: &str) -> String {
     format!(".{file_name}.{}.{sequence}.tmp", std::process::id())
 }
 
+/// `dir` 直下の通常ファイル（シンボリックリンク・ディレクトリは除く）を
+/// `(名前, パス, メタデータ)` で列挙する。非 UTF-8 名は対象パターンに当たり得ないので飛ばす。
+fn regular_files(dir: &Path) -> Vec<(String, PathBuf, fs::Metadata)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            metadata
+                .file_type()
+                .is_file()
+                .then_some((name, path, metadata))
+        })
+        .collect()
+}
+
 /// `dir` 直下の、先頭ドットかつ `.tmp` で終わる通常ファイルのうち、最終更新から `max_age`
 /// 以上経ったものを消す。CLI をタイムアウトで kill すると、CLI が output と同じディレクトリに
 /// 作る `.<output名>.<UUID>.tmp` が残るため。シンボリックリンクは追わず（symlink_metadata）、
 /// 削除の失敗は無視する（掃除は best effort）。
 fn cleanup_stale_temps(dir: &Path, max_age: Duration) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let now = std::time::SystemTime::now();
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
+    let now = SystemTime::now();
+    for (name, path, metadata) in regular_files(dir) {
         if !(name.starts_with('.') && name.ends_with(".tmp")) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !metadata.file_type().is_file() {
             continue;
         }
         let old_enough = metadata
@@ -560,26 +666,179 @@ fn cleanup_stale_temps(dir: &Path, max_age: Duration) {
     }
 }
 
-/// 同時に走る現像を 1 本に制限するための旗（プロセス全体）。
-static DEVELOP_RUNNING: AtomicBool = AtomicBool::new(false);
+/// 試験経路（#65）が `coreimage/` 直下に残した `<ID>_<mode>_<hash16>.{jpg,json}`。
+fn legacy_output_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r"^DSC[0-9]{5}_(?:preview|full)_[0-9a-f]{16}\.(?:jpg|json)$")
+            .expect("valid regex")
+    })
+}
 
-/// 現像枠の RAII ガード。drop（正常終了・エラーの `?`・panic の巻き戻し）で必ず枠を返す。
-struct DevelopSlot<'a>(&'a AtomicBool);
+/// 旧試験出力を `coreimage_dir` 直下から消す（再帰しない・通常ファイルのみ・best effort）。
+/// アプリ自身が作った名前の形にだけ当てる（他のファイルには触れない）。消した数を返す。
+fn cleanup_legacy_outputs(coreimage_dir: &Path) -> usize {
+    let mut removed = 0;
+    for (name, path, _) in regular_files(coreimage_dir) {
+        if legacy_output_pattern().is_match(&name) && fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    // 試験経路が kill されたときの一時ファイルも同じ場所に残りうる。
+    cleanup_stale_temps(coreimage_dir, STALE_TEMP_AGE);
+    removed
+}
 
-impl<'a> DevelopSlot<'a> {
-    /// 空いていれば枠を取る。使用中なら None（待たない）。
-    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| DevelopSlot(flag))
+/// 旧試験出力の掃除はプロセスにつき 1 回だけ（新経路の初回実行時）。
+fn cleanup_legacy_outputs_once(coreimage_dir: &Path) {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if !DONE.swap(true, Ordering::AcqRel) {
+        cleanup_legacy_outputs(coreimage_dir);
     }
 }
 
-impl Drop for DevelopSlot<'_> {
+/// 新経路のキャッシュ `<ID>_<hash16>.{jpg,json}`。グループ 1 がステム。
+fn cache_entry_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r"^(DSC[0-9]{5}_[0-9a-f]{16})\.(?:jpg|json)$").expect("valid regex")
+    })
+}
+
+#[derive(Debug, Default)]
+struct CacheEntry {
+    files: Vec<PathBuf>,
+    bytes: u64,
+    newest: Option<SystemTime>,
+}
+
+/// キャッシュの上限付き LRU 削除（設計書 §2.3）。
+///
+/// `dir` 直下のキャッシュ名に当たる通常ファイルだけを `.jpg` + `.json` の組（ステム）で数え、
+/// 件数 > `max_entries` または合計 > `max_bytes` なら、組の最新 mtime が古い順に組ごと消して
+/// 両方を上限の 80% 以下まで落とす。`keep_stem`（いま書いた組）は消さない。シンボリック
+/// リンク・ディレクトリ・名前の形が違うファイルには触れない。best effort（失敗は無視）。
+/// 消した組の数を返す。
+fn prune_cache(dir: &Path, max_entries: usize, max_bytes: u64, keep_stem: Option<&str>) -> usize {
+    let mut entries: HashMap<String, CacheEntry> = HashMap::new();
+    for (name, path, metadata) in regular_files(dir) {
+        let Some(found) = cache_entry_pattern().captures(&name) else {
+            continue;
+        };
+        let entry = entries.entry(found[1].to_string()).or_default();
+        entry.files.push(path);
+        entry.bytes = entry.bytes.saturating_add(metadata.len());
+        let modified = metadata.modified().ok();
+        entry.newest = entry.newest.max(modified);
+    }
+    let mut count = entries.len();
+    let mut bytes: u64 = entries.values().map(|entry| entry.bytes).sum();
+    if count <= max_entries && bytes <= max_bytes {
+        return 0;
+    }
+    let target_entries = max_entries.saturating_mul(8) / 10;
+    let target_bytes = max_bytes / 10 * 8;
+    let mut ordered: Vec<(String, CacheEntry)> = entries.into_iter().collect();
+    // mtime が取れないものは最古扱い（None < Some）。同時刻はステム順で決定的にする。
+    ordered.sort_by(|(a_stem, a), (b_stem, b)| a.newest.cmp(&b.newest).then(a_stem.cmp(b_stem)));
+    let mut removed = 0;
+    for (stem, entry) in ordered {
+        if count <= target_entries && bytes <= target_bytes {
+            break;
+        }
+        if keep_stem == Some(stem.as_str()) {
+            continue;
+        }
+        for file in &entry.files {
+            let _ = fs::remove_file(file);
+        }
+        count -= 1;
+        bytes = bytes.saturating_sub(entry.bytes);
+        removed += 1;
+    }
+    removed
+}
+
+/// キャッシュヒットした組の mtime を今にする（LRU の「最近使った」）。best effort。
+fn touch(path: &Path) {
+    if let Ok(file) = fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 同時実行の制御（CLI は 1 本、待ちは MAX_WAITING 件まで）
+// ---------------------------------------------------------------------------
+
+/// CLI の実行枠。`Mutex<()>` で直列化し、走行中 + 待ちの件数を `pending` で数える。
+/// 走行中 1 本 + 待ち `max_waiting` 件を超える呼び出しは待たずに BUSY にする。
+pub(crate) struct DevelopSlot {
+    lock: Mutex<()>,
+    pending: AtomicUsize,
+    max_waiting: usize,
+}
+
+/// 枠の RAII ガード。drop（正常終了・エラーの `?`・panic の巻き戻し）で必ず枠を返す。
+/// フィールドは宣言順に drop される: 先に件数を返し、次にロックを外す。
+pub(crate) struct SlotGuard<'a> {
+    _ticket: PendingTicket<'a>,
+    _lock: MutexGuard<'a, ()>,
+}
+
+/// `pending` を 1 つ持つ札（ロック待ちの間に panic しても件数を返す）。
+struct PendingTicket<'a>(&'a AtomicUsize);
+
+impl Drop for PendingTicket<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
+
+impl DevelopSlot {
+    pub(crate) const fn new(max_waiting: usize) -> Self {
+        Self {
+            lock: Mutex::new(()),
+            pending: AtomicUsize::new(0),
+            max_waiting,
+        }
+    }
+
+    /// 枠を取る。空くまで待つ（待ちの上限を超えるなら BUSY）。
+    pub(crate) fn acquire(&self) -> Result<SlotGuard<'_>, CoreImageError> {
+        let limit = self.max_waiting.saturating_add(1);
+        self.pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .map_err(|_| {
+                CoreImageError::new(
+                    "BUSY",
+                    "別の Core Image 現像を実行中です。終わってからもう一度試してください",
+                )
+            })?;
+        let ticket = PendingTicket(&self.pending);
+        let lock = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(SlotGuard {
+            _ticket: ticket,
+            _lock: lock,
+        })
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
+    }
+}
+
+/// アプリ全体で 1 つの実行枠。
+static DEVELOP_SLOT: DevelopSlot = DevelopSlot::new(MAX_WAITING);
+
+// ---------------------------------------------------------------------------
+// 現像本体
+// ---------------------------------------------------------------------------
 
 /// 来歴 JSON を一時ファイル経由で原子的に書く。
 fn write_provenance(path: &Path, body: &str) -> Result<(), CoreImageError> {
@@ -599,15 +858,108 @@ fn write_provenance(path: &Path, body: &str) -> Result<(), CoreImageError> {
     Ok(())
 }
 
+fn output_dir_error(message: impl Into<String>) -> CoreImageError {
+    CoreImageError::new("OUTPUT_DIR_FAILED", message)
+}
+
+/// `path` がシンボリックリンクでない実ディレクトリであることを確かめる。無ければ作る。
+fn ensure_real_dir(path: &Path) -> Result<(), CoreImageError> {
+    let check = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(output_dir_error(format!(
+            "出力先がディレクトリではありません（シンボリックリンク等）: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(output_dir_error(format!(
+            "出力先を確認できません: {}: {error}",
+            path.display()
+        ))),
+    };
+    if check(path)? {
+        return Ok(());
+    }
+    match fs::create_dir(path) {
+        // 並行して他の呼び出しが作った場合は、作られたものを確かめ直す。
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => check(path).map(|_| ()),
+        Err(error) => Err(output_dir_error(format!(
+            "出力先を作れません: {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// `<app_data_dir>/coreimage/<mode>/` を作り、canonicalize した `(coreimage, mode)` の組を返す。
+/// どちらかがシンボリックリンク等で外を指していたら拒否する（キャッシュの書き込み・
+/// LRU 削除が `coreimage/<mode>/` の外へ出ないように）。
+fn prepare_output_dirs(
+    app_data_dir: &Path,
+    mode: DevelopMode,
+) -> Result<(PathBuf, PathBuf), CoreImageError> {
+    let coreimage_dir = app_data_dir.join(OUTPUT_DIR_NAME);
+    let mode_dir = coreimage_dir.join(mode.as_str());
+    fs::create_dir_all(app_data_dir).map_err(|error| {
+        output_dir_error(format!(
+            "アプリのデータフォルダを作れません: {}: {error}",
+            app_data_dir.display()
+        ))
+    })?;
+    // create_dir_all はシンボリックリンクを辿って外に作ってしまうので、1 段ずつ
+    // 「実ディレクトリか、無ければ作る」を確かめる。
+    ensure_real_dir(&coreimage_dir)?;
+    ensure_real_dir(&mode_dir)?;
+    let canonical = |path: &Path| {
+        path.canonicalize()
+            .map_err(|error| output_dir_error(format!("出力先を解決できません: {error}")))
+    };
+    let app_data_dir = canonical(app_data_dir)?;
+    let coreimage_dir = canonical(&coreimage_dir)?;
+    let mode_dir = canonical(&mode_dir)?;
+    if coreimage_dir.parent() != Some(app_data_dir.as_path())
+        || mode_dir.parent() != Some(coreimage_dir.as_path())
+    {
+        return Err(output_dir_error(format!(
+            "出力先がアプリのデータフォルダの外を指しています: {}",
+            mode_dir.display()
+        )));
+    }
+    Ok((coreimage_dir, mode_dir))
+}
+
+/// 画像と来歴の両方が通常ファイルで、来歴から結果を組み立てられればキャッシュヒット。
+/// 画像だけなら来歴の書き込みが途中で落ちたとみなして現像し直す。
+fn load_cached(context: &ResultContext<'_>) -> Option<CoreImagePreviewResult> {
+    let is_regular = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+    };
+    if !is_regular(context.output) || !is_regular(context.provenance) {
+        return None;
+    }
+    let text = fs::read_to_string(context.provenance).ok()?;
+    let saved = serde_json::from_str::<Value>(&text).ok()?;
+    if saved.get("ok") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let result = result_from_response(&saved, context, true)?;
+    touch(context.output);
+    Some(result)
+}
+
 /// 現像の本体（Tauri に依存しない。テストから直接呼ぶ）。
-pub fn develop(
+///
+/// `adjustments` は `normalize_adjustments` 済みのもの（コマンドは常に Some）。`slot` は
+/// CLI の実行枠（アプリは `DEVELOP_SLOT`。テストは自前の枠を渡して互いに干渉させない）。
+pub(crate) fn develop(
     app_data_dir: &Path,
     sidecar: &Path,
     capture_id: &str,
     mode: DevelopMode,
+    adjustments: Option<&Value>,
+    slot: &DevelopSlot,
     timeout: Duration,
-) -> Result<CoreImageResult, CoreImageError> {
-    // 1. 入力の解決（設定 → ARW）。
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    // 1. 入力の解決（設定 → ARW）。capture_id の形式検査も resolve_arw が FS より先に行う。
     let source_root = read_source_root(app_data_dir)?;
     let input = resolve_arw(&source_root, capture_id)?;
     let metadata = fs::metadata(&input).map_err(|error| {
@@ -625,55 +977,47 @@ pub fn develop(
 
     // 2. 出力名（安定ハッシュ）の決定。
     let version = cli_version(sidecar)?;
-    let mut request = base_request(&input, mode);
+    let mut request = base_request(&input, mode, adjustments);
     let key = cache_key(&request, &version, metadata.len(), mtime_ns);
 
-    let output_dir = app_data_dir.join(OUTPUT_DIR_NAME);
-    fs::create_dir_all(&output_dir).map_err(|error| {
-        CoreImageError::new(
-            "OUTPUT_DIR_FAILED",
-            format!("出力先を作れません: {}: {error}", output_dir.display()),
-        )
-    })?;
-    let output_dir = output_dir.canonicalize().map_err(|error| {
-        CoreImageError::new(
-            "OUTPUT_DIR_FAILED",
-            format!("出力先を解決できません: {error}"),
-        )
-    })?;
+    let (coreimage_dir, output_dir) = prepare_output_dirs(app_data_dir, mode)?;
+    // 試験経路の旧出力（coreimage/ 直下）を 1 回だけ掃除する。
+    cleanup_legacy_outputs_once(&coreimage_dir);
     // タイムアウトで kill された CLI などが残した古い一時ファイルを掃除する。
     cleanup_stale_temps(&output_dir, STALE_TEMP_AGE);
-    let stem = format!("{capture_id}_{}_{key}", mode.as_str());
+    // ファイル名は検証済みの capture_id（DSC + 数字 5 桁）と 16 桁の 16 進だけで作る。
+    let stem = format!("{capture_id}_{key}");
     let output = output_dir.join(format!("{stem}.jpg"));
     let provenance = output_dir.join(format!("{stem}.json"));
-    // 出力は必ず coreimage ディレクトリ直下（ARW のフォルダや他のキャッシュへ書かない）。
-    assert_eq!(output.parent(), Some(output_dir.as_path()));
-    assert_eq!(provenance.parent(), Some(output_dir.as_path()));
+    if output.parent() != Some(output_dir.as_path())
+        || provenance.parent() != Some(output_dir.as_path())
+    {
+        return Err(output_dir_error(
+            "出力先が coreimage ディレクトリの外になります",
+        ));
+    }
+    let context = ResultContext {
+        capture_id,
+        output: &output,
+        provenance: &provenance,
+        key: &key,
+        version: &version,
+        adjustments,
+    };
 
-    // 3. キャッシュヒット: 画像と来歴の両方があるときだけ（画像だけなら来歴の書き込みが
-    //    途中で落ちたとみなして現像し直す）。
-    if output.is_file() {
-        if let Ok(text) = fs::read_to_string(&provenance) {
-            if let Ok(saved) = serde_json::from_str::<Value>(&text) {
-                if let Some(result) =
-                    result_from_response(&saved, capture_id, mode, &output, true, &version)
-                {
-                    return Ok(result);
-                }
-            }
-        }
+    // 3. キャッシュヒットは枠を取らずに返す。
+    if let Some(cached) = load_cached(&context) {
+        return Ok(cached);
     }
 
-    // 4. 同時実行は 1 本まで。キャッシュヒットは上で返しているので、ここで止めるのは
-    //    実際に CLI を走らせる呼び出しだけ。待たずに BUSY を返す（枠はガードの drop で返る）。
-    let _slot = DevelopSlot::try_acquire(&DEVELOP_RUNNING).ok_or_else(|| {
-        CoreImageError::new(
-            "BUSY",
-            "別の Core Image 現像を実行中です。終わってからもう一度試してください",
-        )
-    })?;
+    // 4. CLI は同時 1 本。空くまで待つ（待ちが上限を超えたら BUSY）。枠はガードの drop で返る。
+    let _slot = slot.acquire()?;
+    // 待っている間に同じ現像（連打など）が終わっていればそれを返す。
+    if let Some(cached) = load_cached(&context) {
+        return Ok(cached);
+    }
 
-    // 5. CLI 呼び出し。
+    // 5. CLI 呼び出し（ウォッチドッグは子プロセスの起動から数える）。
     request.insert(
         "output".into(),
         Value::String(output.to_string_lossy().into_owned()),
@@ -694,16 +1038,18 @@ pub fn develop(
             "Core Image CLI の出力先が依頼と一致しないか、出力ファイルがありません",
         ));
     }
-    let developed = result_from_response(&response, capture_id, mode, &output, false, &version)
-        .ok_or_else(|| {
-            CoreImageError::new(
-                "SIDECAR_BAD_RESPONSE",
-                "Core Image CLI の応答に width / height がありません",
-            )
-        })?;
+    let developed = result_from_response(&response, &context, false).ok_or_else(|| {
+        CoreImageError::new(
+            "SIDECAR_BAD_RESPONSE",
+            "Core Image CLI の応答に width / height がありません",
+        )
+    })?;
 
     // 6. 来歴: CLI の応答 JSON をそのまま横に置く。
     write_provenance(&provenance, &format!("{}\n", response))?;
+
+    // 7. キャッシュの上限管理（いま書いた組は残す）。
+    prune_cache(&output_dir, CACHE_MAX_ENTRIES, CACHE_MAX_BYTES, Some(&stem));
     Ok(developed)
 }
 
@@ -741,27 +1087,39 @@ fn sidecar_path() -> Result<PathBuf, CoreImageError> {
 // Tauri コマンド
 // ---------------------------------------------------------------------------
 
-/// 試験機能が有効か（フロントはこれが true のときだけボタンを出す）。
-#[tauri::command]
-pub fn coreimage_experiment_enabled() -> bool {
-    experiment_enabled()
+/// 環境変数の値からプレビューエンジンを決める。ちょうど `"rawpy"` のときだけ rawpy。
+fn engine_from(value: Option<&str>) -> &'static str {
+    if value == Some("rawpy") {
+        "rawpy"
+    } else {
+        "coreimage"
+    }
 }
 
-/// 選択中カットを Core Image で現像する。JS からは
-/// `invoke("develop_coreimage", { captureId, mode })`。
+/// プレビュー現像のエンジン（`"coreimage"` | `"rawpy"`）。フロントは起動時に 1 回だけ読む。
+#[tauri::command]
+pub fn preview_engine() -> &'static str {
+    engine_from(std::env::var(PREVIEW_ENGINE_ENV).ok().as_deref())
+}
+
+/// 選択中カットを Core Image でプレビュー現像する。JS からは
+/// `invoke("develop_preview_coreimage", { captureId, adjustments })`。
+/// `adjustments` はフロントがプリセット既定値 + overrides をマージした 9 キー全量。
 ///
 /// async コマンド + spawn_blocking にしている。同期コマンドは main thread で走るため、
-/// 数秒かかる現像の間 UI が固まる。
+/// 数秒かかる現像（と実行枠の待ち）の間 UI が固まる。
 #[tauri::command]
-pub async fn develop_coreimage(
+pub async fn develop_preview_coreimage(
     app: AppHandle,
     capture_id: String,
-    mode: DevelopMode,
-) -> Result<CoreImageResult, CoreImageError> {
-    if !experiment_enabled() {
+    adjustments: Value,
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    // 安い検査は先に（CLI もファイルシステムも触らない）。
+    let adjustments = normalize_adjustments(&adjustments)?;
+    if !is_valid_capture_id(&capture_id) {
         return Err(CoreImageError::new(
-            "EXPERIMENT_DISABLED",
-            format!("Core Image 試験現像は無効です（{EXPERIMENT_ENV}=1 で起動してください）"),
+            "INVALID_CAPTURE_ID",
+            format!("撮影IDの形式が不正です: {capture_id:?}"),
         ));
     }
     let app_data_dir = app.path().app_data_dir().map_err(|error| {
@@ -772,7 +1130,15 @@ pub async fn develop_coreimage(
     })?;
     let sidecar = sidecar_path()?;
     tauri::async_runtime::spawn_blocking(move || {
-        develop(&app_data_dir, &sidecar, &capture_id, mode, DEVELOP_TIMEOUT)
+        develop(
+            &app_data_dir,
+            &sidecar,
+            &capture_id,
+            DevelopMode::Preview,
+            Some(&adjustments),
+            &DEVELOP_SLOT,
+            DEVELOP_TIMEOUT,
+        )
     })
     .await
     .map_err(|error| {
@@ -822,10 +1188,6 @@ mod tests {
         }
     }
 
-    fn touch(path: &Path) {
-        fs::write(path, b"x").expect("write file");
-    }
-
     #[test]
     fn capture_id_validation() {
         assert!(is_valid_capture_id("DSC04430"));
@@ -865,8 +1227,8 @@ mod tests {
     #[test]
     fn resolves_lowercase_extension_to_actual_entry_name() {
         let dir = TempDir::new("lower");
-        touch(&dir.path().join("DSC00002.arw"));
-        touch(&dir.path().join("DSC00002.JPG"));
+        touch_file(&dir.path().join("DSC00002.arw"));
+        touch_file(&dir.path().join("DSC00002.JPG"));
         let resolved = resolve_arw(dir.path(), "DSC00002").expect("resolve");
         assert_eq!(
             resolved.file_name().and_then(|n| n.to_str()),
@@ -881,7 +1243,7 @@ mod tests {
     #[test]
     fn resolves_canonical_name() {
         let dir = TempDir::new("canonical");
-        touch(&dir.path().join("DSC00003.ARW"));
+        touch_file(&dir.path().join("DSC00003.ARW"));
         let resolved = resolve_arw(dir.path(), "DSC00003").expect("resolve");
         assert_eq!(
             resolved.file_name().and_then(|n| n.to_str()),
@@ -905,9 +1267,9 @@ mod tests {
     #[test]
     fn missing_arw_and_jpg_only() {
         let dir = TempDir::new("missing");
-        touch(&dir.path().join("DSC00004.JPG"));
+        touch_file(&dir.path().join("DSC00004.JPG"));
         // 小文字ステムはパターン外（ステムは大文字固定）。
-        touch(&dir.path().join("dsc00004.ARW"));
+        touch_file(&dir.path().join("dsc00004.ARW"));
         assert_eq!(
             resolve_arw(dir.path(), "DSC00004").unwrap_err().code,
             "ARW_NOT_FOUND"
@@ -932,7 +1294,7 @@ mod tests {
     fn rejects_symlink_pointing_outside_root() {
         let outside = TempDir::new("outside");
         let target = outside.path().join("secret.ARW");
-        touch(&target);
+        touch_file(&target);
         let root = TempDir::new("symroot");
         std::os::unix::fs::symlink(&target, root.path().join("DSC00005.ARW")).expect("symlink");
         assert_eq!(
@@ -991,48 +1353,6 @@ mod tests {
         assert!(serde_json::from_str::<DevelopMode>("\"preview\\\",\\\"x\\\":\\\"1\"").is_err());
         assert!(serde_json::from_str::<DevelopMode>("\"Preview\"").is_err());
     }
-
-    #[test]
-    fn base_request_respects_cli_contract() {
-        let input = Path::new("/abs/DSC00001.ARW");
-        let preview = base_request(input, DevelopMode::Preview);
-        assert_eq!(preview.get("max_edge"), Some(&json!(2400)));
-        assert_eq!(preview.get("decoder_version"), Some(&json!("9")));
-        assert_eq!(
-            preview.get("settings"),
-            Some(&json!({"profile": "neutral"}))
-        );
-        let full = base_request(input, DevelopMode::Full);
-        assert!(
-            full.get("max_edge").is_none(),
-            "full に max_edge を付けると CLI がエラーにする"
-        );
-        assert!(full.get("jpeg_quality").is_none());
-    }
-
-    #[test]
-    fn cache_key_is_stable_and_sensitive() {
-        let version = CliVersion {
-            fingerprint: "{\"cli_version\":\"0.1.0\"}".into(),
-            cli_version: "0.1.0".into(),
-        };
-        let request = base_request(Path::new("/abs/DSC00001.ARW"), DevelopMode::Preview);
-        let key = cache_key(&request, &version, 100, 5);
-        assert_eq!(key.len(), 16);
-        assert_eq!(key, cache_key(&request, &version, 100, 5));
-        assert_ne!(key, cache_key(&request, &version, 101, 5));
-        assert_ne!(key, cache_key(&request, &version, 100, 6));
-        let other_version = CliVersion {
-            fingerprint: "{\"cli_version\":\"0.2.0\"}".into(),
-            cli_version: "0.2.0".into(),
-        };
-        assert_ne!(key, cache_key(&request, &other_version, 100, 5));
-        let full = base_request(Path::new("/abs/DSC00001.ARW"), DevelopMode::Full);
-        assert_ne!(key, cache_key(&full, &version, 100, 5));
-        let other_path = base_request(Path::new("/other/DSC00001.ARW"), DevelopMode::Preview);
-        assert_ne!(key, cache_key(&other_path, &version, 100, 5));
-    }
-
     #[test]
     fn sidecar_stdin_is_closed() {
         // stdin を閉じないと cat は終わらずウォッチドッグまで待つことになる。
@@ -1076,38 +1396,6 @@ mod tests {
     }
 
     #[test]
-    fn develop_slot_is_exclusive_and_released() {
-        let flag = AtomicBool::new(false);
-        {
-            let _slot = DevelopSlot::try_acquire(&flag).expect("空いているので取れる");
-            assert!(
-                DevelopSlot::try_acquire(&flag).is_none(),
-                "使用中は取れない（BUSY）"
-            );
-        }
-        assert!(
-            DevelopSlot::try_acquire(&flag).is_some(),
-            "drop で解放される"
-        );
-
-        // エラーで早期 return しても解放される。
-        fn fails(flag: &AtomicBool) -> Result<(), CoreImageError> {
-            let _slot = DevelopSlot::try_acquire(flag).expect("slot");
-            Err(CoreImageError::new("X", "x"))
-        }
-        assert!(fails(&flag).is_err());
-        assert!(!flag.load(Ordering::Acquire));
-
-        // panic の巻き戻しでも解放される。
-        let result = std::panic::catch_unwind(|| {
-            let _slot = DevelopSlot::try_acquire(&flag).expect("slot");
-            panic!("boom");
-        });
-        assert!(result.is_err());
-        assert!(DevelopSlot::try_acquire(&flag).is_some());
-    }
-
-    #[test]
     fn provenance_temp_names_are_unique() {
         let names: std::collections::HashSet<String> =
             (0..1000).map(|_| provenance_temp_name("a.json")).collect();
@@ -1122,44 +1410,414 @@ mod tests {
         assert!(name.starts_with(".a.json.") && name.ends_with(".tmp"));
     }
 
+    fn sample_adjustments() -> Value {
+        normalize_adjustments(&json!({
+            "exposure": 0.0,
+            "wb_temp": 0.0,
+            "shadow_lift": 15.0,
+            "highlight_recovery": 60.0,
+            "brightness": 1.0,
+            "contrast": 1.03,
+            "saturation": 1.02,
+            "sharpness": 1.04,
+            "noise_reduction": "light"
+        }))
+        .unwrap()
+    }
+
+    fn test_version(cli: &str) -> CliVersion {
+        CliVersion {
+            fingerprint: format!("{{\"cli_version\":\"{cli}\",\"macos_version\":\"27.0.1\"}}"),
+            cli_version: cli.into(),
+            macos_version: "27.0.1".into(),
+        }
+    }
+
     #[test]
-    fn cleanup_removes_only_stale_dot_tmp_files() {
-        let dir = TempDir::new("cleanup");
-        let old = std::time::SystemTime::now() - Duration::from_secs(11 * 60);
+    fn base_request_respects_cli_contract() {
+        let input = Path::new("/abs/DSC00001.ARW");
+        let adjustments = sample_adjustments();
+        let preview = base_request(input, DevelopMode::Preview, Some(&adjustments));
+        assert_eq!(preview.get("input"), Some(&json!("/abs/DSC00001.ARW")));
+        assert_eq!(preview.get("mode"), Some(&json!("preview")));
+        assert_eq!(preview.get("max_edge"), Some(&json!(2400)));
+        assert_eq!(preview.get("format"), Some(&json!("jpeg")));
+        assert_eq!(preview.get("decoder_version"), Some(&json!("9")));
+        assert_eq!(
+            preview.get("settings"),
+            Some(&json!({"profile": "apple_default", "lens_correction": true}))
+        );
+        assert_eq!(preview.get("adjustments"), Some(&adjustments));
+        assert!(preview.get("output").is_none(), "output は鍵の後で足す");
+        // settings に exposure_ev / neutral_temperature / neutral_tint を入れない
+        // （adjustments との同時指定は CLI 0.3.0 で INVALID_REQUEST。§4.1）。
+        let settings = preview["settings"].as_object().unwrap();
+        for key in ["exposure_ev", "neutral_temperature", "neutral_tint"] {
+            assert!(!settings.contains_key(key));
+        }
+        let mut keys: Vec<&str> = preview.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "adjustments",
+                "decoder_version",
+                "format",
+                "input",
+                "max_edge",
+                "mode",
+                "settings"
+            ]
+        );
+
+        let plain = base_request(input, DevelopMode::Preview, None);
+        assert!(
+            plain.get("adjustments").is_none(),
+            "None なら既定リクエスト"
+        );
+        let full = base_request(input, DevelopMode::Full, Some(&adjustments));
+        assert!(
+            full.get("max_edge").is_none(),
+            "full に max_edge を付けると CLI がエラーにする"
+        );
+        assert!(full.get("jpeg_quality").is_none());
+    }
+
+    #[test]
+    fn canonical_json_ignores_key_order() {
+        let a = json!({"b": 1, "a": {"y": [1, {"q": 1, "p": 2}], "x": "s"}});
+        let mut reordered = serde_json::Map::new();
+        reordered.insert("a".into(), json!({"x": "s", "y": [1, {"p": 2, "q": 1}]}));
+        reordered.insert("b".into(), json!(1));
+        assert_eq!(
+            canonical_json(&a),
+            canonical_json(&Value::Object(reordered))
+        );
+        assert_eq!(
+            canonical_json(&a),
+            r#"{"a":{"x":"s","y":[1,{"p":2,"q":1}]},"b":1}"#
+        );
+        assert_eq!(canonical_json(&json!("a\"b")), r#""a\"b""#);
+    }
+
+    #[test]
+    fn cache_key_is_stable_and_sensitive() {
+        let version = test_version("0.3.0");
+        let adjustments = sample_adjustments();
+        let input = Path::new("/abs/DSC00001.ARW");
+        let request = base_request(input, DevelopMode::Preview, Some(&adjustments));
+        let key = cache_key(&request, &version, 100, 5);
+        assert_eq!(key.len(), 16);
+        assert!(key
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(key, cache_key(&request, &version, 100, 5));
+
+        // output は鍵に入らない。
+        let mut with_output = request.clone();
+        with_output.insert("output".into(), json!("/somewhere/x.jpg"));
+        assert_eq!(key, cache_key(&with_output, &version, 100, 5));
+
+        // ARW の同一性。
+        assert_ne!(key, cache_key(&request, &version, 101, 5));
+        assert_ne!(key, cache_key(&request, &version, 100, 6));
+        // CLI の --version 全文（cli_version も macos_version も）。
+        assert_ne!(key, cache_key(&request, &test_version("0.3.1"), 100, 5));
+        let other_os = CliVersion {
+            fingerprint: version.fingerprint.replace("27.0.1", "27.1"),
+            ..version.clone()
+        };
+        assert_ne!(key, cache_key(&request, &other_os, 100, 5));
+        // mode / 入力パス / settings / adjustments の有無。
+        let full = base_request(input, DevelopMode::Full, Some(&adjustments));
+        assert_ne!(key, cache_key(&full, &version, 100, 5));
+        let other_path = base_request(
+            Path::new("/other/DSC00001.ARW"),
+            DevelopMode::Preview,
+            Some(&adjustments),
+        );
+        assert_ne!(key, cache_key(&other_path, &version, 100, 5));
+        let plain = base_request(input, DevelopMode::Preview, None);
+        assert_ne!(key, cache_key(&plain, &version, 100, 5));
+        let mut lens_off = request.clone();
+        lens_off.insert(
+            "settings".into(),
+            json!({"profile": "apple_default", "lens_correction": false}),
+        );
+        assert_ne!(key, cache_key(&lens_off, &version, 100, 5));
+
+        // adjustments の 1 キーだけを変えても鍵が変わる（9 キーすべて）。
+        let changed: [(&str, Value); 9] = [
+            ("exposure", json!(0.1)),
+            ("wb_temp", json!(1.0)),
+            ("shadow_lift", json!(16.0)),
+            ("highlight_recovery", json!(61.0)),
+            ("brightness", json!(1.01)),
+            ("contrast", json!(1.04)),
+            ("saturation", json!(1.03)),
+            ("sharpness", json!(1.05)),
+            ("noise_reduction", json!("full")),
+        ];
+        let mut seen = std::collections::HashSet::from([key.clone()]);
+        for (name, value) in changed {
+            let mut modified = adjustments.clone();
+            modified[name] = value;
+            let modified = normalize_adjustments(&modified).unwrap();
+            let other = cache_key(
+                &base_request(input, DevelopMode::Preview, Some(&modified)),
+                &version,
+                100,
+                5,
+            );
+            assert!(seen.insert(other), "{name} を変えたら鍵が変わる");
+        }
+
+        // 正規化で同値になる入力（int と float、キー順）は同じ鍵。
+        let mut as_int = adjustments.clone();
+        as_int["shadow_lift"] = json!(15);
+        let as_int = normalize_adjustments(&as_int).unwrap();
+        assert_eq!(
+            key,
+            cache_key(
+                &base_request(input, DevelopMode::Preview, Some(&as_int)),
+                &version,
+                100,
+                5
+            )
+        );
+    }
+
+    #[test]
+    fn preview_engine_flag() {
+        assert_eq!(engine_from(None), "coreimage");
+        assert_eq!(engine_from(Some("rawpy")), "rawpy");
+        for other in ["", "RAWPY", "rawpy ", "coreimage", "1", "python"] {
+            assert_eq!(engine_from(Some(other)), "coreimage", "{other:?}");
+        }
+    }
+
+    #[test]
+    fn develop_slot_waits_then_busy_over_limit() {
+        use std::sync::{mpsc, Arc};
+        let slot = Arc::new(DevelopSlot::new(2));
+        let running = slot.acquire().expect("空いているので取れる");
+        assert_eq!(slot.pending(), 1);
+
+        // 待ち 2 件はブロックして並ぶ。
+        let (sender, receiver) = mpsc::channel();
+        let waiters: Vec<_> = (0..2)
+            .map(|index| {
+                let slot = Arc::clone(&slot);
+                let sender = sender.clone();
+                thread::spawn(move || {
+                    let guard = slot.acquire().expect("待ちの上限内");
+                    sender.send(index).unwrap();
+                    drop(guard);
+                })
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while slot.pending() < 3 {
+            assert!(Instant::now() < deadline, "待ちが並ばない");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(100)).is_err(),
+            "走行中は待ちが先へ進まない"
+        );
+
+        // 走行 1 + 待ち 2 を超える 4 件目は待たずに BUSY。
+        let started = Instant::now();
+        let error = slot.acquire().err().expect("BUSY になる");
+        assert_eq!(error.code, "BUSY");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "BUSY は待たない"
+        );
+        assert_eq!(slot.pending(), 3, "BUSY は件数を増やさない");
+
+        drop(running);
+        for handle in waiters {
+            handle.join().unwrap();
+        }
+        let mut done: Vec<i32> = receiver.try_iter().collect();
+        done.sort_unstable();
+        assert_eq!(done, [0, 1]);
+        assert_eq!(slot.pending(), 0);
+        assert!(slot.acquire().is_ok(), "全部返ったら取れる");
+    }
+
+    #[test]
+    fn develop_slot_is_released_on_error_and_panic() {
+        let slot = DevelopSlot::new(0);
+        {
+            let _guard = slot.acquire().expect("空いている");
+            assert_eq!(
+                slot.acquire().err().map(|e| e.code).as_deref(),
+                Some("BUSY")
+            );
+        }
+        assert!(slot.acquire().is_ok(), "drop で解放される");
+
+        fn fails(slot: &DevelopSlot) -> Result<(), CoreImageError> {
+            let _guard = slot.acquire()?;
+            Err(CoreImageError::new("X", "x"))
+        }
+        assert!(fails(&slot).is_err());
+        assert_eq!(slot.pending(), 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = slot.acquire().expect("slot");
+            panic!("boom");
+        }));
+        assert!(result.is_err());
+        assert_eq!(slot.pending(), 0);
+        assert!(slot.acquire().is_ok(), "panic 後（poison）でも取れる");
+    }
+
+    fn set_age(path: &Path, age: Duration) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    fn write_bytes(path: &Path, len: usize) {
+        fs::write(path, vec![b'x'; len]).unwrap();
+    }
+
+    #[test]
+    fn prune_cache_removes_oldest_pairs_to_80_percent() {
+        let dir = TempDir::new("prune");
+        // 10 組（古い順に 0..9）。各組 jpg 100B + json 10B。
+        let stems: Vec<String> = (0..10).map(|i| format!("DSC0000{i}_{:016x}", i)).collect();
+        for (index, stem) in stems.iter().enumerate() {
+            let age = Duration::from_secs(1000 - index as u64 * 10);
+            for (ext, len) in [("jpg", 100), ("json", 10)] {
+                let path = dir.path().join(format!("{stem}.{ext}"));
+                write_bytes(&path, len);
+                set_age(&path, age);
+            }
+        }
+        // 対象外のもの: 形の違う名前、古い一時ファイル、外を指すシンボリックリンク、ディレクトリ。
+        let other = dir.path().join("notes.txt");
+        write_bytes(&other, 10_000);
+        set_age(&other, Duration::from_secs(5000));
+        let legacy = dir.path().join(format!("DSC00001_preview_{:016x}.jpg", 1));
+        touch_file(&legacy);
+        set_age(&legacy, Duration::from_secs(5000));
+        let outside = TempDir::new("prune-outside");
+        let target = outside.path().join(format!("DSC09999_{:016x}.jpg", 9));
+        write_bytes(&target, 10_000);
+        let link = dir.path().join(format!("DSC09998_{:016x}.jpg", 8));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        fs::create_dir(dir.path().join(format!("DSC09997_{:016x}.jpg", 7))).unwrap();
+
+        // 上限内なら何もしない。
+        assert_eq!(prune_cache(dir.path(), 10, 1_000_000, None), 0);
+        // 件数超過（上限 5 → 目標 4 件）: 古い 6 組を消す。最古の組は keep_stem で守る。
+        let removed = prune_cache(dir.path(), 5, 1_000_000, Some(&stems[0]));
+        assert_eq!(removed, 6);
+        let alive = |stem: &str| dir.path().join(format!("{stem}.jpg")).exists();
+        assert!(alive(&stems[0]), "keep_stem は消さない");
+        for stem in &stems[1..7] {
+            assert!(!alive(stem), "{stem} は古いので消える");
+            assert!(
+                !dir.path().join(format!("{stem}.json")).exists(),
+                "組ごと消える"
+            );
+        }
+        for stem in &stems[7..] {
+            assert!(alive(stem), "{stem} は新しいので残る");
+        }
+        assert!(other.exists() && legacy.exists());
+        assert!(fs::symlink_metadata(&link).is_ok() && target.exists());
+
+        // 容量超過（残り 4 組 = 440B、上限 300B → 目標 240B）: 古い 2 組を消す。
+        let removed = prune_cache(dir.path(), 100, 300, None);
+        assert_eq!(removed, 2);
+        assert!(!alive(&stems[0]) && !alive(&stems[7]));
+        assert!(alive(&stems[8]) && alive(&stems[9]));
+    }
+
+    fn touch_file(path: &Path) {
+        fs::write(path, b"x").expect("write file");
+    }
+
+    #[test]
+    fn cleanup_legacy_outputs_only_touches_old_experiment_names() {
+        let dir = TempDir::new("legacy");
+        let key = "0123456789abcdef";
+        let legacy = [
+            format!("DSC00001_preview_{key}.jpg"),
+            format!("DSC00001_preview_{key}.json"),
+            format!("DSC00002_full_{key}.jpg"),
+            format!("DSC00002_full_{key}.json"),
+        ];
+        let kept = [
+            "config.json".to_string(),
+            format!("DSC00001_{key}.jpg"),
+            format!("DSC00001_preview_{key}.png"),
+            format!("DSC00001_preview_{}.jpg", "0123"),
+            format!("dsc00009_preview_{key}.jpg"),
+        ];
+        for name in legacy.iter().chain(kept.iter()) {
+            touch_file(&dir.path().join(name));
+        }
+        // サブディレクトリ（新経路の preview/）の中は再帰しない。
+        let sub = dir.path().join("preview");
+        fs::create_dir(&sub).unwrap();
+        let nested = sub.join(format!("DSC00003_preview_{key}.jpg"));
+        touch_file(&nested);
+        // 旧名の形をした、外を指すシンボリックリンクはリンクもリンク先も消さない。
+        let outside = TempDir::new("legacy-outside");
+        let target = outside.path().join("victim.jpg");
+        touch_file(&target);
+        let link = dir.path().join(format!("DSC00004_preview_{key}.jpg"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(cleanup_legacy_outputs(dir.path()), legacy.len());
+        for name in &legacy {
+            assert!(!dir.path().join(name).exists(), "{name} は消える");
+        }
+        for name in &kept {
+            assert!(dir.path().join(name).exists(), "{name} は残る");
+        }
+        assert!(nested.exists());
+        assert!(fs::symlink_metadata(&link).is_ok() && target.exists());
+    }
+
+    #[test]
+    fn cleanup_removes_only_stale_dot_tmp_files_in_preview_dir() {
+        let app_data = TempDir::new("cleanup");
+        let (_, preview_dir) = prepare_output_dirs(app_data.path(), DevelopMode::Preview).unwrap();
+        assert!(preview_dir.ends_with("coreimage/preview"));
         let make = |name: &str, stale: bool| {
-            let path = dir.path().join(name);
-            touch(&path);
+            let path = preview_dir.join(name);
+            touch_file(&path);
             if stale {
-                fs::File::options()
-                    .write(true)
-                    .open(&path)
-                    .unwrap()
-                    .set_modified(old)
-                    .unwrap();
+                set_age(&path, Duration::from_secs(11 * 60));
             }
             path
         };
         let stale_tmp = make(".x.jpg.ABC.tmp", true);
         let fresh_tmp = make(".y.jpg.DEF.tmp", false);
-        let stale_jpg = make("DSC00001_preview_0123.jpg", true);
+        let stale_jpg = make("DSC00001_0123456789abcdef.jpg", true);
         let stale_no_dot = make("z.tmp", true);
         // 外を指す古いシンボリックリンクは、リンク先もリンク自体も消さない。
         let outside = TempDir::new("cleanup-outside");
         let target = outside.path().join(".target.tmp");
-        touch(&target);
-        fs::File::options()
-            .write(true)
-            .open(&target)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
-        let link = dir.path().join(".link.tmp");
+        touch_file(&target);
+        set_age(&target, Duration::from_secs(11 * 60));
+        let link = preview_dir.join(".link.tmp");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         // 先頭ドット + .tmp のディレクトリも対象外。
-        let tmp_dir = dir.path().join(".dir.tmp");
+        let tmp_dir = preview_dir.join(".dir.tmp");
         fs::create_dir(&tmp_dir).unwrap();
 
-        cleanup_stale_temps(dir.path(), STALE_TEMP_AGE);
+        cleanup_stale_temps(&preview_dir, STALE_TEMP_AGE);
 
         assert!(!stale_tmp.exists(), "古い一時ファイルは消える");
         assert!(
@@ -1171,6 +1829,265 @@ mod tests {
         assert!(fs::symlink_metadata(&link).is_ok());
         assert!(target.exists());
         assert!(tmp_dir.is_dir());
+    }
+
+    #[test]
+    fn output_dirs_reject_symlink_escape() {
+        let app_data = TempDir::new("escape");
+        let outside = TempDir::new("escape-outside");
+        fs::create_dir(app_data.path().join(OUTPUT_DIR_NAME)).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            app_data.path().join(OUTPUT_DIR_NAME).join("preview"),
+        )
+        .unwrap();
+        let error = prepare_output_dirs(app_data.path(), DevelopMode::Preview).unwrap_err();
+        assert_eq!(error.code, "OUTPUT_DIR_FAILED");
+
+        let app_data = TempDir::new("escape2");
+        std::os::unix::fs::symlink(outside.path(), app_data.path().join(OUTPUT_DIR_NAME)).unwrap();
+        let error = prepare_output_dirs(app_data.path(), DevelopMode::Preview).unwrap_err();
+        assert_eq!(error.code, "OUTPUT_DIR_FAILED");
+        assert!(
+            fs::read_dir(outside.path()).unwrap().next().is_none(),
+            "外には何も作らない"
+        );
+    }
+
+    // ---- CLI 0.3.0 のモック（実バイナリは 0.2.0 なので、0.3.0 の応答はスクリプトで返す） ----
+
+    /// 0.3.0 の契約（§4.2）どおりの応答を返す sh スクリプト。リクエスト全文を応答の
+    /// `request` に入れて返すので、来歴 JSON から CLI に何を渡したかを検査できる。
+    /// 呼ばれるたびに `calls` へ 1 行足す（キャッシュヒットで CLI を呼ばないことの確認用）。
+    fn mock_cli(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("mock-cli");
+        let calls = dir.join("calls");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '{{"cli_version":"0.3.0","engine":"coreimage","macos_version":"27.0.1","ok":true}}'
+  exit 0
+fi
+echo run >> '{calls}'
+req=$(cat)
+out=$(printf '%s' "$req" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
+{body}
+"#,
+            calls = calls.display()
+        );
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    const MOCK_OK: &str = r#"printf 'JPEGDATA' > "$out"
+printf '{"ok":true,"cli_version":"0.3.0","macos_version":"27.0.1","decoder_version":"9","mode":"preview","format":"jpeg","output":"%s","width":2400,"height":1600,"elapsed_ms":{"decode":1.0,"render_encode":2.0,"total":3.0},"applied":{"profile":"apple_default","lens_correction_enabled":true,"sharpness_amount":1},"adjustments_applied":{"defaults":{"sharpness_amount":1.0},"post":{"shadow_lift":0.15},"ignored":["highlight_recovery"],"guards":[]},"source":{"lens_model":"E 16mm F2.8","iso":3200,"camera_model":"ILCE-6400"},"request":%s}\n' "$out" "$req""#;
+
+    const MOCK_FAIL: &str = r#"printf '%s\n' '{"ok":false,"error":{"code":"RENDER_FAILED","message":"boom"}}'
+exit 1"#;
+
+    fn calls(dir: &Path) -> usize {
+        fs::read_to_string(dir.join("calls"))
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// 偽の app_data_dir（config.json → ソースフォルダ）を作る。
+    fn fake_app(tag: &str, ids: &[&str]) -> (TempDir, TempDir) {
+        let app_data = TempDir::new(&format!("{tag}-app"));
+        let source = TempDir::new(&format!("{tag}-src"));
+        for id in ids {
+            fs::write(source.path().join(format!("{id}.ARW")), b"fake raw").unwrap();
+        }
+        fs::write(
+            app_data.path().join("config.json"),
+            json!({"config_version": 1, "source_root": source.path()}).to_string(),
+        )
+        .unwrap();
+        (app_data, source)
+    }
+
+    #[test]
+    fn develop_with_mock_cli_sends_contract_and_caches() {
+        let (app_data, source) = fake_app("mock", &["DSC00001"]);
+        let bin = TempDir::new("mock-bin");
+        let cli = mock_cli(bin.path(), MOCK_OK);
+        let slot = DevelopSlot::new(MAX_WAITING);
+        let adjustments = sample_adjustments();
+        let arw = source.path().join("DSC00001.ARW");
+        let before = fs::read(&arw).unwrap();
+        let coreimage_dir = app_data.path().join(OUTPUT_DIR_NAME);
+        fs::create_dir_all(&coreimage_dir).unwrap();
+
+        let first = develop(
+            app_data.path(),
+            &cli,
+            "DSC00001",
+            DevelopMode::Preview,
+            Some(&adjustments),
+            &slot,
+            DEVELOP_TIMEOUT,
+        )
+        .unwrap();
+        assert!(!first.cache_hit);
+        assert_eq!(calls(bin.path()), 1);
+        assert_eq!((first.width, first.height), (2400, 1600));
+        assert_eq!(first.params_hash.len(), 16);
+        assert_eq!(first.cli_version, "0.3.0");
+        assert_eq!(first.macos_version, "27.0.1");
+        assert_eq!(first.decoder_version, "9");
+        assert_eq!(first.adjustments, adjustments);
+        assert_eq!(first.applied["profile"], json!("apple_default"));
+        assert_eq!(
+            first.adjustments_applied["ignored"],
+            json!(["highlight_recovery"])
+        );
+        assert_eq!(first.source["iso"], json!(3200));
+        assert_eq!(first.elapsed_ms["total"], json!(3.0));
+
+        // 出力は coreimage/preview/<ID>_<hash16>.{jpg,json}。
+        let preview_dir = coreimage_dir.canonicalize().unwrap().join("preview");
+        let output = PathBuf::from(&first.output_path);
+        assert_eq!(output.parent(), Some(preview_dir.as_path()));
+        assert_eq!(
+            output.file_name().and_then(|n| n.to_str()),
+            Some(format!("DSC00001_{}.jpg", first.params_hash).as_str())
+        );
+        assert_eq!(
+            PathBuf::from(&first.provenance_path),
+            output.with_extension("json")
+        );
+
+        // CLI に渡したリクエスト（来歴 = 応答全文に mock が埋め込んだもの）。
+        let provenance: Value =
+            serde_json::from_str(&fs::read_to_string(&first.provenance_path).unwrap()).unwrap();
+        let request = &provenance["request"];
+        assert_eq!(
+            request["settings"],
+            json!({"profile": "apple_default", "lens_correction": true})
+        );
+        assert_eq!(request["adjustments"], adjustments);
+        assert_eq!(request["max_edge"], json!(2400));
+        assert_eq!(request["decoder_version"], json!("9"));
+        assert_eq!(request["format"], json!("jpeg"));
+        assert_eq!(request["mode"], json!("preview"));
+        assert_eq!(request["output"], json!(first.output_path));
+        assert_eq!(
+            request["input"],
+            json!(arw.canonicalize().unwrap().to_string_lossy())
+        );
+
+        // 2 回目はキャッシュヒット（CLI を呼ばない）。
+        let second = develop(
+            app_data.path(),
+            &cli,
+            "DSC00001",
+            DevelopMode::Preview,
+            Some(&adjustments),
+            &slot,
+            DEVELOP_TIMEOUT,
+        )
+        .unwrap();
+        assert!(second.cache_hit);
+        assert_eq!(calls(bin.path()), 1);
+        assert_eq!(second.output_path, first.output_path);
+        assert_eq!(second.params_hash, first.params_hash);
+        assert_eq!(second.adjustments_applied, first.adjustments_applied);
+
+        // adjustments を 1 つ変えると別ハッシュで現像し直す。
+        let mut changed = adjustments.clone();
+        changed["noise_reduction"] = json!("full");
+        let third = develop(
+            app_data.path(),
+            &cli,
+            "DSC00001",
+            DevelopMode::Preview,
+            Some(&changed),
+            &slot,
+            DEVELOP_TIMEOUT,
+        )
+        .unwrap();
+        assert!(!third.cache_hit);
+        assert_ne!(third.params_hash, first.params_hash);
+        assert_eq!(calls(bin.path()), 2);
+        assert!(output.is_file(), "前の組は上限内なので残る");
+
+        // 原本不変。
+        assert_eq!(fs::read(&arw).unwrap(), before);
+    }
+
+    #[test]
+    fn develop_reports_cli_error_and_busy() {
+        let (app_data, _source) = fake_app("mockfail", &["DSC00002"]);
+        let bin = TempDir::new("mockfail-bin");
+        let cli = mock_cli(bin.path(), MOCK_FAIL);
+        let adjustments = sample_adjustments();
+        let slot = DevelopSlot::new(0);
+        let run = |slot: &DevelopSlot| {
+            develop(
+                app_data.path(),
+                &cli,
+                "DSC00002",
+                DevelopMode::Preview,
+                Some(&adjustments),
+                slot,
+                DEVELOP_TIMEOUT,
+            )
+        };
+        let error = run(&slot).unwrap_err();
+        assert_eq!(error.code, "RENDER_FAILED");
+        assert_eq!(error.message, "boom");
+        let preview_dir = app_data.path().join(OUTPUT_DIR_NAME).join("preview");
+        assert!(
+            fs::read_dir(&preview_dir).unwrap().next().is_none(),
+            "失敗時は来歴を書かない"
+        );
+
+        // 枠が埋まっていて待ちも 0 なら、CLI を呼ばずに BUSY。
+        let before = calls(bin.path());
+        let held = slot.acquire().unwrap();
+        assert_eq!(run(&slot).unwrap_err().code, "BUSY");
+        assert_eq!(calls(bin.path()), before);
+        drop(held);
+
+        // 不正な capture_id は CLI もファイルシステムも触る前に落ちる。
+        let error = develop(
+            app_data.path(),
+            &cli,
+            "../DSC00002",
+            DevelopMode::Preview,
+            Some(&adjustments),
+            &slot,
+            DEVELOP_TIMEOUT,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "INVALID_CAPTURE_ID");
+    }
+
+    #[test]
+    fn develop_lru_keeps_new_entry() {
+        // prune は develop の最後で走る。上限は定数なので、ここでは「いま書いた組が残り、
+        // 名前の形が違うファイルに触れない」ことだけを見る（件数・容量の挙動は
+        // prune_cache_removes_oldest_pairs_to_80_percent）。
+        let (app_data, _source) = fake_app("mocklru", &["DSC00003"]);
+        let bin = TempDir::new("mocklru-bin");
+        let cli = mock_cli(bin.path(), MOCK_OK);
+        let (_, preview_dir) = prepare_output_dirs(app_data.path(), DevelopMode::Preview).unwrap();
+        let foreign = preview_dir.join("README.txt");
+        touch_file(&foreign);
+        let result = develop(
+            app_data.path(),
+            &cli,
+            "DSC00003",
+            DevelopMode::Preview,
+            Some(&sample_adjustments()),
+            &DevelopSlot::new(MAX_WAITING),
+            DEVELOP_TIMEOUT,
+        )
+        .unwrap();
+        assert!(Path::new(&result.output_path).is_file());
+        assert!(foreign.exists());
     }
 
     /// `scripts/build-coreimage-cli.sh` が置いた externalBin。
@@ -1187,74 +2104,147 @@ mod tests {
             })
     }
 
-    const REAL_ROOT: &str = "/Volumes/Backup/100MSDCF";
+    /// 実 ARW のフォルダ（Swift の `GEOFRAME_CI_SMOKE_ARW` と同じ流儀で差し替え可能）。
+    const REAL_ROOT_ENV: &str = "GEOFRAME_CI_TEST_ARW_ROOT";
+    const REAL_ROOT_DEFAULT: &str = "/Volumes/Backup/100MSDCF";
 
-    /// 実 ARW での結合テスト（Tauri の develop_coreimage と同じ `develop` を通す）。
-    /// 実ファイルか sidecar が無ければ skip。出力は一時ディレクトリの偽 app_data_dir へ書き、
-    /// 本物の `~/Library/Application Support/com.geoframe.rawassist/` には触れない。
+    /// `cli_version` が 0.3.0 以上か（adjustments を受け付ける版か）。
+    fn supports_adjustments(cli_version: &str) -> bool {
+        let mut parts = cli_version
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0));
+        let major = parts.next().unwrap_or(0);
+        let minor = parts.next().unwrap_or(0);
+        major > 0 || minor >= 3
+    }
+
+    #[test]
+    fn supports_adjustments_parses_versions() {
+        assert!(!supports_adjustments("0.2.0"));
+        assert!(supports_adjustments("0.3.0"));
+        assert!(supports_adjustments("0.10.1"));
+        assert!(supports_adjustments("1.0.0"));
+        assert!(!supports_adjustments("unknown"));
+    }
+
+    /// 実 ARW での結合テスト（Tauri のコマンドと同じ `develop` を通す）。
+    ///
+    /// `GEOFRAME_CI_TEST_ARW_ROOT`（既定 `/Volumes/Backup/100MSDCF`）に ARW が無いか、sidecar が
+    /// 無ければ skip。出力は一時ディレクトリの偽 app_data_dir へ書き、本物の
+    /// `~/Library/Application Support/com.geoframe.rawassist/` には触れない。
+    ///
+    /// - 既定リクエスト（adjustments 無し）は 0.2.0 でも通る: apple_default + レンズ補正 ON、
+    ///   長辺 2400、`coreimage/preview/` への出力、キャッシュヒット、原本不変。
+    /// - adjustments 付きは CLI 0.3.0 以上のときだけ現像まで確かめる。0.2.0 では
+    ///   `INVALID_REQUEST`（unknown request key）で拒否されることだけを確かめる。
     #[test]
     fn develops_real_arw_when_available() {
         let Some(sidecar) = built_sidecar() else {
             eprintln!("skip: src-tauri/binaries/geoframe-ci-develop-* がありません");
             return;
         };
-        let cases = [("DSC04430", true), ("DSC04553", false)];
-        if cases
-            .iter()
-            .any(|(id, _)| !Path::new(REAL_ROOT).join(format!("{id}.ARW")).is_file())
-        {
-            eprintln!("skip: {REAL_ROOT} の実 ARW がありません");
+        let root = std::env::var(REAL_ROOT_ENV).unwrap_or_else(|_| REAL_ROOT_DEFAULT.to_string());
+        let root = PathBuf::from(root);
+        let mut ids: Vec<String> = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter_map(|name| {
+                        entry_pattern()
+                            .captures(&name)
+                            .filter(|found| found[2].eq_ignore_ascii_case("ARW"))
+                            .map(|found| found[1].to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ids.sort();
+        ids.dedup();
+        ids.truncate(2);
+        if ids.is_empty() {
+            eprintln!(
+                "skip: {} に実 ARW がありません（{REAL_ROOT_ENV} で指定）",
+                root.display()
+            );
             return;
         }
         let app_data = TempDir::new("appdata");
         fs::write(
             app_data.path().join("config.json"),
-            json!({"config_version": 1, "source_root": REAL_ROOT}).to_string(),
+            json!({"config_version": 1, "source_root": root}).to_string(),
         )
         .unwrap();
+        let slot = DevelopSlot::new(MAX_WAITING);
+        let version = cli_version(&sidecar).expect("--version");
+        let adjustments = sample_adjustments();
+        let output_dir = app_data
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(OUTPUT_DIR_NAME)
+            .join("preview");
 
-        for (capture_id, landscape) in cases {
-            let input = Path::new(REAL_ROOT).join(format!("{capture_id}.ARW"));
+        for capture_id in &ids {
+            let input = resolve_arw(&root, capture_id).unwrap();
             let before = fs::metadata(&input).unwrap();
+            let run = |adjustments: Option<&Value>| {
+                develop(
+                    app_data.path(),
+                    &sidecar,
+                    capture_id,
+                    DevelopMode::Preview,
+                    adjustments,
+                    &slot,
+                    DEVELOP_TIMEOUT,
+                )
+            };
 
-            let first = develop(
-                app_data.path(),
-                &sidecar,
-                capture_id,
-                DevelopMode::Preview,
-                DEVELOP_TIMEOUT,
-            )
-            .unwrap_or_else(|error| panic!("{capture_id}: {error:?}"));
+            // 既定リクエスト（0.2.0 でも通る範囲）。
+            let first = run(None).unwrap_or_else(|error| panic!("{capture_id}: {error:?}"));
             assert!(!first.cache_hit);
             assert_eq!(first.decoder_version, "9");
-            let (long, short) = if landscape {
-                (first.width, first.height)
-            } else {
-                (first.height, first.width)
-            };
-            assert_eq!((long, short), (2400, 1600), "{capture_id} の向き・寸法");
+            assert_eq!(first.width.max(first.height), 2400, "{capture_id} の長辺");
+            assert_eq!(first.applied["profile"], json!("apple_default"));
+            if first.applied["lens_correction_supported"] == json!(true) {
+                assert_eq!(first.applied["lens_correction_enabled"], json!(true));
+            }
+            assert_eq!(first.cli_version, version.cli_version);
             let output = PathBuf::from(&first.output_path);
-            let output_dir = app_data
-                .path()
-                .join(OUTPUT_DIR_NAME)
-                .canonicalize()
-                .unwrap();
             assert_eq!(output.parent(), Some(output_dir.as_path()));
             assert!(output.is_file());
-            assert!(output.with_extension("json").is_file(), "来歴 JSON");
+            assert!(Path::new(&first.provenance_path).is_file(), "来歴 JSON");
             assert!(first.elapsed_ms.get("total").is_some());
 
-            let second = develop(
-                app_data.path(),
-                &sidecar,
-                capture_id,
-                DevelopMode::Preview,
-                DEVELOP_TIMEOUT,
-            )
-            .unwrap();
+            let second = run(None).unwrap();
             assert!(second.cache_hit, "2 回目はキャッシュヒット");
             assert_eq!(second.output_path, first.output_path);
             assert_eq!((second.width, second.height), (first.width, first.height));
+
+            // adjustments 付き。
+            if supports_adjustments(&version.cli_version) {
+                let with_adj = run(Some(&adjustments)).unwrap();
+                assert!(!with_adj.cache_hit);
+                assert_ne!(with_adj.params_hash, first.params_hash);
+                assert_eq!(with_adj.width.max(with_adj.height), 2400);
+                assert_eq!(
+                    with_adj.adjustments_applied["ignored"],
+                    json!(["highlight_recovery"])
+                );
+                assert!(with_adj.adjustments_applied["post"].is_object());
+                assert!(run(Some(&adjustments)).unwrap().cache_hit);
+                let mut changed = adjustments.clone();
+                changed["sharpness"] = json!(1.5);
+                let other = run(Some(&normalize_adjustments(&changed).unwrap())).unwrap();
+                assert_ne!(other.params_hash, with_adj.params_hash);
+            } else {
+                eprintln!(
+                    "skip: CLI {} は adjustments 非対応（0.3.0 以上で現像まで確認）",
+                    version.cli_version
+                );
+                let error = run(Some(&adjustments)).unwrap_err();
+                assert_eq!(error.code, "INVALID_REQUEST", "{error:?}");
+            }
 
             // 原本不変（サイズ・mtime）。
             let after = fs::metadata(&input).unwrap();
@@ -1268,6 +2258,8 @@ mod tests {
             &sidecar,
             "DSC00000",
             DevelopMode::Preview,
+            Some(&adjustments),
+            &slot,
             DEVELOP_TIMEOUT,
         )
         .unwrap_err();

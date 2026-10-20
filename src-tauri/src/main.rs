@@ -17,6 +17,7 @@
 //! failure path here logs to stderr and leaves the window open rather than
 //! panicking.
 
+mod adjustments;
 mod coreimage;
 
 use std::env;
@@ -890,9 +891,9 @@ fn main() {
         .manage(Mutex::new(SetupState::new("ready", "")))
         .invoke_handler(tauri::generate_handler![
             setup_status,
-            // Core Image 試験現像（Issue #65）。GEOFRAME_COREIMAGE_EXPERIMENT=1 のときだけ有効。
-            coreimage::coreimage_experiment_enabled,
-            coreimage::develop_coreimage
+            // Core Image プレビュー現像（Issue #72 / #73）。GEOFRAME_PREVIEW_ENGINE=rawpy で切り戻し。
+            coreimage::preview_engine,
+            coreimage::develop_preview_coreimage
         ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;
