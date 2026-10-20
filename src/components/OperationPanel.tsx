@@ -33,8 +33,6 @@ import type {
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
 import { BracketMerge } from "./BracketMerge";
-import { CoreImageExperiment } from "./CoreImageExperiment";
-import { useCoreImageExperiment } from "../lib/coreimage-api";
 import { ProgressiveImage } from "./ProgressiveImage";
 
 type OperationPanelProps = {
@@ -163,8 +161,6 @@ export function OperationPanel({
   onOpenViewer,
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
-  // Core Image 試験現像（Issue #65）。フラグ無効・ブラウザモードでは false で、DOM に何も出さない。
-  const coreImageEnabled = useCoreImageExperiment();
   const developResult = fullResult ?? previewResult;
   /**
    * 本合成の結果が **今選んでいるフレーム構成** のものか。
@@ -221,6 +217,8 @@ export function OperationPanel({
           // まだ現像していなければ見せられるのは現像前だけ。
           initial: developed ? initial : "before",
           preview: Boolean(developed?.preview),
+          // 長辺はエンジンで違う（rawpy 1600 / Core Image 2400）ので結果の寸法から渡す。
+          previewEdge: developed?.preview ? Math.max(developed.width, developed.height) : undefined,
           title: id,
         };
       });
@@ -249,6 +247,7 @@ export function OperationPanel({
           afterLabel: "合成後",
           initial,
           preview: Boolean(merged.preview),
+          previewEdge: merged.preview ? Math.max(merged.width, merged.height) : undefined,
           title: `${captureId}（ブラケット合成 ${merged.frames}枚）`,
         },
       ],
@@ -525,11 +524,6 @@ export function OperationPanel({
         }
         onOpenFullSize={() => onOpenViewer(viewerGalleryFor("after"))}
       />
-
-      {/* key で撮影IDごとに作り直し、カットを切り替えたら前の結果を残さない。 */}
-      {coreImageEnabled && (
-        <CoreImageExperiment key={captureId} captureId={captureId} rawpyUrl={developResult?.output_url} />
-      )}
     </section>
   );
 }

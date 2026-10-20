@@ -62,6 +62,9 @@ export function BeforeAfter({
   // ここは `merged` ではなくガードで書く（変数経由だと result の型が絞られない）。
   const beforeCaptureId = isMergedResult(result) ? captureId : result.capture_id;
   const canToggle = Boolean(view && onChangeView);
+  // Core Image プレビュー（#72）。書き出し（本現像）は従来どおり rawpy なので見え方の差を明示する。
+  // 合成結果は engine を持たない（常に rawpy）。ガードで書くのは result の型を絞るため。
+  const coreImage = !isMergedResult(result) && result.engine === "coreimage";
 
   return (
     <div ref={comparisonRef} className="developed-comparison operation-comparison">
@@ -97,6 +100,7 @@ export function BeforeAfter({
             </span>
           )}
           {result.preview && <span className="preview-tag">プレビュー品質</span>}
+          {coreImage && <span className="preview-tag">Core Image プレビュー</span>}
         </div>
         <span>{result.preset_label}</span>
       </div>
@@ -145,6 +149,16 @@ export function BeforeAfter({
           </div>
         ))}
       </dl>
+
+      {coreImage && (
+        <>
+          {/* highlight_recovery は Core Image では受け取るだけで効かない（adjustments_applied.ignored、#81 で代替を決める）。 */}
+          <p className="engine-note">ハイライト回復は Core Image プレビューでは適用されません（#81 で対応予定）。</p>
+          <p className="engine-note">
+            書き出し（本現像）は従来エンジン（rawpy）で行うため、このプレビューと見え方が異なる場合があります。
+          </p>
+        </>
+      )}
 
       <div className="developed-meta">
         <span>{result.width} × {result.height}px</span>
