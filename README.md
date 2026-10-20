@@ -168,17 +168,20 @@ outputs/
 
 最終品質でカタログ管理まで必要になった場合は、同じAPIの背後をdarktable CLIへ差し替えられる構成です。現在の実装は依存が小さく、Sony ARWをローカルだけで試すことを優先しています。
 
-### Core Image 試験現像（実験的、最新の macOS）
+### Core Image プレビュー（既定、最新の macOS）
 
-Python エンジンを経由せず、macOS 標準の Core Image（CIRAWFilter）で ARW を現像する試験経路があります（Issue #65）。既定では表示されません。
+デスクトップアプリ（Tauri）のプレビュー現像は、Python エンジンを経由せず、macOS 標準の Core Image（CIRAWFilter）で行います（Issue #65、#72、#73）。調整（Adjustments）の 9 キーも Core Image に対応づけてあります（`highlight_recovery` だけは当面効きません。代替は #81）。
+
+- 既定が Core Image です。プレビューには「Core Image プレビュー」のバッジと注記が出ます。CLI の起動失敗などインフラ側のエラー時は Python（rawpy）のプレビューにフォールバックします。ブラウザモード（`npm run dev:raw`）は Python のままです
+- 切り戻し: 環境変数 `GEOFRAME_PREVIEW_ENGINE=rawpy` で起動すると、プレビューも Python（rawpy）になります（`GEOFRAME_PREVIEW_ENGINE=rawpy npm run tauri:dev`、ビルド済み `.app` は `open --env GEOFRAME_PREVIEW_ENGINE=rawpy "<アプリのパス>.app"`）
+- **書き出しと原寸（本現像）は当面 rawpy のままです。** プレビューと書き出しで、明るさ・色・ノイズなどの見た目が一致しない場合があります（移行完了までの既知の差。オーナー受容済み）
 
 - ビルド: `npm run build:coreimage`（Swift CLI `native/coreimage-cli` をビルドし `src-tauri/binaries/` に置く。`tauri:dev` / `tauri:build` からも自動で実行。`cargo build` / `cargo test` の前には一度必要）
-- 有効化: `GEOFRAME_COREIMAGE_EXPERIMENT=1 npm run tauri:dev`（ビルド済み `.app` は `open --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "<アプリのパス>.app"`）。操作パネルに「Core Image 試験現像」とカメラJPEG / rawpy / Core Image の比較が出ます
 - 出力は `<app_data_dir>/coreimage/` だけに書き、原本や既存のキャッシュ・書き出し先には書きません
 - 比較: `.venv/bin/python scripts/compare_engines.py --source-root <フォルダ> --select auto`（出力は `work/engine-comparison/`）
 - macOS を更新したら [回帰確認手順](docs/coreimage-regression-check.md) で基本設定（`apple_default`・decoder 9・レンズ補正 ON）の画が変わっていないかを確かめます（`scripts/coreimage-regression-applied.sh <ARW のフォルダ>`）
 
-採否と比較結果は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、[比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md) を参照してください。現像エンジンは Core Image（`apple_default`・decoder 9・レンズ補正 ON）へ段階的に移行する方針で、移行条件を満たすまで本番の現像は rawpy のままです。
+採否と比較結果は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、[比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md) を参照してください。現像エンジンは Core Image（`apple_default`・decoder 9・レンズ補正 ON）へ段階的に移行する方針で、プレビューは段階 1 として Core Image に移行済みで、原寸・書き出しの移行条件は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md) を参照してください。
 
 ## 既知の制限
 

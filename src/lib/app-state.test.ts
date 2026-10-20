@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   currentDevelopmentCandidates,
   currentDevelopmentCandidatesResponse,
+  effectiveAdjustments,
   initialState,
   reducer,
+  resolveAdjustments,
   type Action,
   type State,
 } from "./app-state";
@@ -468,6 +470,39 @@ describe("develop/ok の世代照合", () => {
     expect(next.viewing[1]).toEqual({ kind: "photo", captureId: "A1" });
   });
 
+  it("rawpy の結果の通知文にはエンジン名を入れない", () => {
+    const next = reducer(withEngine, { type: "develop/ok", mode: "preview", result: developed("A1"), generation: 0 });
+    expect(next.notice).toBe("A1 のプレビュー現像が完了しました（1.5秒）");
+    expect(next.notice).not.toContain("Core Image");
+  });
+
+  it("Core Image の結果は通知文に「Core Image・」を入れる", () => {
+    const result = { ...developed("A1"), elapsed_seconds: 1.32, engine: "coreimage" } as DevelopedResult;
+    const next = reducer(withEngine, { type: "develop/ok", mode: "preview", result, generation: 0 });
+    expect(next.notice).toBe("A1 のプレビュー現像が完了しました（Core Image・1.3秒）");
+    expect(next.noticeTone).toBe("info");
+    expect(next.previewResults.A1?.engine).toBe("coreimage");
+  });
+
+  it("Core Image の保存済み結果も「Core Image・」を入れる", () => {
+    const result = { ...developed("A1"), cached: true, engine: "coreimage" } as DevelopedResult;
+    const next = reducer(withEngine, { type: "develop/ok", mode: "preview", result, generation: 0 });
+    expect(next.notice).toBe("A1 のプレビュー現像が完了しました（Core Image・保存済み結果）");
+  });
+
+  it("rawpy へフォールバックした結果はその旨を通知する", () => {
+    const next = reducer(withEngine, {
+      type: "develop/ok",
+      mode: "preview",
+      result: developed("A1"),
+      generation: 0,
+      fallbackCode: "SIDECAR_NOT_FOUND",
+    });
+    expect(next.notice).toBe("A1: Core Image での現像に失敗したため rawpy でプレビューしました（SIDECAR_NOT_FOUND）");
+    expect(next.noticeTone).toBe("info");
+    expect(next.previewResults.A1).toBeDefined();
+  });
+
   it("full は fullResults にだけ入る", () => {
     const next = reducer(withEngine, { type: "develop/ok", mode: "full", result: developed("A1"), generation: 0 });
     expect(next.fullResults.A1).toBeDefined();
@@ -577,5 +612,23 @@ describe("merge 系", () => {
     };
     const next = reducer(state, { type: "merge/resetFrames", groupId: 5 });
     expect(next.mergeSelections[5]).toEqual(ids.slice(0, 9));
+  });
+});
+
+describe("effectiveAdjustments / resolveAdjustments（調整値の解決は 1 か所）", () => {
+  it("プリセット未取得なら null", () => {
+    expect(effectiveAdjustments({ ...initialState, health: null })).toBeNull();
+  });
+
+  it("選択中プリセットの既定値に overrides を重ね、resolveAdjustments と同じ値を返す", () => {
+    const state: State = { ...withEngine, presetName: "shadow_rescue", overrides: { exposure: 0.7 } };
+    const shadow = HEALTH.presets.find((p) => p.name === "shadow_rescue")!;
+    expect(effectiveAdjustments(state)).toEqual({ ...BASE_ADJ, shadow_lift: 60, exposure: 0.7 });
+    expect(effectiveAdjustments(state)).toEqual(resolveAdjustments(shadow, state.overrides));
+  });
+
+  it("coreimage-api の resolveAdjustments は同じ実装（再エクスポート）", async () => {
+    const api = await import("./coreimage-api");
+    expect(api.resolveAdjustments).toBe(resolveAdjustments);
   });
 });

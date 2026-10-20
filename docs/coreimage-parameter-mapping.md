@@ -1,6 +1,6 @@
 # 現行 Adjustments と Core Image（CIRAWFilter）パラメータの対応
 
-Issue #65 PR1 時点の整理。現行エンジンは `local_raw/engine.py`（ENGINE_VERSION 17 系）、
+Issue #65 PR1 時点の整理（#72/#73 での決定は末尾の「#73 での決定」節に追記した。この表の「PoC での扱い」列は PoC 時点の記述で、現在の扱いではない）。現行エンジンは `local_raw/engine.py`（ENGINE_VERSION 17 系）、
 Adjustments の型と値域は `src/lib/types.ts`。Core Image 側は `CIRAWFilter`（macOS 27, α6400, decoder 8/9）と
 後段に挿せる標準 `CIFilter`。CLI の決定事項は [ADR 0001](adr/0001-coreimage-raw-poc.md)。
 
@@ -52,3 +52,33 @@ Adjustments の型と値域は `src/lib/types.ts`。Core Image 側は `CIRAWFilt
 - CIRAWFilter のハイライト処理（クリップしたチャンネルの再構成）の方式。
 - 現行 auto_bright 相当の自動露出を CI 側で用意するか（`CIAreaAverage` 等で計測 → exposure に反映）。
 - 後段処理（brightness / contrast / saturation / shadow_lift / USM）を CIFilter で組む場合の色空間の扱いと、現行 numpy 実装とのビット一致の可否。
+
+## #73 での決定（CLI 0.3.0、2026-10-21）
+
+上の表の「判定」を受けて、9 キーを次のように写像した。実装は `native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`（デコード段の写像と後段チェーン）、Rust 側の正規化は `src-tauri/src/adjustments.rs`。
+詳細は [設計書](design/coreimage-preview-adjustments.md) §3.3、較正の経緯は [比較レポート §16](coreimage-engine-comparison.md)。
+写像は `apple_default` の既定値を基準にした**相対値**で、`adjustments` は `profile: "apple_default"` のときだけ受ける。
+CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVALID_REQUEST`（クランプしない。クランプは Rust の責務）。
+
+| Adjustments | 決定した写像 | 段 | 応答（`adjustments_applied`） |
+|---|---|---|---|
+| `exposure` | `CIRAWFilter.exposure = ev`（基準は固定の baselineExposure。rawpy の auto_bright 基準とは違う。±1 EV は T5 で rawpy 比 0.8..1.25） | デコード | `applied.exposure` |
+| `wb_temp` | **mired シフト**: `K0` = 撮影時 WB（profile 適用後の `neutralTemperature` の読み戻し）、`mired = 1e6/K0 − v × 0.85`（`MIRED_PER_UNIT`、T5 で較正し据え置き）、`K = clamp(1e6/mired, 2000, 50000)` を `neutralTemperature` に設定。tint は触らない。v>0（暖）で K 増。K0 が有限かつ 2000..50000 でなければ写像を飛ばし `guards: ["wb_k0_out_of_range"]` | デコード | `post.wb.{k0,mired_shift,mired_per_unit}`、guard |
+| `shadow_lift` | `lift = v/100` を自前 Metal カーネル `geoframe_tone` で sRGB ガンマ空間に適用（rawpy と同じ式） | 後段 | `post.shadow_lift` |
+| `brightness` / `contrast` / `saturation` | 同じ `geoframe_tone` で rawpy と同じ式（乗算 / 0.5 ピボット / Rec.709 輝度基準）を sRGB ガンマ空間で適用 | 後段 | `post.brightness` 等 |
+| `sharpness` | **ハイブリッド**: s ≤ 1 は `sharpnessAmount = 既定 × s`（USM なし）。s > 1 は `sharpnessAmount` を既定のまま、輝度 USM（自前 Metal カーネル）で増分だけ足す（`sigma, baseGain, coring = captureSharpenParams(長辺, ISO)`、`gain = min(1.2, baseGain × (s−1) × 1.5) × isoMult`）。rawpy の撮影時シャープ（基準 gain）は掛けない（二重がけ回避） | デコード + 後段 | `sharpness_amount`、`post.usm.*` |
+| `noise_reduction` | `off` = 輝度 0 / 色 0、`light` = 既定のまま、`full` = 輝度 `max(既定, min(0.5, max(既定+0.3, 0.3)))`（既定が 0.5 を超える高 ISO では既定のまま。full を light より弱くしない） / 色 `max(既定, 0.3)`（下表） | デコード | `luminance_noise_reduction_amount`、`color_noise_reduction_amount`、`post.noise_reduction` |
+| `highlight_recovery` | **no-op**（受理するが効かせない）。CI に対応物が無く、代替は #81 | — | `ignored: ["highlight_recovery"]` |
+
+`noise_reduction` の表（`apple_default` v9・macOS 27.0.1、**輝度の上限 0.5**。旧暫定は ISO 3200 = 0.541、6400 = 0.657 だったが、空の高周波がカメラ比 0.5 を割るため T5 で頭打ちにした）:
+
+| ISO 帯 | light（= 既定）輝度 / 色 | off | full |
+|---|---|---|---|
+| < 800 | ≈0.01 / 0 | 0 / 0 | ≈0.31 / 0.30 |
+| 800〜1600 | 未計測 | 0 / 0 | min(0.5, 既定 + 0.3) / 0.30 |
+| 3200 | 0.241 / 0 | 0 / 0 | 0.5 / 0.30 |
+| 6400 | 0.357 / 0 | 0 / 0 | 0.5 / 0.30 |
+
+- 白点ガード: `adjustments` 指定時に限り、輝度 NR 0 かつ sharpness 0 になる組み合わせを `sharpnessAmount = max(…, 0.1)` に補正し `guards: ["white_dot_sharpness_floor"]` に記録（通常のスライダー範囲では発動しない）。
+- 後段（shadow_lift / brightness / contrast / saturation / USM）は CLI 内の Metal カーネルで 1 回のレンダに含める。rawpy の numpy 実装との差はオラクル比較（tiff16 sRGB、ΔE76 中央値 0、チャンネル差 p99 ≤ 0.001）で確認済み。
+- 原寸・書き出しは当面 rawpy のままなので、上の写像はプレビューにだけ効く。

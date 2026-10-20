@@ -891,3 +891,160 @@ DSC04532_preview_clip_g1、DSC04705_preview_{clip_g1,clip_g4}、DSC04579_preview
   rawpy と `apple_default` の白飛び率は明るさが違う状態での比較で、同じ明るさに揃えた比較（CI の `exposure` −1.5EV が rawpy 現行と
   ほぼ同じ暗さになる）は exposure 行で代用している。
 - 目視は §10 で 15 枚、§13 で 9 枚のシート（2 倍拡大パッチ）で、ブラインド比較ではない。
+
+## 16. Adjustments の結合・較正（Issue #72 / #73、設計書 §3.7・§5.2 T5）
+
+### 16.1 目的と手順
+
+#72 / #73 で CLI 0.3.0 に入れた `adjustments`（9 キー）を実データで通し、設計書 §3.7 の「合否の目安【推測】」を確定する。
+最初の実行（`adjustments1-*`）で不合格だったチェックを、(a) 目安が推測で非現実的 / (b) 写像の定数を較正 / (c) 実装のバグ /
+(d) rawpy 側の基準差 に分類し、較正した値で再実行（`adjustments2-*`）した。実行日 2026-10-20〜21、macOS 27.0.1、CLI 0.3.0。
+
+```
+.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF \
+  --captures DSC04670 DSC04651 DSC04872 DSC04430 DSC04453 DSC04473 --adjustments \
+  --out work/engine-comparison/adjustments2-day --cli src-tauri/binaries/geoframe-ci-develop-aarch64-apple-darwin
+.venv/bin/python scripts/compare_engines.py --source-root <星空 3 カットのフォルダ> \
+  --captures DSC07415 DSC07407 DSC07402 --adjustments --out work/engine-comparison/adjustments2-night --cli <同上>
+```
+
+カット（preview 2400px、`apple_default`・decoder 9・lens ON）:
+
+| 区分 | カット | ISO | 備考 |
+|---|---|---|---|
+| 昼 | DSC04670, DSC04651（10-18mm）, DSC04872（55-210mm） | 100 | 葉・草・水面の照り返しが多い |
+| 高 ISO | DSC04430, DSC04453（30mm F1.4） | 3200 | 暗所 |
+| 逆光 | DSC04473（10-18mm） | 200 | 明るい空 + 影 |
+| 星空 | DSC07415（30mm, 10s）, DSC07407（16mm, 30s, ISO 6400）, DSC07402（16mm, 1/13s） | 3200 / 6400 / 3200 | §10 と同じ |
+
+後段オラクル（tiff16 sRGB、CI の Metal 後段 vs Python の式）は最初から全 11 バリアント × 9 カットで合格
+（ΔE76 中央値 0、チャンネル差 p99 ≤ 0.001）。方向チェック（brightness / contrast / saturation / shadow_lift の rawpy と同方向）、
+既定リクエストの回帰（`applied` 差分 0 件）、処理時間（既定比 ≤ 1.5）も最初から合格。以下は不合格だったものだけ。
+
+### 16.2 白点（`white_dot_*_impulse_vs_full`）の判定: **指標の誤検出**（本物の白点ではない）
+
+最初の実行では昼 4 カットの identity（= `apple_default` 既定）で `impulse_vs_full` が 74〜1818 だった（§12 では `apple_default` に
+白点は出ない）。
+
+判定の根拠（事実）:
+
+1. 1818 点（DSC04670）のうち 1576 点は、基準側（同じリクエストの原寸レンダを INTER_AREA で縮めたもの）でも同じ場所が
+   3x3 メディアンより 12 以上明るい。つまり「preview にあって原寸に無い点」ではなく、両方にある輝点。
+2. 等倍クロップ（`work/t5-whitedot/DSC04670_cell0_y500_x1400_n45.png`、`DSC04651_cell0_y1300_x1500_n21.png`。左 preview /
+   中 原寸縮小 / 右 原寸の同じ場所）を見ると、検出点はすべて日向の葉・草の穂の照り返しで、暗い空に出る §12 の白点とは別物。
+   分布図（`DSC04670_overview.jpg`）でも検出点は木の葉の領域に集中し、空には無い。
+3. 星空 3 カットでは同じ指標が 0〜4 で合格している（暗い空では誤検出の元になる輝点が無い）。
+4. 検出された理由: preview の縮小（CIRAWFilter の scaleFactor 経路）は INTER_AREA より鋭く、1〜3 px の輝点が preview 側だけ
+   閾値（24）を超える。基準側の除外は「星候補マスク」（暗い背景の孤立点）だけで、密集した昼の輝点には効かなかった。
+
+対処（ハーネス `impulse_count(reference_gray8=...)`、`IMPULSE_REFERENCE_RATIO = 0.5`）: 基準側でも同じ場所（3x3 近傍の最大）が
+3x3 メディアンより `24 × 0.5 = 12` 以上明るい候補は数えない。本物の白点と分離できることは、白点が出る条件（neutral・輝度 NR 0・
+sharpness 0、DSC07415 2400px）を CLI で再現して確かめた。
+
+| 画像（identity） | 変更前 | 変更後 |
+|---|---|---|
+| DSC04670 / DSC04651 / DSC04872 / DSC04473 | 1818 / 660 / 74 / 150 | 1 / 0 / 0 / 0 |
+| DSC04430 / DSC04453（高 ISO） | 1 / 2 | 0 / 0 |
+| 星空 3 カット | 0 / 2 / 0 | 0 / 1 / 0 |
+| **本物の白点**（neutral・NR 0・sharp 0、DSC07415） | 209 | 208（0.33 でも 204） |
+
+`impulse_vs_full` の意味はすべての呼び出し（`--night`・`--night-scales`、§10・§12）で変わる。星空では基準側に輝点がほぼ無いので
+§12 の値は再実行しても 1% 程度しか動かない見込み【推測】（本物の白点 209 → 208 の比率から）。
+
+CLI の白点ガード（`white_dot_sharpness_floor`）と既定の扱いに問題は無い。ガードは `nr_off_sh0` でだけ発動し（9/9）、発動時の
+`impulse_vs_full` は 0〜1。`nr_off`（ガード無し、輝度 NR 0・sharpness 既定）も 0〜1。
+
+### 16.3 各不合格チェックの分類と対処
+
+| チェック | 最初の結果 | 分類 | 根拠 | 対処 |
+|---|---|---|---|---|
+| `exposure_ci_m1_stops` / `p1`（−1/+1 ±0.15） | 昼 4/6・夜 3/3 で −1.16〜−1.38、+1.16〜+1.28 | (a) | rawpy は `bright = 2**exposure`（リニアの純粋な 2 倍）なのに同じ指標が 9 カット全部で ±1.15〜1.21 を読む。指標自身（出力ガンマ・非クリップ画素の選別）の偏りで、±1.0 を絶対値で要求する目安が非現実的。CI/rawpy 比は 0.81〜1.18 | 絶対値は ±0.4 の健全性確認に下げ、大きさは **rawpy 比 0.8..1.25** で判定（新チェック `exposure_ci_m1_vs_rawpy` / `p1_vs_rawpy`） |
+| `wb_m60/p60_ratio_vs_rawpy`（0.7..1.4） | DSC04453 1.93、DSC04473 0.37 | (a)（指標） | 近中立タイルをカメラ JPEG だけで決め、測る画像の飽和を見ていなかった。DSC04453 は rawpy 側の 37〜42% が飽和（rawpy が明るく現像）、DSC04473 は CI 側の 19〜22% が飽和（apple_default は 0.9 付近からハイライトを圧縮）。飽和画素は WB を動かしても R/B が動かない | `rb_log_ratio` で測る画像自身の最大チャンネルが 0.05..0.9 の画素だけを使う（`RB_PIXEL_RANGE`）。上限 0.98 では 0.47〜0.76 止まり、0.9 で 0.84〜1.03 |
+| `sharpness_ci_10_edge_ratio`（0.95±0.05） | 昼 3/6（0.87〜1.02） | (a) | 1.0 = `apple_default` のデコーダ内シャープ既定で、較正できる定数が無い。カット・レンズで 0.87〜1.02 に散る（55-210mm の 0.885、逆光の 0.871 が下、ISO 3200 の 1.0〜1.02 が上） | 許容を ±0.15 に |
+| `sharpness_ci_16_flat_noise_vs_camera`（≤1.5） | 2/6（1.56 / 1.69） | (a) | identity の時点でカメラ比 0.9〜1.41（apple_default は低 ISO で NR ≈ 0.01）。USM が足すノイズを見るのが目的なので基準が違う | identity 比 ≤ 1.5 に変更（`sharpness_ci_16_flat_noise_vs_identity`）。実測 1.00〜1.18。カメラ比は `flat_noise_vs_camera` として残す |
+| `nr_ci_full_star_recall`（≥0.99） | 昼 4/6（0.92〜0.988） | (a) | 昼カットの「強い点」は葉の照り返しで、light（identity）の時点で 0.92〜0.989（レンズ補正の幾何差）。full はそれを 1 点も減らしていない（`light_star_recall` と同値） | 「≥0.99 **または** light から max(0.01, 1.5/n) 以上減らない」に。1.5/n は基準点が少ないカットの 1 点分の揺らぎ（DSC07402: 81 点中 1 点 = 0.012。輝度 NR 0.5 で 1 点落ち 0.6 では落ちない） |
+| `nr_ci_full_sky_hf_vs_camera`（≥0.7） | 昼 2/6（0.56 / 0.59）、夜 1/3（0.33） | (b)+(a) | 輝度 NR の掃引（§16.4）で、ISO 6400 の full（0.657）は空の高周波を camera 比 0.33 まで落とす。一方 DSC04872（昼の望遠）は light の時点で 0.57（「空」タイルが空でない） | NR 表の輝度を **0.5 で頭打ち**（§16.4）。閾値は camera 比 0.5、または light 比 0.9 以上 |
+| `white_dot_*_impulse_vs_full`（≤10） | 昼 4/6（74〜1818） | (a)（指標） | §16.2 | §16.2 |
+| `sharpness_ci_edge_monotonic` / `ci_10_edge_ratio` の nan（夜 2/3） | n/a | — | 星空にはエッジ基準点が取れない（`edge_n` 0）。不合格ではなく n/a | 変更なし |
+
+(c) 実装のバグ、(d) rawpy と比べられない、に当たるものは無かった。
+
+### 16.4 較正した値
+
+| 定数 | 変更前（暫定） | 変更後 | 根拠 |
+|---|---|---|---|
+| `MIRED_PER_UNIT`（`Adjustments.swift`） | 0.85【推測】 | **0.85（据え置き・確認済み）** | 飽和画素を除いた R/B 比の変化量の CI/rawpy 比が 9 カット × ±60 で 0.74〜1.24、中央値 ≈ 1.0（昼 0.74〜1.06、夜・高 ISO 1.11〜1.24）。K0 が低いカット（3600〜4400K）ほど CI の効きが 1 割強い傾向【推測: CIRAWFilter の K → ゲインの非線形】だが範囲内 |
+| NR full の輝度（`fullLuminanceCap`、新設） | `min(1, max(既定+0.3, 0.3))` → ISO 3200 0.541、6400 0.657 | **`min(0.5, max(既定+0.3, 0.3))`** → ISO <800 0.31、3200 0.5、6400 0.5 | 下表 |
+| NR full の色（`fullColorFloor`） | 0.3 | 0.3（据え置き） | 色ノイズは light で既にカメラ以下（§10）。変える根拠が無い |
+| 白点ガードの床（`sharpnessFloor`） | 0.1 | 0.1（据え置き） | ガード発動時の impulse_vs_full 0〜1（9/9） |
+
+輝度 NR の掃引（identity の adjustments + `settings.luminance_noise_reduction` の上書き、色 NR 0.3、preview 2400px。
+`work/t5-whitedot/nr/nrsweep.csv`。sky_hf = 空の高周波比の camera 比、sky = 空ノイズの light 比）:
+
+| カット（ISO、light の既定） | 指標 | 0.30 | 0.40 | 0.50 | 0.60 | 0.70 |
+|---|---|---|---|---|---|---|
+| DSC07407（6400、0.357） | sky_hf / sky / star_recall | 0.95 / 1.07 / 0.995 | 0.74 / 0.95 / 0.995 | **0.56 / 0.82 / 0.995** | 0.40 / 0.70 / 0.995 | 0.28 / 0.58 / 0.995 |
+| DSC07415（3200、0.241） | 同 | 1.36 / 0.98 / 1.0 | 1.26 / 0.94 / 1.0 | **1.18 / 0.90 / 1.0** | 1.10 / 0.87 / 1.0 | 1.03 / 0.83 / 1.0 |
+| DSC07402（3200、0.241） | 同 | 0.99 / 0.96 / 1.0 | 0.86 / 0.90 / 1.0 | **0.75 / 0.84 / 0.988** | 0.66 / 0.78 / 1.0 | 0.58 / 0.74 / 1.0 |
+| DSC04453（3200、0.241） | 同 | 0.92 / 0.95 / 1.0 | 0.77 / 0.87 / 1.0 | **0.64 / 0.79 / 1.0** | 0.53 / 0.72 / 1.0 | 0.44 / 0.66 / 1.0 |
+| DSC04430（3200、0.241） | 同 | 1.20 / 0.95 / 1.0 | 1.00 / 0.87 / 1.0 | **0.83 / 0.80 / 1.0** | 0.69 / 0.73 / 1.0 | 0.58 / 0.66 / 1.0 |
+| DSC04872（100、0.01） | 同 | 0.56 / 0.99 / 0.988 | 0.55 / 0.98 / 0.989 | 0.55 / 0.98 / 0.988 | 0.54 / 0.97 / 0.989 | 0.54 / 0.97 / 0.991 |
+
+読み方: 星の残存率は 0.3〜0.7 の全段で 0.995〜1.0（星は消えない）。空ノイズは輝度 NR にほぼ線形に減り、0.5 で light 比 ≈0.8
+（「light より目に見えて滑らか」に当たる）。空の高周波比は ISO 6400 で 0.5 を超えると camera 比 0.5 を割る。3 倍拡大の空パッチ
+（`work/t5-whitedot/DSC07407_nr_crop.png`、camera / light / 0.4 / 0.5 / 0.6 / 0.7）では 0.7 でも粒が細かくなるだけで塗りつぶし・
+星の消失は見えない。上限 0.5 は「高周波を半分以上残す」側に寄せた保守的な値で、0.6 にしても目視上の破綻は無い
+（§16.6 オーナー判断）。
+
+rawpy の `full` との対応（参考）: 夜 3 カットの rawpy full は空ノイズが light 比 0.96（ほぼ効かない。FBDD full）で、CI full の
+0.82 の方が強い。設計書 §3.3 のとおり「rawpy full と同じノイズ量」は基準にしていない。
+
+### 16.5 再実行の結果（`adjustments2-*`）
+
+| チェック | 閾値（確定） | 昼 6 | 夜 3 | 値（昼 / 夜） |
+|---|---|---|---|---|
+| exposure_ci_m1 / p1_vs_rawpy | 0.8..1.25 | 6/6 | 3/3 | 0.81〜1.05 / 0.95〜1.18 |
+| exposure_ci_m1 / p1_stops | ±1 ± 0.4 | 6/6 | 3/3 | −0.96〜−1.25、+1.00〜+1.18 / −1.21〜−1.38、+1.11〜+1.28 |
+| wb_m60 / p60_ratio_vs_rawpy | 0.7..1.4 | 6/6 | 3/3 | 0.74〜1.19 / 1.11〜1.24 |
+| sharpness_ci_10_edge_ratio | 0.95±0.15 | 6/6 | 1/1（2 n/a） | 0.87〜1.02 / 1.006 |
+| sharpness_ci_16_flat_noise_vs_identity | ≤1.5 | 6/6 | 3/3 | 1.00〜1.18 / 1.04〜1.09 |
+| nr_ci_full_star_recall | ≥0.99 か light − max(0.01, 1.5/n) | 6/6 | 3/3 | light と同値 / 1.0, 0.995, 0.988（81 点中 1 点） |
+| nr_ci_full_sky_hf_vs_camera | ≥0.5 か light 比 ≥0.9 | 6/6 | 3/3 | 0.56〜1.52 / 0.56〜1.18 |
+| white_dot_{identity,nr_off,nr_off_sh0}_impulse_vs_full | ≤10 | 6/6 | 3/3 | 0〜1 / 0〜1 |
+| その他（方向・単調・オラクル・ガード・回帰・時間） | §3.7 のまま | 全合格 | 全合格 | — |
+
+不合格 0 件（昼 6 カット × 35 チェック、夜 3 カット × 36 チェック）。シート: `work/engine-comparison/adjustments2-{day,night}/sheets/`。
+
+### 16.6 セキュリティレビューの参考指摘への小修正（信頼度 7 未満）
+
+- `src-tauri/src/coreimage.rs` `write_provenance`: 一時ファイルを `OpenOptions::new().write(true).create_new(true)` で作る
+  （既存のシンボリックリンクを辿って書かない）。テスト `provenance_temp_is_created_new_and_never_follows_existing_entries`。
+- `Adjustments.swift` / `Develop.swift`: 読み戻した `K0`（撮影時 WB）が有限で 2000..50000 の外なら WB の写像を飛ばし、
+  `adjustments_applied.guards` に `"wb_k0_out_of_range"` を記録する（`WhiteBalanceMapping.isUsableK0`）。読み戻しが NaN の
+  ときに応答の JSON 化が落ちて記録が届かないのを避けるため、`encodeJSONLine` は非有限値を文字列 `"nan"` / `"inf"` で書く
+  （通常の応答には現れない。Rust 側は数値を期待するのでそのジョブは失敗するが、応答に guards と値が残る）。
+- `Develop.swift`: extent の有限・非空の検査を `filter.outputImage` 直後（長辺の `Int()` 化と後段の前）へ移動（`isUsableExtent`。
+  `CGRect.infinite` は成分が有限なので `isInfinite` で別に弾く）。
+- `Generated/KernelLibrary.swift`: 埋め込む metallib に `.metal` の絶対パス（ビルドした機のホームディレクトリ）が入っていた。
+  `-ffile-prefix-map` / `-fdebug-prefix-map` / `-g0` / 相対パス指定では消えず、**ソースを stdin で渡す**（`-x metal -c -`）と
+  消えた。`scripts/build-coreimage-kernels.sh` をそう変えて再生成（4828 → 4700 bytes、関数 2 つは `swift test` で読める）。
+
+### 16.7 残る課題・オーナー判断が要る事項
+
+1. **NR full の上限 0.5**（2026-10-21 オーナー判断で**確定**）: 空の高周波を camera 比 0.5 以上残す保守的な値。0.6（ISO 6400 で高周波 0.40、
+   空ノイズ light 比 0.70、目視では破綻なし）も採れたが、0.6 では ISO 6400 の空の高周波が camera 比 0.40 と
+   0.5 を割ること、NR full の利用頻度が低く効きより細部の保持を優先することから 0.5 にした（DSC07402 の星候補は 0.5 で 81 点中
+   1 点落ち 0.6 では落ちないが、掃引で単調でない 1 点の揺らぎで、判断材料にしていない）。ISO 3200 と 6400 が同じ 0.5 になる（既定 + 0.3 の差が頭打ちで消える）。
+2. **閾値の変更は 9 カットでの確定**。昼の低 ISO が 3、高 ISO が 2、逆光 1、星空 3 で、§15 と同じ偏り（1 セッション・同じレンズ群）。
+   特に `sharpness_ci_10_edge_ratio` の ±0.15 と `exposure` の rawpy 比はこのサンプルの散らばりをそのまま許容にしている。
+   2026-10-21 のオーナー判断で、広げた 3 つ（`sharpness_ci_10_edge_ratio` ±0.15、`nr_ci_full_star_recall` の
+   「light − max(0.01, 1.5/n)」、`nr_ci_full_hf` の 0.5 または light 比 0.9）を**確定**した。`exposure` の rawpy 比は
+   rawpy の取りやめ（ADR 0002）とともに比較の相手が無くなるため、確定の対象にしていない。
+3. **WB の効きの K0 依存**【推測】: K0 が低い（3600〜4400K）カットで CI の方が 1 割強い。mired 一定のシフトが CIRAWFilter 内で
+   ln(R/B) 一定にならないため。`MIRED_PER_UNIT` を K0 で変える案はあるが、範囲内（0.74〜1.24）なので据え置いた。
+4. **exposure の見え方**: CI の ±1 EV は apple_default のトーンカーブ越しに −1.0〜−1.38 段に見える（夜のカットで大きい）。
+   rawpy と同じ指標で同じ偏りが出るので比としては一致するが、絶対値として「1 EV = 2 倍」ではない。UI のスライダー目盛りの意味は
+   変えていない。
+5. `tauri:dev` での手動確認（プレビュー → 比較欄 → 原寸ビューア、フォールバック、切り戻しフラグ）は T5 の範囲として未実施
+   （このセッションでは dev サーバーを起動しない制約）。
+   2026-10-21 のオーナー判断で、rawpy / Python の要否が確定してから実施する（フォールバックと切り戻しフラグは要否で中身が変わるため）。

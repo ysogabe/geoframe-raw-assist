@@ -121,6 +121,11 @@ export type ViewerSource = {
   initial: "before" | "after";
   /** 現像結果がプレビュー品質か。ヘッダの .preview-tag の出し分けに使う。 */
   preview: boolean;
+  /**
+   * プレビュー結果の長辺（px）。ヘッダの「プレビュー品質（長辺◯px）」に使う。
+   * エンジンによって長辺が違う（rawpy 1600 / Core Image 2400）ため、固定値ではなく結果の寸法から渡す。
+   */
+  previewEdge?: number;
   /** ヘッダに出す見出し（撮影ID など）。 */
   title: string;
 };
@@ -307,7 +312,11 @@ export type Action =
   | { type: "adjust/reset" }
   | { type: "develop/start"; mode: DevelopMode; captureId: CaptureId }
   /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
-  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number }
+  /**
+   * `fallbackCode` は Core Image プレビューが失敗して rawpy で救ったときの Core Image 側エラーコード
+   * （#72 §2.6）。指定時は完了通知の代わりにフォールバックした旨を出す。
+   */
+  | { type: "develop/ok"; mode: DevelopMode; result: DevelopedResult; generation: number; fallbackCode?: string }
   /** 失敗には generation を持たせない（後述: 通知だけは必ず出す）。 */
   | { type: "develop/fail"; message: string }
   | { type: "candidates/start"; captureId: CaptureId; generation: number }
@@ -689,6 +698,8 @@ export function reducer(state: State, action: Action): State {
       const { capture_id: captureId } = action.result;
       const elapsed = action.result.cached ? "保存済み結果" : `${action.result.elapsed_seconds.toFixed(1)}秒`;
       const modeLabel = action.mode === "preview" ? "プレビュー" : "本";
+      // Core Image 由来のプレビューは通知でもエンジンを明示する（書き出しは rawpy のため）。
+      const engineLabel = action.result.engine === "coreimage" ? "Core Image・" : "";
       // 直前に合成を見ていても、現像を実行したらその写真の面へ切り替える。
       // どのグループの話かは結果の capture_id から引く（アクションは持っていない）。
       const developedGroup = state.analysis?.groups.find((item) => item.capture_ids.includes(captureId));
@@ -707,7 +718,9 @@ export function reducer(state: State, action: Action): State {
           action.mode === "full" ? { ...state.fullResults, [captureId]: action.result } : state.fullResults,
         developMode: null,
         developingCapture: null,
-        notice: `${captureId} の${modeLabel}現像が完了しました（${elapsed}）`,
+        notice: action.fallbackCode
+          ? `${captureId}: Core Image での現像に失敗したため rawpy でプレビューしました（${action.fallbackCode}）`
+          : `${captureId} の${modeLabel}現像が完了しました（${engineLabel}${elapsed}）`,
         noticeTone: "info",
       };
     }
@@ -1121,11 +1134,20 @@ export function activePreset(state: State): PresetInfo | null {
   return presetFor(state.health, state.presetName);
 }
 
+/**
+ * プリセット既定値 + ユーザー変更分の 9 キー全量。調整値の解決はここ 1 か所だけで行う
+ * （表示用の `effectiveAdjustments` と、Core Image へ渡す `coreimage-api.ts` の再エクスポートが共用）。
+ * Rust（develop_preview_coreimage）は全量を要求するので、上書きの無いキーもプリセット値で埋める。
+ */
+export function resolveAdjustments(preset: PresetInfo, overrides: Partial<Adjustments>): Adjustments {
+  return { ...preset.adjustments, ...overrides };
+}
+
 /** プリセット既定値 + ユーザー変更分。プリセット未取得なら null。 */
 export function effectiveAdjustments(state: State): Adjustments | null {
   const preset = activePreset(state);
   if (!preset) return null;
-  return { ...preset.adjustments, ...state.overrides };
+  return resolveAdjustments(preset, state.overrides);
 }
 
 export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
