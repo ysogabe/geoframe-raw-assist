@@ -1076,14 +1076,20 @@ def coreimage_request(
     output_color_space: str | None = None,
     max_edge: int | None = None,
     adjustments: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    extra_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """CLI リクエスト JSON を組み立てる（純粋）。既定引数のままなら 0.2.0 と同じリクエスト。
 
     ``adjustments`` は CLI 0.3.0 のトップレベル ``adjustments``（設計書 §4.1。9 キー全量）。
+    ``diagnostics`` は CLI 0.4.0 のトップレベル ``diagnostics``、``extra_settings`` は数値以外も取る settings の
+    追加キー（``gamut_mapping`` / ``baseline_exposure``）。#92 設計書 §4.2〜4.3。省略時はリクエストに出さない。
     """
     settings: dict[str, Any] = {"profile": profile, "lens_correction": lens}
     if overrides:
         settings.update(overrides)
+    if extra_settings:
+        settings.update(extra_settings)
     request: dict[str, Any] = {
         "input": str(input_path),
         "output": str(output),
@@ -1099,6 +1105,8 @@ def coreimage_request(
         request["max_edge"] = max_edge
     if adjustments is not None:
         request["adjustments"] = dict(adjustments)
+    if diagnostics is not None:
+        request["diagnostics"] = json.loads(json.dumps(diagnostics))
     return request
 
 
@@ -1126,6 +1134,8 @@ def run_coreimage(
     output_color_space: str | None = None,
     max_edge: int | None = None,
     adjustments: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    extra_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Core Image CLI を 1 回呼ぶ。
 
@@ -1133,6 +1143,8 @@ def run_coreimage(
     ``output_format`` が ``tiff16`` のときは ``.tif`` に書き、``output_color_space``（srgb / display_p3）を渡せる。
     ``max_edge`` は preview の長辺（省略時 ``ctx.max_edge``）。既定引数のままなら従来と同じリクエストになる。
     ``adjustments`` は CLI 0.3.0 の ``adjustments``（9 キー全量、``profile="apple_default"`` が必要。#72 / #73）。
+    ``diagnostics`` / ``extra_settings`` は CLI 0.4.0 の診断モード（#92）。指定したときだけ行に ``ci_gamut`` と
+    応答の ``diagnostics`` ブロックの要約を足す（省略時の行のキーは従来と同じ）。
     """
     output = coreimage_output_path(ctx, capture_id, mode, lens, variant=variant, output_format=output_format, max_edge=max_edge)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1140,6 +1152,7 @@ def run_coreimage(
         source_file(ctx.source_root, capture_id, "ARW"), output, mode, lens,
         decoder_version=decoder_version, profile=profile, overrides=overrides, output_format=output_format,
         output_color_space=output_color_space, max_edge=(max_edge or ctx.max_edge), adjustments=adjustments,
+        diagnostics=diagnostics, extra_settings=extra_settings,
     )
     res = run_timed([str(ctx.cli)], stdin=json.dumps(request))
     payload = res["payload"] or {}
@@ -1172,6 +1185,8 @@ def run_coreimage(
     })
     if adjustments is not None:
         row.update(adjustments_applied_summary(payload))
+    if diagnostics is not None or extra_settings is not None:
+        row.update(diagnostics_response_summary(payload))
     return row
 
 
@@ -3760,6 +3775,1687 @@ def environment_info(ctx: RunContext, probe: Path | None) -> dict[str, Any]:
     }
 
 
+# =============================================================================
+# 診断モード --diagnosis（Issue #92、設計書 coreimage-highlight-diagnosis.md §5〜§10）
+# =============================================================================
+#
+# センサー CFA（S0）→ 線形段（S1）→ トーン（S2）→ 色域マッピング（S3）→ 16bit（S4）→ 8bit JPEG（S5）の
+# どこで白飛びが生まれ、どの段のレバーで戻せるかを ROI ごとに帰属させる。CLI 0.4.0 の ``diagnostics``
+# （設計書 §4）で float ダンプを取り、ROI 統計は Python 側で計算する（§13 判断 10）。
+# rawpy は CFA 飽和の計測（§5）と比較用の現像にだけ使う（アプリの現像経路には入れない）。
+
+DIAGNOSIS_MIN_CLI = (0, 4, 0)
+#: 16bit で白になる線形値（設計書 §4.4 の frac_ge_1 と同じ）。
+WHITE16_LINEAR = 1.0 - 1.0 / 65535.0
+#: 8bit sRGB で 255 に丸まる線形値の下限（254.5/255 を sRGB 復号）。帰属規則 3 の「8bit 量子化」の判定に使う。
+WHITE8_LINEAR = float(((254.5 / 255.0 + 0.055) / 1.055) ** 2.4)
+#: 2×2 セル飽和マップのビット（色別）。
+CFA_BIT = {"r": 1, "g": 2, "b": 4}
+#: §8.3 / §13 判断 5: 「同じ明るさ」の許容幅と、タスク C 合否の階調比。
+MID_P50_TOL = 0.03
+GRAD_TEXTURE_RATIO_MIN = 0.7
+#: §10.2 のシーン判定「階調が実際に戻る」と §9 のタスク C 実施条件（S1/S2 に階調が残る）の閾値。
+GRAD_RECOVER_MIN = 0.5
+FG_P01_DROP_MAX = -0.02
+MAGENTA_RATE_MAX = 0.01
+#: §10.1: K が ROI のこの割合未満なら「クリップなし」。最大の帰属がこの割合以上で 1 位、2 位がこの割合以上で「混合」。
+ATTR_MIN_CLIP_FRACTION = 0.01
+ATTR_MAJOR_FRACTION = 0.5
+ATTR_SECOND_FRACTION = 0.3
+ATTR_CATEGORIES = ("sensor", "decoder_tone", "gamut_output", "unverifiable")
+#: §10.2 の「S0 も飽和していない」: cloud_grad の CFA セル飽和率がこれ未満。
+SCENE_SENSOR_FREE_MAX = 0.01
+#: §8.4: 標本化したトーン曲線を S1 に掛けた値と S2 の ΔL（線形輝度）p99 の許容。
+CURVE_CHECK_TOL = 0.01
+#: §2.4 の定数置換で標本化した boost 1（gamut OFF）の応答（DSC04705・1200px の 1 カットで得た値）。
+#: 0.05 / 0.18 は gamut ON 列の値（1.0 以下では ON / OFF が一致する）。2.0 超は最後の傾き（≈0.145）で外挿する。
+TONE_CURVE_BOOST1 = ((0.0, 0.0), (0.05, 0.0744), (0.18, 0.3875), (0.5, 0.8050), (0.8, 0.9573),
+                     (1.0, 1.0), (1.2, 1.0290), (1.5, 1.0725), (2.0, 1.1450))
+DIAG_ROI_NAMES = ("sky_bright", "cloud_grad", "clip_edge", "fg_dark", "midtone")
+#: §7.2: sky_bright の平行移動を流用する ROI（この順）。
+SKY_SHIFT_SOURCES = ("midtone", "clip_edge", "cloud_grad")
+#: grad_* / sky_* を数える最小画素数（これ未満は欠測）。
+DIAG_MIN_PIXELS = 50
+#: §4.5 post_filters の許可リスト: name -> {param: ("scalar", lo, hi) | ("vec2", (xlo, xhi), (ylo, yhi)) | ("vec4", lo, hi)}
+POST_FILTER_ALLOWLIST: dict[str, dict[str, tuple]] = {
+    "CIHighlightShadowAdjust": {
+        "inputHighlightAmount": ("scalar", 0.0, 1.0),
+        "inputShadowAmount": ("scalar", -1.0, 1.0),
+        "inputRadius": ("scalar", 0.0, 10.0),
+    },
+    "CIToneCurve": {f"inputPoint{i}": ("vec2", (0.0, 1.0), (0.0, 2.0)) for i in range(5)},
+    "CIExposureAdjust": {"inputEV": ("scalar", -5.0, 5.0)},
+    "CIColorClamp": {"inputMinComponents": ("vec4", None, None), "inputMaxComponents": ("vec4", None, None)},
+}
+#: post_filters の最大個数（T1 CLI 0.4.0 の実装上の上限）。
+POST_FILTERS_MAX = 16
+DIAG_REQUEST_TOP_KEYS = frozenset({
+    "input", "output", "mode", "decoder_version", "settings", "format", "output_color_space", "max_edge",
+    "adjustments", "diagnostics",
+})
+DIAG_KEYS = frozenset({"stats", "stats_color_space", "dump_float", "linear_space_filter", "post_filters", "skip_write"})
+DIAG_COLOR_SPACES = ("linear_srgb", "linear_p3")
+
+#: タスク C の候補（§9）。C1 は adjustments（exposure + 後段の lift / brightness）、C2 は settings.exposure_ev +
+#: CIHighlightShadowAdjust、C3 は線形読み出し（boost 0 + gamut OFF）+ 自前トーン圧縮。
+C1_SPECS = {
+    "c1_ev-07_lift": {"exposure": -0.7, "shadow_lift": 45.0, "brightness": 1.10},
+    "c1_ev-10_lift": {"exposure": -1.0, "shadow_lift": 60.0, "brightness": 1.15},
+}
+C2_HSA = {"name": "CIHighlightShadowAdjust", "inputHighlightAmount": 0.3, "inputShadowAmount": 0.5, "inputRadius": 0.0}
+#: C3: 2.7（S1 の最大）→ 1.0 に収める露出。2^-1.43 ≈ 0.371。
+C3_EXPOSURE_EV = -1.43
+#: C3 のトーン曲線（x は CIExposureAdjust 後の 0..1）。boost 1 の標本（§2.4）を x = v·0.371 へ写して
+#: 0.18 → 0.36、0.5 → 0.75、1.0（元の表示白、x 0.37）→ 0.93 とし、元の 1.0 超（x 0.37..1）を 0.93 → 1.0 に漸近させる。
+C3_TONE_CURVE = {
+    "name": "CIToneCurve",
+    "inputPoint0": [0.0, 0.0], "inputPoint1": [0.0667, 0.36], "inputPoint2": [0.1853, 0.75],
+    "inputPoint3": [0.3706, 0.93], "inputPoint4": [1.0, 1.0],
+}
+C3B_EXTRA_EV = 0.3
+C_CANDIDATES = ("c1_ev-07_lift", "c1_ev-10_lift", "c2_ev-07_hsa", "c3_lin_curve", "c3_lin_curve_b")
+#: 露出掃引（§8.3 の内挿に使う）: variant -> exposure_ev。d_base は 0。
+DIAG_EV_SWEEP = (("d_base", 0.0), ("d_ev-03", -0.3), ("d_ev-07", -0.7), ("d_ev-10", -1.0), ("d_ev-15", -1.5))
+DIAG_STAGE_VARIANTS = ("d_s1_linear", "d_s2_tone", "d_s3_default")
+#: full で回すバリアント（§6.3 の 12 本 + 画素照合に要る d_lens_off）。c_best はプレビューの結果から決める。
+DIAG_FULL_VARIANTS = (
+    "d_base", "d_s1_linear", "d_s2_tone", "d_s3_default", "d_ev-07", "d_ev-10", "d_boost00", "d_gamut_off",
+    "d_tiff_srgb", "d_lens_off", "c1_ev-07_lift", "c3_lin_curve", "c_best",
+)
+#: ROI 別に出すクリップ指標の ROI。
+DIAG_CLIP_ROIS = ("sky_bright", "cloud_grad", "clip_edge")
+DIAG_TABLE_KEYS = (
+    "clip8_any", "sky_bright_clip8_any", "cloud_grad_clip8_any", "blue_only_clip", "mid_p50", "mid_p50_diff",
+    "grad_levels_hi", "grad_texture_ratio", "grad_slope", "fg_p01_diff", "fg_noise", "magenta_rate",
+)
+
+
+def _spec(lens: bool = True, profile: str = "apple_default", overrides: dict[str, float] | None = None,
+          extra_settings: dict[str, Any] | None = None, output_format: str = "jpeg", output_color_space: str | None = None,
+          adjustments: dict[str, Any] | None = None, diagnostics: dict[str, Any] | None = None, dump: bool = False,
+          label: str = "") -> dict[str, Any]:
+    return {"lens": lens, "profile": profile, "overrides": dict(overrides or {}), "extra_settings": extra_settings,
+            "output_format": output_format, "output_color_space": output_color_space, "adjustments": adjustments,
+            "diagnostics": diagnostics, "dump": dump, "label": label or ""}
+
+
+def diagnosis_specs() -> dict[str, dict[str, Any]]:
+    """§6.2 のマトリクス（preview の全バリアント。c_best は含まない）。順序はシート・CSV の並び。"""
+    stage_lens = False  # 段階読み出しは CFA マップと同じ幾何（lens OFF）で取る（§6.2 / §7.3）
+    specs: dict[str, dict[str, Any]] = {
+        "d_base": _spec(label="B apple v9 lens ON"),
+        "d_s1_linear": _spec(lens=stage_lens, overrides={"boost_amount": 0.0}, extra_settings={"gamut_mapping": False},
+                             dump=True, label="S1 linear (boost 0, gamut OFF, lens OFF)"),
+        "d_s2_tone": _spec(lens=stage_lens, extra_settings={"gamut_mapping": False}, dump=True,
+                           label="S2 tone (gamut OFF, lens OFF)"),
+        "d_s3_default": _spec(lens=stage_lens, dump=True, label="S3 default (lens OFF)"),
+    }
+    for name, value in (("d_boost00", 0.0), ("d_boost025", 0.25), ("d_boost050", 0.5), ("d_boost075", 0.75)):
+        specs[name] = _spec(overrides={"boost_amount": value}, label=f"boost {value}")
+    for name, ev in DIAG_EV_SWEEP[1:]:
+        specs[name] = _spec(overrides={"exposure_ev": ev}, label=f"exposure {ev:+.1f}EV")
+    specs["d_gamut_off"] = _spec(extra_settings={"gamut_mapping": False}, label="gamut mapping OFF")
+    specs["d_tiff_srgb"] = _spec(output_format="tiff16", output_color_space="srgb", label="tiff16 sRGB")
+    specs["d_tiff_p3"] = _spec(output_format="tiff16", output_color_space="display_p3", label="tiff16 Display P3")
+    for name, value in (("d_edr05", 0.5), ("d_edr10", 1.0), ("d_edr20", 2.0)):
+        specs[name] = _spec(overrides={"extended_dynamic_range": value}, label=f"EDR {value}")
+    specs["d_neutral"] = _spec(profile="neutral", label="neutral v9 lens ON")
+    specs["d_lens_off"] = _spec(lens=False, label="B lens OFF")
+    for name, post in C1_SPECS.items():
+        specs[name] = _spec(adjustments={**ADJ_IDENTITY, **post},
+                            label=f"C1 exp {post['exposure']} lift {post['shadow_lift']:g} bright {post['brightness']}")
+    specs["c2_ev-07_hsa"] = _spec(overrides={"exposure_ev": -0.7}, diagnostics={"post_filters": [dict(C2_HSA)]},
+                                  label="C2 -0.7EV + HighlightShadow")
+    c3_filters = [{"name": "CIExposureAdjust", "inputEV": C3_EXPOSURE_EV}, dict(C3_TONE_CURVE)]
+    specs["c3_lin_curve"] = _spec(overrides={"boost_amount": 0.0}, extra_settings={"gamut_mapping": False},
+                                  diagnostics={"post_filters": c3_filters}, label="C3 linear + tone curve")
+    c3b_filters = [c3_filters[0], {"name": "CIExposureAdjust", "inputEV": C3B_EXTRA_EV}, dict(C3_TONE_CURVE)]
+    specs["c3_lin_curve_b"] = _spec(overrides={"boost_amount": 0.0}, extra_settings={"gamut_mapping": False},
+                                    diagnostics={"post_filters": c3b_filters}, label="C3b linear + 0.3EV + tone curve")
+    return specs
+
+
+def diagnosis_mode_specs(mode: str, best: str | None = None) -> dict[str, dict[str, Any]]:
+    """mode ごとのバリアント。full は §6.3 の部分集合 + d_lens_off、c_best は preview で選んだ候補の複製。"""
+    specs = diagnosis_specs()
+    if mode == "preview":
+        return specs
+    out = {name: specs[name] for name in DIAG_FULL_VARIANTS if name in specs}
+    if best and best in specs:
+        out["c_best"] = {**specs[best], "label": f"c_best = {best}"}
+    return out
+
+
+def diagnosis_request_kwargs(spec: dict[str, Any], dump_path: Path | None) -> dict[str, Any]:
+    """spec を run_coreimage / coreimage_request のキーワード引数にする（純粋）。dump は skip_write で取る。"""
+    diagnostics = json.loads(json.dumps(spec["diagnostics"])) if spec.get("diagnostics") is not None else None
+    if spec.get("dump"):
+        if dump_path is None:
+            raise ValueError("dump バリアントには dump_path が必要です")
+        diagnostics = dict(diagnostics or {})
+        diagnostics["dump_float"] = {"path": str(dump_path), "color_space": "linear_srgb"}
+        diagnostics["skip_write"] = True
+    return {
+        "profile": spec["profile"],
+        "overrides": dict(spec["overrides"]) or None,
+        "extra_settings": dict(spec["extra_settings"]) if spec.get("extra_settings") else None,
+        "output_format": spec["output_format"],
+        "output_color_space": spec["output_color_space"],
+        "adjustments": dict(spec["adjustments"]) if spec.get("adjustments") is not None else None,
+        "diagnostics": diagnostics,
+    }
+
+
+def diagnosis_dump_path(out: Path, capture_id: str, mode: str, variant: str) -> Path:
+    return out / "dumps" / mode / f"{capture_id}_{mode}_{variant}.f32"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def validate_post_filter(item: Any, index: int) -> list[str]:
+    """§4.5 の許可リストに沿うか（純粋）。"""
+    where = f"diagnostics.post_filters[{index}]"
+    if not isinstance(item, dict):
+        return [f"{where} がオブジェクトではありません"]
+    name = item.get("name")
+    allowed = POST_FILTER_ALLOWLIST.get(name)
+    if allowed is None:
+        return [f"{where}.name={name!r} は許可リストにありません"]
+    problems = []
+    for key, value in item.items():
+        if key == "name":
+            continue
+        rule = allowed.get(key)
+        if rule is None:
+            problems.append(f"{where}: {name} は {key} を受けません")
+            continue
+        kind = rule[0]
+        if kind == "scalar":
+            if not _is_number(value):
+                problems.append(f"{where}.{key} が数値ではありません: {value!r}")
+            elif not (rule[1] <= float(value) <= rule[2]):
+                problems.append(f"{where}.{key}={value} が値域 {rule[1]}..{rule[2]} の外です")
+        else:
+            size = 2 if kind == "vec2" else 4
+            if not isinstance(value, list) or len(value) != size or not all(_is_number(v) for v in value):
+                problems.append(f"{where}.{key} は数値 {size} 要素の配列です: {value!r}")
+            elif kind == "vec2":
+                (xlo, xhi), (ylo, yhi) = rule[1], rule[2]
+                if not (xlo <= value[0] <= xhi and ylo <= value[1] <= yhi):
+                    problems.append(f"{where}.{key}={value} が値域 x {xlo}..{xhi} / y {ylo}..{yhi} の外です")
+    if name == "CIToneCurve":
+        xs = [item[f"inputPoint{i}"][0] for i in range(5) if isinstance(item.get(f"inputPoint{i}"), list) and item[f"inputPoint{i}"]]
+        if any(b <= a for a, b in zip(xs, xs[1:])):
+            problems.append(f"{where}: CIToneCurve の x は単調増加でなければなりません")
+    return problems
+
+
+def validate_diagnostics_request(request: dict[str, Any]) -> list[str]:
+    """ハーネスが組んだ CLI 0.4.0 リクエストが設計書 §4.2〜4.5 の契約に沿うかを確かめる（純粋。問題の一覧）。"""
+    problems: list[str] = []
+    unknown = sorted(set(request) - DIAG_REQUEST_TOP_KEYS)
+    if unknown:
+        problems.append(f"未知のトップレベルキー: {', '.join(unknown)}")
+    settings = request.get("settings") or {}
+    if "gamut_mapping" in settings and settings["gamut_mapping"] is not None and not isinstance(settings["gamut_mapping"], bool):
+        problems.append(f"settings.gamut_mapping は boolean です: {settings['gamut_mapping']!r}")
+    if settings.get("baseline_exposure") is not None:
+        value = settings["baseline_exposure"]
+        if not _is_number(value) or not (-5.0 <= float(value) <= 5.0):
+            problems.append(f"settings.baseline_exposure は −5..5 の数値です: {value!r}")
+    problems += validate_adjustments_request(request)
+    diag = request.get("diagnostics")
+    if diag is None:
+        return problems
+    if not isinstance(diag, dict):
+        return problems + ["diagnostics がオブジェクトではありません"]
+    extra = sorted(set(diag) - DIAG_KEYS)
+    if extra:
+        problems.append(f"diagnostics に未知のキー: {', '.join(extra)}")
+    if "stats" in diag and not isinstance(diag["stats"], bool):
+        problems.append("diagnostics.stats は boolean です")
+    if "skip_write" in diag and not isinstance(diag["skip_write"], bool):
+        problems.append("diagnostics.skip_write は boolean です")
+    if "stats_color_space" in diag and diag["stats_color_space"] not in DIAG_COLOR_SPACES:
+        problems.append(f"diagnostics.stats_color_space が不正です: {diag['stats_color_space']!r}")
+    dump = diag.get("dump_float")
+    if dump is not None:
+        if not isinstance(dump, dict):
+            problems.append("diagnostics.dump_float がオブジェクトではありません")
+        else:
+            if set(dump) - {"path", "color_space"}:
+                problems.append(f"diagnostics.dump_float に未知のキー: {', '.join(sorted(set(dump) - {'path', 'color_space'}))}")
+            path = dump.get("path")
+            if not isinstance(path, str) or not Path(path).is_absolute() or not path.endswith(".f32"):
+                problems.append(f"diagnostics.dump_float.path は絶対パス・拡張子 .f32 です: {path!r}")
+            elif path in (request.get("input"), request.get("output")):
+                problems.append("diagnostics.dump_float.path は input / output と別のパスにしてください")
+            if dump.get("color_space", "linear_srgb") not in DIAG_COLOR_SPACES:
+                problems.append(f"diagnostics.dump_float.color_space が不正です: {dump.get('color_space')!r}")
+    lsf = diag.get("linear_space_filter")
+    if lsf is not None:
+        kind = lsf.get("kind") if isinstance(lsf, dict) else None
+        if kind not in ("identity", "scale", "constant"):
+            problems.append(f"diagnostics.linear_space_filter.kind が不正です: {kind!r}")
+        elif kind == "identity":
+            if "value" in lsf:
+                problems.append("linear_space_filter identity に value は付けません")
+        else:
+            lo, hi = (0.01, 8.0) if kind == "scale" else (0.0, 8.0)
+            value = lsf.get("value")
+            if not _is_number(value) or not (lo <= float(value) <= hi):
+                problems.append(f"linear_space_filter {kind} の value は {lo}..{hi} です: {value!r}")
+    posts = diag.get("post_filters")
+    if posts is not None:
+        if not isinstance(posts, list):
+            problems.append("diagnostics.post_filters は配列です")
+        else:
+            if len(posts) > POST_FILTERS_MAX:
+                problems.append(f"diagnostics.post_filters は最大 {POST_FILTERS_MAX} 個です（{len(posts)} 個）")
+            for index, item in enumerate(posts):
+                problems += validate_post_filter(item, index)
+    return problems
+
+
+def diagnosis_cli_problem(version: Any, capabilities: Any) -> str | None:
+    """--diagnosis を回せない理由（CLI 0.4.0 未満 / --capabilities に diagnostics.supported が無い）。回せれば None。"""
+    if not isinstance(version, dict) or version.get("error") or not version.get("cli_version"):
+        detail = version.get("error") if isinstance(version, dict) else version
+        return f"Core Image CLI のバージョンを取得できません（--version: {detail}）"
+    parsed = parse_cli_version(version.get("cli_version"))
+    need = ".".join(str(v) for v in DIAGNOSIS_MIN_CLI)
+    if parsed is None or parsed < DIAGNOSIS_MIN_CLI:
+        return f"Core Image CLI {version.get('cli_version')} は diagnostics に未対応です（{need} 以上が必要。設計書 §4）"
+    diag = capabilities.get("diagnostics") if isinstance(capabilities, dict) else None
+    if not isinstance(diag, dict) or diag.get("supported") is not True:
+        return f"Core Image CLI {version.get('cli_version')} の --capabilities に diagnostics.supported: true がありません（設計書 §4.6）"
+    return None
+
+
+def diagnostics_response_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """CLI 0.4.0 応答の ``applied.gamut_mapping_enabled`` と ``diagnostics`` ブロック（§4.4）を CSV の平らな列にする（純粋）。"""
+    applied = payload.get("applied") or {}
+    out: dict[str, Any] = {"ci_gamut": applied.get("gamut_mapping_enabled")}
+    diag = payload.get("diagnostics")
+    if not isinstance(diag, dict):
+        out["ci_diag_present"] = False
+        return out
+    stats = diag.get("stats") or {}
+    readback = diag.get("readback") or {}
+    dump = diag.get("dump_float") or {}
+    out.update({
+        "ci_diag_present": True,
+        "ci_diag_version": diag.get("cli_diagnostics_version"),
+        "ci_diag_written": diag.get("written"),
+        "ci_stats_color_space": diag.get("stats_color_space"),
+        "ci_stats_source": diag.get("stats_source"),
+        "ci_stats_any_gt_1": stats.get("any_gt_1"),
+        "ci_stats_all_gt_1": stats.get("all_gt_1"),
+        "ci_readback_gamut": readback.get("gamut_mapping_enabled"),
+        "ci_readback_baseline": readback.get("baseline_exposure"),
+        "ci_readback_extent": json.dumps(readback.get("extent")) if readback.get("extent") is not None else None,
+        "ci_dump_path": dump.get("path"),
+    })
+    for ch in ("r", "g", "b"):
+        st = stats.get(ch) or {}
+        for key in ("p50", "p999", "max", "frac_gt_1", "frac_ge_1"):
+            out[f"ci_stats_{ch}_{key}"] = st.get(key)
+    return out
+
+
+# --- CFA 飽和（§5） --------------------------------------------------------------
+
+
+def cfa_quantization_step(values: np.ndarray, white_level: int) -> int:
+    """white_level/2 より大きい値の np.unique の最小差分（α6400 の圧縮 ARW は 32。非圧縮では 1 になりうる）。"""
+    top = np.unique(values[values > white_level // 2])
+    if top.size < 2:
+        return 1
+    return max(1, int(np.diff(top).min()))
+
+
+def cfa_color_letters(color_desc: bytes | str, n_colors: int = 4) -> list[str]:
+    """raw_colors_visible の 0..3 → 'r' / 'g' / 'b'（color_desc 'RGBG' なら [r, g, b, g]）。"""
+    desc = color_desc.decode() if isinstance(color_desc, (bytes, bytearray)) else str(color_desc)
+    return [desc[i].lower() if i < len(desc) else "g" for i in range(n_colors)]
+
+
+def cfa_crop(array: np.ndarray, sizes: Any) -> np.ndarray:
+    """raw_image_visible からマージン（crop_*）を落として有効域（6000×4000）にする。偶数寸法に揃える。
+
+    2×2 セルはどの位置から切っても R / G / B / G を 1 つずつ含むので、マージンの偶奇はセルの構成を変えない。
+    """
+    top = int(getattr(sizes, "crop_top_margin", 0) or 0)
+    left = int(getattr(sizes, "crop_left_margin", 0) or 0)
+    height = int(getattr(sizes, "crop_height", 0) or 0) or array.shape[0] - top
+    width = int(getattr(sizes, "crop_width", 0) or 0) or array.shape[1] - left
+    out = array[top:top + height, left:left + width]
+    return out[: out.shape[0] // 2 * 2, : out.shape[1] // 2 * 2]
+
+
+def _cells(array: np.ndarray) -> np.ndarray:
+    h, w = array.shape[:2]
+    return array[: h // 2 * 2, : w // 2 * 2].reshape(h // 2, 2, w // 2, 2)
+
+
+def cfa_analyze_arrays(
+    vis: np.ndarray,
+    colors: np.ndarray,
+    letters: list[str],
+    black: Iterable[float],
+    white_level: int,
+    camera_white: Iterable[float] | None = None,
+    step: int | None = None,
+) -> dict[str, Any]:
+    """CFA の色別飽和率・2×2 セル飽和マップ・ヘッドルームを求める（純粋）。
+
+    閾値は ``T_libraw = white_level − step``（主）と ``T_camera = camera_white − step``（副、色別）。
+    値 ≥ T を飽和とみなす（黒補正は閾値側で扱う）。マップは 1 セル = 1 画素で、ビットは ``CFA_BIT``。
+    """
+    black = [float(b) for b in black]
+    step = int(step or cfa_quantization_step(vis, white_level))
+    t_libraw = float(white_level - step)
+    cam = [float(c) for c in camera_white] if camera_white is not None else [float(white_level)] * len(black)
+    t_camera_by_index = np.array([c - step if c > 0 else t_libraw for c in cam], dtype=np.float64)
+    pixel_t_camera = t_camera_by_index[colors]
+    letter_of = np.array([CFA_BIT[c] for c in letters], dtype=np.uint8)[colors]
+    out: dict[str, Any] = {
+        "cfa_white_level": int(white_level), "cfa_step": step, "cfa_t_libraw": t_libraw,
+        "cfa_t_camera": float(t_camera_by_index.min()), "cfa_black": float(np.mean(black)),
+        "cfa_width": int(vis.shape[1]), "cfa_height": int(vis.shape[0]),
+    }
+    maps: dict[str, np.ndarray] = {}
+    for tag, prefix, sat in (("libraw", "cfa_sat", vis >= t_libraw), ("camera", "cfa_satc", vis >= pixel_t_camera)):
+        for letter in ("r", "g", "b"):
+            sel = letter_of == CFA_BIT[letter]
+            out[f"{prefix}_{letter}"] = float(sat[sel].mean()) if sel.any() else float("nan")
+        cells = _cells(sat)
+        out[f"{prefix}_cell_any"] = float(cells.any(axis=(1, 3)).mean())
+        out[f"{prefix}_cell_all"] = float(cells.all(axis=(1, 3)).mean())
+        bits = np.where(sat, letter_of, 0).astype(np.uint8)
+        maps[tag] = np.bitwise_or.reduce(np.bitwise_or.reduce(_cells(bits), axis=3), axis=1)
+    for letter in ("r", "g", "b"):
+        idx = [i for i, c in enumerate(letters) if c == letter]
+        sel = letter_of == CFA_BIT[letter]
+        if not idx or not sel.any():
+            out[f"cfa_headroom_{letter}"] = float("nan")
+            continue
+        blk = float(np.mean([black[i] for i in idx]))
+        out[f"cfa_headroom_{letter}"] = float((np.percentile(vis[sel], 99.9) - blk) / max(1e-6, t_libraw - blk))
+    # 位置合わせ用の輝度サムネイル（セル平均 − 黒、0..1）
+    blk_px = np.array(black, dtype=np.float32)[colors]
+    norm = (vis.astype(np.float32) - blk_px) / max(1.0, float(white_level) - float(np.mean(black)))
+    thumb = _cells(norm).mean(axis=(1, 3)).astype(np.float32)
+    return {"metrics": out, "map_libraw": maps["libraw"], "map_camera": maps["camera"], "thumb": thumb}
+
+
+def cfa_analyze(raw: Any) -> dict[str, Any]:
+    """rawpy の RawPy から有効域を切り出して ``cfa_analyze_arrays`` を呼ぶ（読むだけ）。"""
+    vis = cfa_crop(raw.raw_image_visible, raw.sizes)
+    colors = cfa_crop(raw.raw_colors_visible, raw.sizes)
+    letters = cfa_color_letters(raw.color_desc, 4)
+    camera_white = getattr(raw, "camera_white_level_per_channel", None)
+    return cfa_analyze_arrays(vis, colors, letters, raw.black_level_per_channel, int(raw.white_level), camera_white)
+
+
+def cfa_saturation(raw: Any) -> dict[str, Any]:
+    """CFA 色別の飽和率（§5 の指標。``T_libraw`` と ``T_camera`` の両方）。"""
+    return cfa_analyze(raw)["metrics"]
+
+
+def cfa_saturation_map(raw: Any, threshold: str = "libraw") -> np.ndarray:
+    """2×2 セル飽和マップ（有効域の 1/2 寸法、uint8 のビット ``CFA_BIT``。向きは未適用）。"""
+    result = cfa_analyze(raw)
+    return result["map_camera" if threshold == "camera" else "map_libraw"]
+
+
+def orient_array(array: np.ndarray, orientation: Any) -> np.ndarray:
+    """EXIF Orientation を適用して正立にする（PIL の exif_transpose と同じ規則）。"""
+    o = int(orientation) if isinstance(orientation, (int, float)) and not isinstance(orientation, bool) else 1
+    ops = {
+        1: lambda a: a,
+        2: lambda a: a[:, ::-1],
+        3: lambda a: a[::-1, ::-1],
+        4: lambda a: a[::-1, :],
+        5: lambda a: np.swapaxes(a, 0, 1),
+        6: lambda a: np.rot90(a, -1),
+        7: lambda a: np.rot90(a, 2).swapaxes(0, 1),
+        8: lambda a: np.rot90(a, 1),
+    }
+    return np.ascontiguousarray(ops.get(o, ops[1])(array))
+
+
+def resize_cell_map(bits: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """セル飽和マップ（uint8 ビット）を (w, h) へ。縮小は「足跡が少しでも重なるセルの OR」（INTER_AREA > 0）、
+    拡大は最近傍（補間しない）。ビットごとに処理して合成する。"""
+    tw, th = size
+    h, w = bits.shape
+    if (w, h) == (tw, th):
+        return bits.copy()
+    out = np.zeros((th, tw), dtype=np.uint8)
+    shrink = tw <= w and th <= h
+    for bit in CFA_BIT.values():
+        mask = ((bits & bit) > 0).astype(np.float32)
+        if shrink:
+            moved = cv2.resize(mask, (tw, th), interpolation=cv2.INTER_AREA) > 0
+        else:
+            moved = cv2.resize(mask, (tw, th), interpolation=cv2.INTER_NEAREST) > 0.5
+        out |= np.where(moved, bit, 0).astype(np.uint8)
+    return out
+
+
+def cfa_from_file(path: Path, orientation: Any = 1) -> dict[str, Any]:
+    """ARW を rawpy で読み（読むだけ）、正立のセルマップ・サムネイルと指標を返す。"""
+    import rawpy
+
+    started = time.monotonic()
+    with rawpy.imread(str(path)) as raw:
+        result = cfa_analyze(raw)
+    result["map_libraw"] = orient_array(result["map_libraw"], orientation)
+    result["map_camera"] = orient_array(result["map_camera"], orientation)
+    result["thumb"] = orient_array(result["thumb"], orientation)
+    result["metrics"]["cfa_elapsed_s"] = time.monotonic() - started
+    return result
+
+
+# --- dump / 色空間 ---------------------------------------------------------------
+
+
+def load_dump(meta: dict[str, Any]) -> np.ndarray:
+    """CLI 応答の ``diagnostics.dump_float``（§4.4）を検査してから .f32 を (h, w, 3) float32 で読む。"""
+    problems = []
+    if meta.get("dtype") != "float32":
+        problems.append(f"dtype={meta.get('dtype')!r}")
+    if meta.get("byte_order") != "little":
+        problems.append(f"byte_order={meta.get('byte_order')!r}")
+    if meta.get("channels") != 3:
+        problems.append(f"channels={meta.get('channels')!r}")
+    if meta.get("layout") != "interleaved_rgb_row_major":
+        problems.append(f"layout={meta.get('layout')!r}")
+    width, height = meta.get("width"), meta.get("height")
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        problems.append(f"width/height={width!r}/{height!r}")
+    if problems:
+        raise ValueError("dump のメタデータが契約（§4.4）と違います: " + ", ".join(problems))
+    expected = width * height * 3 * 4
+    path = Path(str(meta.get("path")))
+    if meta.get("bytes") not in (None, expected):
+        raise ValueError(f"dump の bytes {meta.get('bytes')} が width×height×12 = {expected} と違います")
+    actual = path.stat().st_size
+    if actual != expected:
+        raise ValueError(f"dump のファイルサイズ {actual} が期待値 {expected} と違います: {path}")
+    return np.fromfile(path, dtype="<f4").reshape(height, width, 3)
+
+
+def srgb_encode(linear: np.ndarray) -> np.ndarray:
+    """リニア（0..1 に clip 済みを想定）→ sRGB ガンマ（IEC 61966-2-1）。"""
+    v = np.clip(np.asarray(linear, dtype=np.float32), 0.0, None)
+    return np.where(v <= 0.0031308, v * 12.92, 1.055 * np.power(v, 1.0 / 2.4) - 0.055).astype(np.float32)
+
+
+def _rgb_to_xyz(primaries: tuple[tuple[float, float], ...], white: tuple[float, float]) -> np.ndarray:
+    xyz = np.array([[x / y, 1.0, (1.0 - x - y) / y] for x, y in primaries]).T
+    wx, wy = white
+    w = np.array([wx / wy, 1.0, (1.0 - wx - wy) / wy])
+    return xyz * np.linalg.solve(xyz, w)
+
+
+#: リニア Display P3 → リニア sRGB（D65 同士なので白色点変換なし）。
+P3_TO_SRGB = np.linalg.solve(
+    _rgb_to_xyz(((0.64, 0.33), (0.30, 0.60), (0.15, 0.06)), (0.3127, 0.3290)),
+    _rgb_to_xyz(((0.680, 0.320), (0.265, 0.690), (0.150, 0.060)), (0.3127, 0.3290)),
+).astype(np.float32)
+
+
+def p3_to_srgb(p3_encoded01: np.ndarray) -> np.ndarray:
+    """Display P3（sRGB 伝達関数、0..1）→ sRGB ガンマ値（clip しない。1 超 = sRGB で白飛び）。"""
+    linear = srgb_to_linear(np.clip(p3_encoded01, 0.0, 1.0)) @ P3_TO_SRGB.T
+    out = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * np.power(np.clip(linear, 0, None), 1.0 / 2.4) - 0.055)
+    return out.astype(np.float32)
+
+
+# --- ROI（§7） -------------------------------------------------------------------
+
+
+def _grid_sums(integral: np.ndarray, s: int, step: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """積分画像から、s×s 箱（step 刻み）の総和を返す: (xs, ys, sums) の 1 次元配列。"""
+    h, w = integral.shape[0] - 1, integral.shape[1] - 1
+    xs = np.arange(0, w - s + 1, step)
+    ys = np.arange(0, h - s + 1, step)
+    gx, gy = np.meshgrid(xs, ys)
+    gx, gy = gx.ravel(), gy.ravel()
+    sums = integral[gy + s, gx + s] - integral[gy, gx + s] - integral[gy + s, gx] + integral[gy, gx]
+    return gx, gy, sums.astype(np.float64)
+
+
+def _overlaps(box: tuple[int, int, int, int], taken: Iterable[tuple[int, int, int, int]]) -> bool:
+    x0, y0, x1, y1 = box
+    return any(not (x1 <= bx0 or bx1 <= x0 or y1 <= by0 or by1 <= y0) for bx0, by0, bx1, by1 in taken)
+
+
+def _pick(xs: np.ndarray, ys: np.ndarray, scores: np.ndarray, s: int, taken: list, allowed: np.ndarray | None = None,
+          prefer: str = "max") -> tuple[int, int, int, int] | None:
+    order = np.argsort(-scores if prefer == "max" else scores, kind="stable")
+    for i in order:
+        if allowed is not None and not allowed[i]:
+            continue
+        if not math.isfinite(scores[i]):
+            continue
+        box = (int(xs[i]), int(ys[i]), int(xs[i]) + s, int(ys[i]) + s)
+        if not _overlaps(box, taken):
+            return box
+    return None
+
+
+def diagnosis_rois(camera_rgb8: np.ndarray, size: int) -> tuple[dict[str, tuple[int, int, int, int] | None], dict[str, Any]]:
+    """カメラ JPEG から §7.1 の 5 ROI を重ならないように順に確保する（純粋）。見つからない ROI は None。
+
+    fg_dark の「構造がある」は、箱の Laplacian 平均（σ1 ぼかし後、8bit スケール）が全箱の中央値以上とした
+    （絶対値の閾値はシーン依存が大きいので相対にした）。返す info に閾値を残す。
+    cloud_grad の「ローカル標準偏差」は帯（0.6 < L < 0.98）内の画素だけで取る（箱全体だと地平線を拾う）。
+    """
+    h, w = camera_rgb8.shape[:2]
+    s = max(8, min(size, h, w))
+    step = max(1, s // 2)
+    rgb01 = camera_rgb8.astype(np.float32) / 255.0
+    L = luma_of(rgb01)
+    S = rgb01.max(axis=2) - rgb01.min(axis=2)
+    area = float(s * s)
+    taken: list[tuple[int, int, int, int]] = []
+    rois: dict[str, tuple[int, int, int, int] | None] = {}
+    info: dict[str, Any] = {"size": s, "step": step}
+
+    def counts(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _grid_sums(cv2.integral(mask.astype(np.uint8)), s, step)
+
+    xs, ys, n = counts(L > 0.85)
+    rois["sky_bright"] = _pick(xs, ys, n, s, taken, allowed=n > 0)
+    if rois["sky_bright"]:
+        taken.append(rois["sky_bright"])
+
+    band = (L > 0.6) & (L < 0.98)
+    xs, ys, n = counts(band)
+    # 起伏は帯（0.6 < L < 0.98）内の画素だけで測る。箱全体の標準偏差だと地平線（空と暗い前景の境界）が最大になる。
+    blurred = cv2.GaussianBlur(L, (0, 0), 2.0).astype(np.float64) * band
+    _, _, s1 = _grid_sums(cv2.integral(blurred), s, step)
+    _, _, s2 = _grid_sums(cv2.integral(blurred * blurred), s, step)
+    nb = np.maximum(n, 1.0)
+    local_std = np.sqrt(np.clip(s2 / nb - (s1 / nb) ** 2, 0.0, None))
+    rois["cloud_grad"] = _pick(xs, ys, local_std, s, taken, allowed=(n / area) >= 0.7)
+    if rois["cloud_grad"]:
+        taken.append(rois["cloud_grad"])
+
+    clipped = (camera_rgb8 >= 255).any(axis=2)
+    ring = dilate_mask(clipped, CLIP_BAND_PX) & ~clipped
+    xs, ys, n = counts(ring)
+    rois["clip_edge"] = _pick(xs, ys, n, s, taken, allowed=n > 0)
+    if rois["clip_edge"]:
+        taken.append(rois["clip_edge"])
+
+    lap = np.abs(cv2.Laplacian(cv2.GaussianBlur(L * 255.0, (0, 0), 1.0), cv2.CV_32F)).astype(np.float64)
+    xs, ys, lap_sum = _grid_sums(cv2.integral(lap), s, step)
+    lap_mean = lap_sum / area
+    threshold = float(np.median(lap_mean)) if lap_mean.size else float("nan")
+    info["fg_dark_laplacian_threshold"] = threshold
+    p50 = np.full(lap_mean.shape, np.inf)
+    for i in np.flatnonzero(lap_mean >= threshold):
+        box = (int(xs[i]), int(ys[i]), int(xs[i]) + s, int(ys[i]) + s)
+        if not _overlaps(box, taken):
+            p50[i] = float(np.median(L[box[1]:box[3], box[0]:box[2]]))
+    rois["fg_dark"] = _pick(xs, ys, p50, s, taken, prefer="min")
+    if rois["fg_dark"]:
+        taken.append(rois["fg_dark"])
+
+    xs, ys, n = counts((L > 0.3) & (L < 0.6) & (S < 0.25))
+    rois["midtone"] = _pick(xs, ys, n, s, taken, allowed=n > 0)
+    return rois, info
+
+
+def align_rois(
+    ref_gray: np.ndarray,
+    tgt_gray: np.ndarray,
+    rois: dict[str, tuple[int, int, int, int] | None],
+    size: int,
+    min_response: float = ROI_MIN_RESPONSE,
+) -> dict[str, dict[str, Any]]:
+    """カメラ（ref）→ バリアント（tgt）の ROI ごとの平行移動（§7.2）。失敗した ROI は box None（欠測）。
+
+    ``sky_bright`` は白一色で相関が落ちやすいので、平行移動は ``SKY_SHIFT_SOURCES`` の最初に成功した ROI の値を
+    流用し、自身の相関（response）は記録だけする。ref の内容が tgt の (x+dx, y+dy) にある向き。
+    """
+    h, w = tgt_gray.shape[:2]
+    max_shift = size / 4.0
+    out: dict[str, dict[str, Any]] = {}
+    for name in DIAG_ROI_NAMES:
+        box = rois.get(name)
+        if box is None:
+            out[name] = {"box": None, "ok": False, "reason": "no_roi"}
+            continue
+        dx, dy, response = roi_shift(ref_gray, tgt_gray, box, margin=int(max_shift))
+        ok = response >= min_response and math.hypot(dx, dy) <= max_shift
+        out[name] = {"dx": dx, "dy": dy, "response": response, "ok": ok, "reason": None if ok else "align_failed",
+                     "box": shift_box(box, dx, dy, w, h) if ok else None, "shift_source": name}
+    sky = out.get("sky_bright")
+    if sky and rois.get("sky_bright") is not None:
+        source = next((n for n in SKY_SHIFT_SOURCES if out.get(n, {}).get("ok")), None)
+        if source is not None:
+            dx, dy = out[source]["dx"], out[source]["dy"]
+            sky.update({"dx": dx, "dy": dy, "ok": True, "reason": None, "shift_source": source,
+                        "box": shift_box(rois["sky_bright"], dx, dy, w, h)})
+    return out
+
+
+def identity_alignment(rois: dict[str, tuple[int, int, int, int] | None]) -> dict[str, dict[str, Any]]:
+    return {n: {"box": b, "ok": b is not None, "dx": 0.0, "dy": 0.0, "response": 1.0,
+                "reason": None if b is not None else "no_roi", "shift_source": n} for n, b in rois.items()}
+
+
+def _crop(array: np.ndarray, box: tuple[int, int, int, int] | None) -> np.ndarray | None:
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    return array[y0:y1, x0:x1]
+
+
+# --- 指標（§8） ------------------------------------------------------------------
+
+
+def stage_rates(rgb: np.ndarray, prefix: str, threshold: float = 1.0, strict: bool = True) -> dict[str, float]:
+    """float 画像のチャンネル別・いずれか・全部が threshold 超（strict）/ 以上の割合。"""
+    over = rgb > threshold if strict else rgb >= threshold
+    return {
+        f"{prefix}_r": float(over[..., 0].mean()), f"{prefix}_g": float(over[..., 1].mean()),
+        f"{prefix}_b": float(over[..., 2].mean()),
+        f"{prefix}_any": float(over.any(axis=2).mean()), f"{prefix}_all": float(over.all(axis=2).mean()),
+    }
+
+
+def stage_loss(prev_white: np.ndarray, cur_white: np.ndarray) -> float:
+    """前段で白でなかった（[0,1)）画素が当段で白になった割合（§8.1。分母は全画素。画素はいずれかのチャンネル）。"""
+    if prev_white.shape != cur_white.shape:
+        raise ValueError("stage_loss は同じ幾何の 2 段で数えます")
+    return float((~prev_white & cur_white).mean()) if prev_white.size else float("nan")
+
+
+def blue_only_clip(white_ch: np.ndarray) -> float:
+    """B だけ白（R, G は白でない）の画素率。"""
+    return float((white_ch[..., 2] & ~white_ch[..., 0] & ~white_ch[..., 1]).mean()) if white_ch.size else float("nan")
+
+
+def grad_texture(L: np.ndarray, mask: np.ndarray, sigma: float = 1.0, min_pixels: int = DIAG_MIN_PIXELS) -> float:
+    """σ1 ハイパス（L − ぼかし）の標準偏差を mask の画素で（§8.2 grad_texture）。画素が少なければ NaN。"""
+    if mask is None or int(mask.sum()) < min_pixels:
+        return float("nan")
+    hp = L.astype(np.float32) - cv2.GaussianBlur(L.astype(np.float32), (0, 0), sigma)
+    return float(hp[mask].std())
+
+
+def distinct_levels(L: np.ndarray, mask: np.ndarray | None, levels: int) -> int:
+    """L（0..1）を levels 段に量子化したときの distinct 数。"""
+    values = L if mask is None else L[mask]
+    if values.size == 0:
+        return 0
+    return int(np.unique(np.rint(np.clip(values, 0.0, 1.0) * levels)).size)
+
+
+def dominant_gradient_angle(L: np.ndarray) -> float:
+    """ぼかし後の構造テンソルから、最大勾配の方向（ラジアン）。"""
+    b = cv2.GaussianBlur(L.astype(np.float32), (0, 0), 2.0)
+    gx = cv2.Sobel(b, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(b, cv2.CV_32F, 0, 1, ksize=3)
+    return 0.5 * math.atan2(2.0 * float((gx * gy).sum()), float((gx * gx).sum() - (gy * gy).sum()))
+
+
+def projected_profile(L: np.ndarray, angle: float) -> np.ndarray:
+    """L を angle 方向へ射影した 1px ビンの平均プロファイル（ESF と同じ採り方）。"""
+    h, w = L.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    t = (xx - (w - 1) / 2.0) * math.cos(angle) + (yy - (h - 1) / 2.0) * math.sin(angle)
+    bins = np.rint(t - t.min()).astype(np.int64).ravel()
+    sums = np.bincount(bins, weights=L.astype(np.float64).ravel())
+    n = np.bincount(bins)
+    keep = n >= max(3, int(0.25 * min(h, w)))
+    return (sums[keep] / n[keep]).astype(np.float64)
+
+
+def rise_width_10_90(profile: np.ndarray, min_range: float = 0.02) -> float:
+    """プロファイルの min→max 区間で 10% と 90% を横切る位置の差（px）。振れ幅が小さければ NaN。"""
+    if profile.size < 3:
+        return float("nan")
+    i_min, i_max = int(np.argmin(profile)), int(np.argmax(profile))
+    lo, hi = float(profile[i_min]), float(profile[i_max])
+    if hi - lo < min_range:
+        return float("nan")
+    # min → max の向きに並べた区間（昇り）
+    seg = profile[i_min:i_max + 1] if i_min < i_max else profile[i_max:i_min + 1][::-1]
+
+    def crossing(level: float) -> float:
+        idx = np.flatnonzero(seg >= level)
+        if idx.size == 0:
+            return float("nan")
+        i = int(idx[0])
+        if i == 0:
+            return 0.0
+        d = float(seg[i] - seg[i - 1])
+        return (i - 1) + ((level - float(seg[i - 1])) / d if d > 0 else 1.0)
+
+    return abs(crossing(lo + 0.9 * (hi - lo)) - crossing(lo + 0.1 * (hi - lo)))
+
+
+def sky_color(rgb01: np.ndarray, white_ch: np.ndarray, min_pixels: int = DIAG_MIN_PIXELS) -> dict[str, float]:
+    """非クリップ画素の Lab 色相角の中央値（度）とクロマの中央値（§8.2 sky_hue / sky_chroma）。"""
+    keep = ~white_ch.any(axis=2)
+    if int(keep.sum()) < min_pixels:
+        return {"sky_hue": float("nan"), "sky_chroma": float("nan")}
+    lab = cv2.cvtColor(np.clip(rgb01, 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)[keep]
+    hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1])) % 360.0
+    return {"sky_hue": float(np.median(hue)), "sky_chroma": float(np.median(np.hypot(lab[:, 1], lab[:, 2])))}
+
+
+def pchip_curve(points: Iterable[tuple[float, float]]) -> Any:
+    """単調 3 次エルミート（Fritsch–Carlson）で点列を補間する関数を返す。最後の点より先は最後の区間の傾きで外挿。"""
+    pts = sorted((float(x), float(y)) for x, y in points)
+    xs = np.array([p[0] for p in pts])
+    ys = np.array([p[1] for p in pts])
+    h = np.diff(xs)
+    delta = np.diff(ys) / h
+    m = np.zeros_like(ys)
+    m[0], m[-1] = delta[0], delta[-1]
+    for i in range(1, len(xs) - 1):
+        if delta[i - 1] * delta[i] <= 0:
+            m[i] = 0.0
+        else:
+            w1, w2 = 2 * h[i] + h[i - 1], h[i] + 2 * h[i - 1]
+            m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i])
+
+    def f(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        out = np.empty_like(x)
+        below, above = x <= xs[0], x >= xs[-1]
+        out[below] = ys[0] + m[0] * (x[below] - xs[0])
+        out[above] = ys[-1] + delta[-1] * (x[above] - xs[-1])
+        mid = ~(below | above)
+        k = np.clip(np.searchsorted(xs, x[mid], side="right") - 1, 0, len(xs) - 2)
+        t = (x[mid] - xs[k]) / h[k]
+        h00, h10, h01, h11 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t, -2 * t**3 + 3 * t**2, t**3 - t**2
+        out[mid] = h00 * ys[k] + h10 * h[k] * m[k] + h01 * ys[k + 1] + h11 * h[k] * m[k + 1]
+        return out
+
+    return f
+
+
+def interp_at(points: Iterable[tuple[float, float]], target: float) -> float:
+    """(x, y) の折れ線を x = target で内挿する（外挿しない。範囲外・点不足は NaN）。x 昇順に並べ替える。"""
+    pts = sorted((float(x), float(y)) for x, y in points
+                 if _is_number(x) and _is_number(y))
+    if len(pts) < 2 or not _is_number(target):
+        return float("nan")
+    xs = [p[0] for p in pts]
+    if not (xs[0] <= target <= xs[-1]):
+        return float("nan")
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= target <= x1:
+            return y0 if x1 == x0 else y0 + (y1 - y0) * (target - x0) / (x1 - x0)
+    return float("nan")
+
+
+# --- 帰属・判定（§10） ------------------------------------------------------------
+
+
+def attribute_pixels(
+    clipped: np.ndarray,
+    sensor: np.ndarray | None,
+    s2_over: np.ndarray | None,
+    s3_white8: np.ndarray | None,
+    valid: bool = True,
+) -> dict[str, int]:
+    """§10.1 の帰属規則を画素集合 K（clipped）に順に適用して件数を返す（純粋）。
+
+    1 センサー飽和（CFA セルのいずれかが T 以上）→ 2 デコーダ/トーン（S2 のいずれかのチャンネルが 1.0 超）→
+    3 色域・SDR 出力（S2 が [0,1] で、S3 が 8bit sRGB で 255 に丸まる値 = clamp・量子化で白）→ 4 検証不能（それ以外。
+    S3 で白でないのに 8bit で白 = JPEG / リサイズ由来、位置合わせ失敗、dump 欠損）。
+    """
+    k = clipped.astype(bool)
+    n_k = int(k.sum())
+    out = {"k": n_k, **{c: 0 for c in ATTR_CATEGORIES}}
+    if not valid or sensor is None or s2_over is None or s3_white8 is None:
+        out["unverifiable"] = n_k
+        return out
+    rest = k.copy()
+    is_sensor = rest & sensor
+    out["sensor"] = int(is_sensor.sum())
+    rest &= ~sensor
+    is_tone = rest & s2_over
+    out["decoder_tone"] = int(is_tone.sum())
+    rest &= ~s2_over
+    is_gamut = rest & s3_white8
+    out["gamut_output"] = int(is_gamut.sum())
+    out["unverifiable"] = int((rest & ~s3_white8).sum())
+    return out
+
+
+def classify_attribution(counts: dict[str, int] | None, roi_pixels: int) -> str:
+    """ROI の分類: K が ROI の 1% 未満 → no_clip、最大の帰属 ≥ 50% かつ 2 位 < 30% → その帰属、それ以外 → mixed。
+
+    設計書 §10.1 は「最大（≥ 50%）、2 位 ≥ 30% なら混合」。最大が 50% 未満の場合は書かれていないので mixed とした。
+    """
+    if counts is None or roi_pixels <= 0:
+        return "unverifiable"
+    k = counts.get("k", 0)
+    if k < ATTR_MIN_CLIP_FRACTION * roi_pixels:
+        return "no_clip"
+    shares = sorted(((counts.get(c, 0) / k, c) for c in ATTR_CATEGORIES), reverse=True)
+    (top, name), (second, _) = shares[0], shares[1]
+    if top >= ATTR_MAJOR_FRACTION and second < ATTR_SECOND_FRACTION:
+        return name
+    return "mixed"
+
+
+def classify_scene_diagnosis(
+    roi_class: dict[str, str],
+    counts: dict[str, dict[str, int] | None],
+    grad_ratio_ev: Iterable[float],
+    s1_grad_ratio: float,
+    cloud_cfa_sat: float,
+) -> str:
+    """§10.2 のシーン判定（純粋）。上から順に評価する。
+
+    - no_clip: sky_bright / cloud_grad がどちらも「クリップなし」（または ROI 無し）
+    - sensor: 両方が sensor
+    - decoder_tone: cloud_grad が decoder_tone で、exposure −0.7 / −1.0 のどちらかで grad_texture_ratio ≥ 0.5
+    - gamut_output: 2 ROI の K を合算した帰属で gamut_output が最大
+    - unverifiable: 合算で unverifiable が最大、または S1 に階調が無く（s1 比 < 0.5）S0 も飽和していない
+    - mixed: それ以外
+    """
+    sky, cloud = roi_class.get("sky_bright"), roi_class.get("cloud_grad")
+    if {sky, cloud} <= {"no_clip", None}:
+        return "no_clip"
+    if sky == "sensor" and cloud == "sensor":
+        return "sensor"
+    ratios = [r for r in grad_ratio_ev if _is_number(r)]
+    if cloud == "decoder_tone" and any(r >= GRAD_RECOVER_MIN for r in ratios):
+        return "decoder_tone"
+    total = {c: sum((counts.get(n) or {}).get(c, 0) for n in ("sky_bright", "cloud_grad")) for c in ATTR_CATEGORIES}
+    if sum(total.values()) > 0:
+        top = max(ATTR_CATEGORIES, key=lambda c: total[c])
+        if top == "gamut_output":
+            return "gamut_output"
+        if top == "unverifiable":
+            return "unverifiable"
+    if _is_number(s1_grad_ratio) and s1_grad_ratio < GRAD_RECOVER_MIN and _is_number(cloud_cfa_sat) and cloud_cfa_sat < SCENE_SENSOR_FREE_MAX:
+        return "unverifiable"
+    return "mixed"
+
+
+def candidate_checks(row: dict[str, Any], camera: dict[str, Any]) -> dict[str, Any]:
+    """§9 の合否 (1)〜(5)（自動判定分）。値が無い項目は None。(6) 目視は None のまま残す（オーナー）。"""
+
+    def check(value: Any, fn: Any) -> bool | None:
+        return bool(fn(float(value))) if _is_number(value) else None
+
+    cam_clip = camera.get("sky_bright_clip8_any")
+    out = {
+        "c_pass_p50": check(row.get("mid_p50_diff"), lambda v: abs(v) <= MID_P50_TOL),
+        "c_pass_clip": (bool(row["sky_bright_clip8_any"] <= cam_clip)
+                        if _is_number(row.get("sky_bright_clip8_any")) and _is_number(cam_clip) else None),
+        "c_pass_texture": check(row.get("grad_texture_ratio"), lambda v: v >= GRAD_TEXTURE_RATIO_MIN),
+        "c_pass_fg": check(row.get("fg_p01_diff"), lambda v: v >= FG_P01_DROP_MAX),
+        # 境界が無い（magenta_rate NaN）なら偽色も無いので合格
+        "c_pass_magenta": check(row.get("magenta_rate"), lambda v: v <= MAGENTA_RATE_MAX) if row.get("band_pixels") else True,
+        "c_pass_visual": None,
+    }
+    parts = [out[k] for k in ("c_pass_p50", "c_pass_clip", "c_pass_texture", "c_pass_fg", "c_pass_magenta")]
+    out["c_pass_auto"] = False if any(p is False for p in parts) else (None if any(p is None for p in parts) else True)
+    return out
+
+
+def choose_c_best(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """§9 c_best: |mid_p50_diff| ≤ 0.03 の候補から sky_bright の clip8_any 最小、同点なら grad_texture_ratio 最大。
+
+    許容内の候補が無ければ |mid_p50_diff| 最小の候補を選び、within_tol False を残す（目視シートは作る）。
+    """
+    def num(v: Any, default: float) -> float:
+        return float(v) if _is_number(v) else default
+
+    candidates = [(name, rows[name]) for name in C_CANDIDATES if name in rows and not rows[name].get("error")]
+    if not candidates:
+        return {"best": None, "within_tol": False}
+    within = [(n, r) for n, r in candidates if _is_number(r.get("mid_p50_diff")) and abs(r["mid_p50_diff"]) <= MID_P50_TOL]
+    if within:
+        name, _ = min(within, key=lambda nr: (num(nr[1].get("sky_bright_clip8_any"), num(nr[1].get("clip8_any"), 1.0)),
+                                              -num(nr[1].get("grad_texture_ratio"), -1.0)))
+        return {"best": name, "within_tol": True}
+    name, _ = min(candidates, key=lambda nr: abs(num(nr[1].get("mid_p50_diff"), 9.0)))
+    return {"best": name, "within_tol": False}
+
+
+# --- 1 カット分の計測 ---------------------------------------------------------------
+
+
+def _gray8(rgb01: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(to8(rgb01), cv2.COLOR_RGB2GRAY)
+
+
+def display_luma(linear: np.ndarray, scale: float | None = None) -> np.ndarray:
+    """線形 RGB（1 超を含む）を scale で割って sRGB ガンマの輝度 L にする（階調の有無を見るための表示化）。"""
+    lum = luma_of(np.asarray(linear, dtype=np.float32))
+    if scale is None:
+        scale = max(1.0, float(np.percentile(lum, 99.9))) if lum.size else 1.0
+    return luma_of(srgb_encode(np.clip(np.asarray(linear, dtype=np.float32) / scale, 0.0, 1.0)))
+
+
+def image_variant_metrics(
+    rgb01: np.ndarray,
+    white_ch: np.ndarray,
+    levels: int,
+    align: dict[str, dict[str, Any]],
+    camera_ref: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """8bit / 16bit 出力 1 枚の全画面・ROI 指標（§8.1〜8.3）。camera_ref はカメラ JPEG の同指標と cloud マスク。"""
+    row: dict[str, Any] = {}
+    white_any = white_ch.any(axis=2)
+    for i, ch in enumerate("rgb"):
+        row[f"clip{'8' if levels == 255 else '16'}_{ch}"] = float(white_ch[..., i].mean())
+    tag = "8" if levels == 255 else "16"
+    row[f"clip{tag}_any"] = float(white_any.mean())
+    row[f"clip{tag}_all"] = float(white_ch.all(axis=2).mean())
+    row["blue_only_clip"] = blue_only_clip(white_ch)
+    L = luma_of(rgb01)
+    row["mean_luma"] = float(L.mean())
+    row["p50_luma"] = float(np.percentile(L, 50))
+    rgb8 = to8(rgb01)
+    row.update(clip_boundary_magenta_rate(rgb8 if levels == 255 else np.where(white_ch, 255, np.minimum(rgb8, 254)).astype(np.uint8)))
+    excluded = []
+    for name in DIAG_ROI_NAMES:
+        a = align.get(name) or {}
+        row[f"{name}_shift_response"] = a.get("response")
+        if a.get("box") is None and a.get("reason") == "align_failed":
+            excluded.append(name)
+    row["roi_excluded"] = ";".join(excluded)
+    for name in DIAG_CLIP_ROIS:
+        box = (align.get(name) or {}).get("box")
+        wc = _crop(white_ch, box)
+        if wc is None:
+            continue
+        for i, ch in enumerate("rgb"):
+            row[f"{name}_clip{tag}_{ch}"] = float(wc[..., i].mean())
+        row[f"{name}_clip{tag}_any"] = float(wc.any(axis=2).mean())
+        row[f"{name}_blue_only_clip"] = blue_only_clip(wc)
+    box = (align.get("clip_edge") or {}).get("box")
+    if box is not None:
+        row["clip_edge_magenta_rate"] = clip_boundary_magenta_rate(_crop(rgb8, box))["magenta_rate"]
+    box = (align.get("midtone") or {}).get("box")
+    if box is not None:
+        row["mid_p50"] = float(np.percentile(_crop(L, box), 50))
+        if camera_ref and _is_number(camera_ref.get("mid_p50")):
+            row["mid_p50_diff"] = row["mid_p50"] - camera_ref["mid_p50"]
+    box = (align.get("cloud_grad") or {}).get("box")
+    if box is not None:
+        Lc = _crop(L, box)
+        mask = camera_ref.get("cloud_mask") if camera_ref else None
+        if mask is None or mask.shape != Lc.shape:
+            mask = Lc > 0.8
+        row["grad_levels"] = distinct_levels(Lc, None, levels)
+        row["grad_levels_hi"] = distinct_levels(Lc, mask, levels)
+        row["grad_texture"] = grad_texture(Lc, mask)
+        if camera_ref and _is_number(camera_ref.get("grad_texture")) and camera_ref["grad_texture"] > 0 and _is_number(row["grad_texture"]):
+            row["grad_texture_ratio"] = row["grad_texture"] / camera_ref["grad_texture"]
+        angle = camera_ref.get("cloud_angle") if camera_ref and camera_ref.get("cloud_angle") is not None else dominant_gradient_angle(Lc)
+        row["grad_slope"] = rise_width_10_90(projected_profile(Lc, angle))
+    box = (align.get("sky_bright") or {}).get("box")
+    if box is not None:
+        row.update(sky_color(_crop(rgb01, box), _crop(white_ch, box)))
+    box = (align.get("fg_dark") or {}).get("box")
+    if box is not None:
+        Lf = _crop(L, box)
+        row["fg_noise"] = flat_noise(np.clip(Lf * 255.0, 0, 255).astype(np.uint8))
+        row["fg_p01"] = float(np.percentile(Lf, 1))
+        if camera_ref and _is_number(camera_ref.get("fg_p01")):
+            row["fg_p01_diff"] = row["fg_p01"] - camera_ref["fg_p01"]
+    return row
+
+
+def camera_reference(camera_rgb8: np.ndarray, rois: dict[str, tuple[int, int, int, int] | None]) -> dict[str, Any]:
+    """カメラ JPEG の基準値（mid_p50・cloud_grad の L>0.8 マスク・grad_texture・勾配方向・fg_p01）。"""
+    L = luma_of(camera_rgb8.astype(np.float32) / 255.0)
+    ref: dict[str, Any] = {}
+    if rois.get("midtone"):
+        ref["mid_p50"] = float(np.percentile(_crop(L, rois["midtone"]), 50))
+    if rois.get("cloud_grad"):
+        Lc = _crop(L, rois["cloud_grad"])
+        ref["cloud_mask"] = Lc > 0.8
+        ref["grad_texture"] = grad_texture(Lc, ref["cloud_mask"])
+        ref["cloud_angle"] = dominant_gradient_angle(Lc)
+    if rois.get("fg_dark"):
+        ref["fg_p01"] = float(np.percentile(_crop(L, rois["fg_dark"]), 1))
+    return ref
+
+
+def _roi_attr(counts: dict[str, int] | None, prefix: str, roi_pixels: int) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if counts is None:
+        return out
+    k = counts.get("k", 0)
+    out[f"{prefix}_k_frac"] = k / roi_pixels if roi_pixels else float("nan")
+    for c in ATTR_CATEGORIES:
+        out[f"{prefix}_{c}"] = counts.get(c, 0) / k if k else float("nan")
+    return out
+
+
+def diagnosis_measure(
+    images: dict[str, np.ndarray],
+    white: dict[str, np.ndarray],
+    levels: dict[str, int],
+    dumps: dict[str, np.ndarray],
+    cfa: dict[str, Any] | None,
+    rois: dict[str, tuple[int, int, int, int] | None],
+    roi_size: int,
+    *,
+    p3_native_white: np.ndarray | None = None,
+    cli_any_gt_1: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """1 カット分の指標・帰属・シーン判定（ファイル I/O 無し。同寸に揃えた配列を受ける）。
+
+    - images: variant → RGB 0..1 float（camera / rawpy / d_* / c*。tiff は 16bit 値、jpeg は 8bit 値）
+    - white: variant → チャンネル別の白マスク（jpeg は 255、tiff は 65535。P3 tiff は sRGB へ変換後）
+    - dumps: d_s1_linear / d_s2_tone / d_s3_default → 線形 float（lens OFF 幾何）
+    - cfa: {"metrics", "map_libraw", "map_camera", "thumb"}（マップ・サムネイルは同寸・正立、位置合わせ前）
+    返す: (variant → 指標行, summary)。行には "stages"（段階・帰属・シーン判定）と "cfa" を含む。
+    """
+    camera = images["camera"]
+    cam_gray = _gray8(camera)
+    cam_ref = camera_reference(to8(camera), rois)
+    rows: dict[str, dict[str, Any]] = {}
+    aligns: dict[str, dict[str, dict[str, Any]]] = {}
+    for variant, rgb in images.items():
+        align = identity_alignment(rois) if variant == "camera" else align_rois(cam_gray, _gray8(rgb), rois, roi_size)
+        aligns[variant] = align
+        rows[variant] = image_variant_metrics(rgb, white[variant], levels.get(variant, 255), align, cam_ref)
+    if p3_native_white is not None and "d_tiff_p3" in rows:
+        for i, ch in enumerate("rgb"):
+            rows["d_tiff_p3"][f"clip16p3_{ch}"] = float(p3_native_white[..., i].mean())
+        rows["d_tiff_p3"]["clip16p3_any"] = float(p3_native_white.any(axis=2).mean())
+    stages: dict[str, Any] = {}
+    summary: dict[str, Any] = {"alignment": {v: {n: {k: a.get(k) for k in ("box", "dx", "dy", "response", "ok", "shift_source")}
+                                                  for n, a in al.items()} for v, al in aligns.items()}}
+    # --- 段階（全画面） ---
+    s1, s2, s3 = (dumps.get(v) for v in DIAG_STAGE_VARIANTS)
+    white_f = {name: (d >= WHITE16_LINEAR).any(axis=2) for name, d in (("s1", s1), ("s2", s2), ("s3", s3)) if d is not None}
+    if s1 is not None:
+        stages.update(stage_rates(s1, "s1_gt1"))
+    if s2 is not None:
+        stages.update(stage_rates(s2, "s2_gt1"))
+    if s3 is not None:
+        stages.update(stage_rates(s3, "s3_ge1", WHITE16_LINEAR, strict=False))
+    for name, dump in zip(("s1", "s2", "s3"), (s1, s2, s3)):
+        variant = DIAG_STAGE_VARIANTS[("s1", "s2", "s3").index(name)]
+        cli = (cli_any_gt_1 or {}).get(variant)
+        if dump is not None and _is_number(cli):
+            stages[f"{name}_cli_any_gt_1_diff"] = float((dump > 1.0).any(axis=2).mean()) - float(cli)
+    if "s1" in white_f and "s2" in white_f:
+        stages["stage_loss_s1s2"] = stage_loss(white_f["s1"], white_f["s2"])
+    if "s2" in white_f and "s3" in white_f:
+        stages["stage_loss_s2s3"] = stage_loss(white_f["s2"], white_f["s3"])
+    if "s3" in white_f and "d_tiff_srgb" in white:
+        # S3 は lens OFF、S4 は lens ON で幾何が違うので画素単位にできない。白の率の差で代える（符号付き）。
+        stages["stage_loss_s3s4"] = float(white["d_tiff_srgb"].any(axis=2).mean()) - float(white_f["s3"].mean())
+    if "d_tiff_srgb" in white and "d_base" in white:
+        stages["stage_loss_s4s5"] = stage_loss(white["d_tiff_srgb"].any(axis=2), white["d_base"].any(axis=2))
+    for key in ("clip16_any", "clip16_b"):
+        if key in rows.get("d_tiff_srgb", {}):
+            stages[key] = rows["d_tiff_srgb"][key]
+    for key in ("clip8_any", "clip8_b", "blue_only_clip"):
+        if key in rows.get("d_base", {}):
+            stages[key] = rows["d_base"][key]
+    # S2 vs S3: S2 が [0,1] の画素の差（§8.4）と ΔE76（§8.2 delta_e76_inrange）
+    if s2 is not None and s3 is not None and s2.shape == s3.shape:
+        inrange = ((s2 >= 0.0) & (s2 <= 1.0)).all(axis=2)
+        stages["s2_inrange_frac"] = float(inrange.mean())
+        if inrange.any():
+            diff = np.abs(s2 - s3).max(axis=2)[inrange]
+            stages["s2s3_inrange_absdiff_mean"] = float(diff.mean())
+            stages["s2s3_inrange_absdiff_max"] = float(diff.max())
+            lab2 = cv2.cvtColor(srgb_encode(np.clip(s2, 0, 1)), cv2.COLOR_RGB2Lab)[inrange]
+            lab3 = cv2.cvtColor(srgb_encode(np.clip(s3, 0, 1)), cv2.COLOR_RGB2Lab)[inrange]
+            stages["delta_e76_inrange"] = float(np.sqrt(((lab2 - lab3) ** 2).sum(axis=1)).mean())
+    # lens ON/OFF のクリップ差（§7.3 の前提）
+    if "d_base" in rows and "d_lens_off" in rows:
+        stages["lens_clip_diff"] = rows["d_base"].get("clip8_any", float("nan")) - rows["d_lens_off"].get("clip8_any", float("nan"))
+        for name in DIAG_CLIP_ROIS:
+            a, b = rows["d_base"].get(f"{name}_clip8_any"), rows["d_lens_off"].get(f"{name}_clip8_any")
+            if _is_number(a) and _is_number(b):
+                stages[f"{name}_lens_clip_diff"] = a - b
+    # --- lens OFF 幾何での画素照合（§7.3 / §10.1） ---
+    off_align = aligns.get("d_lens_off")
+    off_boxes = {n: (off_align or {}).get(n, {}).get("box") for n in DIAG_ROI_NAMES}
+    cfa_ok = False
+    sensor_maps: dict[str, np.ndarray | None] = {"libraw": None, "camera": None}
+    if cfa is not None and "d_lens_off" in images:
+        thumb = cfa.get("thumb")
+        if thumb is not None and thumb.shape == cam_gray.shape:
+            thumb8 = to8(srgb_encode(np.clip(thumb / max(1e-6, float(np.percentile(thumb, 99.5))), 0, 1)))
+            dx, dy, response = global_shift(_gray8(images["d_lens_off"]), thumb8)
+            cfa_ok = response >= ROI_MIN_RESPONSE and math.hypot(dx, dy) <= roi_size / 4.0
+            stages.update({"cfa_shift_dx": dx, "cfa_shift_dy": dy, "cfa_shift_response": response, "cfa_align_ok": cfa_ok})
+            if cfa_ok:
+                for tag in ("libraw", "camera"):
+                    sensor_maps[tag] = shift_mask(cfa[f"map_{tag}"] > 0, -dx, -dy)
+    stage_ok = all(d is not None and d.shape[:2] == cam_gray.shape for d in (s2, s3))
+    s2_over = (s2 > 1.0).any(axis=2) if stage_ok else None
+    s3_white8 = (s3 >= WHITE8_LINEAR).any(axis=2) if stage_ok else None
+    clipped_off = white["d_lens_off"].any(axis=2) if "d_lens_off" in white else None
+    attribution: dict[str, Any] = {}
+    roi_class: dict[str, str] = {}
+    roi_counts: dict[str, dict[str, int] | None] = {}
+    for name in ("sky_bright", "cloud_grad", "full"):
+        box = (0, 0, cam_gray.shape[1], cam_gray.shape[0]) if name == "full" else off_boxes.get(name)
+        if clipped_off is None or (box is None and rois.get(name) is not None):
+            roi_class[name] = "unverifiable" if rois.get(name) is not None or name == "full" else "no_roi"
+            roi_counts[name] = None
+            continue
+        if box is None:
+            roi_class[name], roi_counts[name] = "no_roi", None
+            continue
+        roi_pixels = (box[2] - box[0]) * (box[3] - box[1])
+        classes = {}
+        for tag in ("libraw", "camera"):
+            counts = attribute_pixels(
+                _crop(clipped_off, box), _crop(sensor_maps[tag], box) if sensor_maps[tag] is not None else None,
+                _crop(s2_over, box) if s2_over is not None else None, _crop(s3_white8, box) if s3_white8 is not None else None,
+                valid=cfa_ok and stage_ok,
+            )
+            classes[tag] = classify_attribution(counts, roi_pixels)
+            if tag == "libraw":
+                roi_counts[name] = counts
+                attribution.update(_roi_attr(counts, f"attr_{name}", roi_pixels))
+        roi_class[name] = classes["libraw"]
+        attribution[f"attr_{name}_class"] = classes["libraw"]
+        attribution[f"attr_{name}_class_camera_threshold"] = classes["camera"]
+        attribution[f"attr_{name}_sensor_threshold_sensitive"] = classes["libraw"] != classes["camera"]
+        if name != "full":
+            for prefix, d, strict, thr in (("s1_gt1", s1, True, 1.0), ("s2_gt1", s2, True, 1.0), ("s3_ge1", s3, False, WHITE16_LINEAR)):
+                if d is not None and d.shape[:2] == cam_gray.shape:
+                    attribution.update({f"{name}_{k}": v for k, v in stage_rates(_crop(d, box), prefix, thr, strict).items()
+                                        if k.endswith(("_any", "_b"))})
+            if sensor_maps["libraw"] is not None:
+                attribution[f"{name}_cfa_sat_cell_any"] = float(_crop(sensor_maps["libraw"], box).mean())
+    stages.update(attribution)
+    # S1 / S2 に cloud_grad の階調が残るか（§9 の実施条件・§10.2）。dump を表示化して camera のマスクで測る。
+    cloud_box = off_boxes.get("cloud_grad")
+    mask = cam_ref.get("cloud_mask")
+    for name, dump in (("s1", s1), ("s2", s2)):
+        if dump is not None and cloud_box is not None and mask is not None and _is_number(cam_ref.get("grad_texture")) and cam_ref["grad_texture"] > 0:
+            Lc = display_luma(_crop(dump, cloud_box))
+            if Lc.shape == mask.shape:
+                stages[f"{name}_grad_texture_ratio"] = grad_texture(Lc, mask) / cam_ref["grad_texture"]
+    # §8.4 トーン曲線の大域性: S1 に §2.4 の曲線を掛けて S2 と比べる（cloud_grad / midtone の ΔL p99）
+    if s1 is not None and s2 is not None and s1.shape == s2.shape:
+        curve = pchip_curve(TONE_CURVE_BOOST1)
+        verdicts = []
+        for name in ("cloud_grad", "midtone"):
+            box = off_boxes.get(name)
+            if box is None:
+                continue
+            pred = curve(_crop(s1, box).astype(np.float64)).astype(np.float32)
+            dl = np.abs(luma_of(pred) - luma_of(_crop(s2, box)))
+            stages[f"curve_check_dl_p99_{name}"] = float(np.percentile(dl, 99))
+            verdicts.append(stages[f"curve_check_dl_p99_{name}"] <= CURVE_CHECK_TOL)
+        stages["curve_global"] = all(verdicts) if verdicts else None
+    # --- 露出掃引の内挿（§8.3） ---
+    sweep = [(rows[v].get("mid_p50"), v) for v, _ in DIAG_EV_SWEEP if v in rows]
+    interp_rows = {}
+    for target_name, target_p50 in (("camera", rows.get("camera", {}).get("mid_p50")), ("rawpy", rows.get("rawpy", {}).get("mid_p50"))):
+        if not _is_number(target_p50) or len(sweep) < 2:
+            continue
+        keys = sorted({k for _, v in sweep for k, val in rows[v].items() if _is_number(val) and not isinstance(val, bool)})
+        irow: dict[str, Any] = {"interpolated": True, "interp_target": target_name, "interp_target_p50": target_p50}
+        for key in keys:
+            irow[key] = interp_at([(rows[v].get("mid_p50"), rows[v].get(key)) for _, v in sweep], target_p50)
+        irow["interp_ok"] = _is_number(irow.get("mid_p50"))
+        irow["interp_ev"] = interp_at([(rows[v].get("mid_p50"), ev) for v, ev in DIAG_EV_SWEEP if v in rows], target_p50)
+        interp_rows[f"d_interp_{target_name}_p50"] = irow
+    rows.update(interp_rows)
+    # --- タスク C の合否と c_best（§9） ---
+    cam_row = rows.get("camera", {})
+    for name in (*C_CANDIDATES, "c_best"):
+        if name in rows:
+            rows[name].update(candidate_checks(rows[name], cam_row))
+    best = choose_c_best(rows)
+    eligible_ratios = [stages.get("s1_grad_texture_ratio"), stages.get("s2_grad_texture_ratio")]
+    eligible = any(_is_number(r) and r >= GRAD_RECOVER_MIN for r in eligible_ratios)
+    stages["taskc_eligible"] = eligible
+    stages["c_best"] = best["best"]
+    stages["c_best_within_tol"] = best["within_tol"]
+    # --- シーン判定（§10.2） ---
+    scene = classify_scene_diagnosis(
+        roi_class, roi_counts,
+        [rows.get(v, {}).get("grad_texture_ratio") for v in ("d_ev-07", "d_ev-10")],
+        stages.get("s1_grad_texture_ratio", float("nan")), stages.get("cloud_grad_cfa_sat_cell_any", float("nan")),
+    )
+    stages["scene_class"] = scene
+    rows["stages"] = stages
+    if cfa is not None:
+        rows["cfa"] = dict(cfa.get("metrics") or {})
+    summary.update({"roi_class": roi_class, "scene_class": scene, "c_best": best, "taskc_eligible": eligible,
+                    "cfa_align_ok": cfa_ok, "stages_ok": stage_ok})
+    return rows, summary
+
+
+# --- 実行（CLI 呼び出し・I/O） -------------------------------------------------------
+
+
+def develop_diagnosis_variants(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    specs: dict[str, dict[str, Any]],
+    *,
+    with_rawpy: bool = True,
+    workers: int = 4,
+) -> dict[str, dict[str, Any]]:
+    """CI バリアント（と rawpy）を現像する。full の dump（288 MB）は同時 1 本にする（§6.3 / §12）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(variant: str) -> dict[str, Any]:
+        spec = specs[variant]
+        dump_path = diagnosis_dump_path(ctx.out, capture_id, mode, variant) if spec.get("dump") else None
+        if dump_path is not None:
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+        kwargs = diagnosis_request_kwargs(spec, dump_path)
+        row = run_coreimage(ctx, capture_id, mode, spec["lens"], variant=variant, **kwargs)
+        row["spec_label"] = spec.get("label")
+        return row
+
+    results: dict[str, dict[str, Any]] = {}
+    serial = [v for v in specs if specs[v].get("dump")] if mode == "full" else []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        jobs = {v: pool.submit(one, v) for v in specs if v not in serial}
+        if with_rawpy:
+            jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
+        results.update({v: f.result() for v, f in jobs.items()})
+    for variant in serial:
+        results[variant] = one(variant)
+    return results
+
+
+def _read_response(row: dict[str, Any]) -> dict[str, Any]:
+    output = row.get("output")
+    if not output:
+        return {}
+    path = Path(output).with_suffix(".json")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def load_diagnosis_images(
+    engine_rows: dict[str, dict[str, Any]],
+    target: tuple[int, int],
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, int], dict[str, np.ndarray], dict[str, Any], np.ndarray | None]:
+    """現像結果を読み、target 寸法に揃える。dump は応答の meta を検査して読む（§4.4）。"""
+    images: dict[str, np.ndarray] = {}
+    white: dict[str, np.ndarray] = {}
+    levels: dict[str, int] = {}
+    dumps: dict[str, np.ndarray] = {}
+    cli_any: dict[str, Any] = {}
+    p3_native = None
+    for variant, row in engine_rows.items():
+        if row.get("error"):
+            continue
+        try:
+            payload = _read_response(row) if variant != "rawpy" else {}
+            diag = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else None
+            if diag and isinstance(diag.get("dump_float"), dict):
+                dump = load_dump(diag["dump_float"])
+                dumps[variant], row["fit"] = fit_to_target(dump, target)
+                cli_any[variant] = (diag.get("stats") or {}).get("any_gt_1")
+                continue
+            if diag is not None and diag.get("written") is False:
+                continue
+            path = Path(row["output"])
+            if path.suffix.lower() in (".tif", ".tiff"):
+                rgb = read_tiff16_rgb(path)
+                rgb, row["fit"] = fit_to_target(rgb, target)
+                if variant == "d_tiff_p3":
+                    p3_native = rgb >= (1.0 - 0.5 / 65535.0)
+                    rgb_srgb = p3_to_srgb(rgb)
+                    white[variant] = rgb_srgb >= (1.0 - 0.5 / 65535.0)
+                    rgb = np.clip(rgb_srgb, 0.0, 1.0)
+                else:
+                    white[variant] = rgb >= (1.0 - 0.5 / 65535.0)
+                images[variant], levels[variant] = rgb.astype(np.float32), 65535
+            else:
+                src = read_rgb_upright(path)
+                row["native_width"], row["native_height"] = src.shape[1], src.shape[0]
+                rgb8, row["fit"] = fit_to_target(src, target)
+                images[variant], white[variant], levels[variant] = rgb8.astype(np.float32) / 255.0, rgb8 >= 255, 255
+        except Exception as error:  # noqa: BLE001 — 1 バリアントの読み込み失敗は欠測にする
+            row["error"] = f"load failed: {type(error).__name__}: {error}"
+    return images, white, levels, dumps, cli_any, p3_native
+
+
+def diagnosis_capture(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    features: dict[str, Any],
+    category: str,
+    *,
+    cfa: dict[str, Any] | None,
+    best: str | None = None,
+    with_rawpy: bool = True,
+    keep_dumps: bool = False,
+    workers: int = 4,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """1 カット・1 mode の診断: 現像 → 読み込み → ROI → 指標・帰属 → シート → dump 削除。"""
+    specs = diagnosis_mode_specs(mode, best)
+    engine_rows = develop_diagnosis_variants(ctx, capture_id, mode, specs, with_rawpy=with_rawpy, workers=workers)
+    try:
+        camera = read_rgb_upright(source_file(ctx.source_root, capture_id, "JPG"))
+        ch, cw = camera.shape[:2]
+        target = fit_size(cw, ch, ctx.max_edge) if mode == "preview" else (cw, ch)
+        images, white, levels, dumps, cli_any, p3_native = load_diagnosis_images(engine_rows, target)
+        cam8 = resize_to(camera, target)
+        images["camera"], white["camera"], levels["camera"] = cam8.astype(np.float32) / 255.0, cam8 >= 255, 255
+        roi_size = max(8, int(round(ROI_FRACTION * max(target))))
+        rois, roi_info = diagnosis_rois(cam8, roi_size)
+        cfa_t = None
+        if cfa is not None:
+            cfa_t = {
+                "metrics": cfa["metrics"],
+                "map_libraw": resize_cell_map(cfa["map_libraw"], target),
+                "map_camera": resize_cell_map(cfa["map_camera"], target),
+                "thumb": cv2.resize(cfa["thumb"], target, interpolation=cv2.INTER_AREA if cfa["thumb"].shape[1] >= target[0] else cv2.INTER_LINEAR),
+            }
+        metrics, summary = diagnosis_measure(images, white, levels, dumps, cfa_t, rois, roi_size,
+                                             p3_native_white=p3_native, cli_any_gt_1=cli_any)
+        diagnosis_sheets(ctx, capture_id, mode, images, rois, metrics, best or summary["c_best"].get("best"))
+    finally:
+        if not keep_dumps:
+            for variant, spec in specs.items():
+                if spec.get("dump"):
+                    with contextlib.suppress(FileNotFoundError):
+                        diagnosis_dump_path(ctx.out, capture_id, mode, variant).unlink()
+    base = {"capture_id": capture_id, "mode": mode, "category": category, "iso": features.get("iso"),
+            "lens_model": features.get("lens_model"), "focal_length": features.get("focal_length"),
+            "width": target[0], "height": target[1], "roi_size": roi_size}
+    rows = []
+    order = ["camera", "rawpy", *specs, *(["c_best"] if mode == "preview" else []), "d_interp_camera_p50", "d_interp_rawpy_p50", "cfa", "stages"]
+    for variant in order:
+        if variant == "rawpy" and not with_rawpy:
+            continue
+        if variant == "c_best" and mode == "preview":
+            name = summary["c_best"].get("best")
+            if not name:
+                continue
+            row = {**base, "variant": "c_best", "c_best_of": name, **engine_rows.get(name, {}), **metrics.get(name, {})}
+            rows.append(row)
+            continue
+        if variant not in metrics and variant not in engine_rows:
+            continue
+        row = {**base, "variant": variant, **engine_rows.get(variant, {}), **metrics.get(variant, {})}
+        if variant == "c_best":
+            row["c_best_of"] = best
+        if variant in engine_rows and variant not in metrics and not row.get("error") and variant not in DIAG_STAGE_VARIANTS:
+            row["error"] = "no image"
+        rows.append(row)
+    summary.update({"rois": {k: list(v) if v else None for k, v in rois.items()}, "roi_info": roi_info,
+                    "target": list(target), "dumps_kept": keep_dumps})
+    return rows, summary
+
+
+def diagnosis_sheets(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    images: dict[str, np.ndarray],
+    rois: dict[str, tuple[int, int, int, int] | None],
+    metrics: dict[str, dict[str, Any]],
+    best: str | None,
+) -> None:
+    """目視シート（§9 (6)）: ROI 枠付きのカメラ全景と、camera / rawpy / d_base / 候補 の 4 列
+    （全景・cloud_grad 等倍・fg_dark 等倍）。EXIF は付けない。"""
+    camera = to8(images["camera"])
+    th, tw = camera.shape[:2]
+    small = fit_size(tw, th, 600)
+    sx = small[0] / tw
+    canvas = Image.fromarray(resize_to(camera, small))
+    draw = ImageDraw.Draw(canvas)
+    colors = {"sky_bright": (80, 160, 255), "cloud_grad": (255, 255, 255), "clip_edge": (255, 80, 200),
+              "fg_dark": (255, 200, 60), "midtone": (120, 255, 120)}
+    for name, box in rois.items():
+        if box is None:
+            continue
+        x0, y0, x1, y1 = (int(round(v * sx)) for v in box)
+        draw.rectangle((x0, y0, x1, y1), outline=colors.get(name, (255, 0, 0)), width=2)
+        draw.text((x0 + 3, y0 + 2), name, fill=colors.get(name, (255, 0, 0)), font=_font(14))
+    save_plain_jpeg(np.asarray(canvas), ctx.out / "sheets" / f"{capture_id}_{mode}_rois.jpg", quality=92)
+    candidates = [c for c in (*C_CANDIDATES, "c_best") if c in images]
+    if mode == "preview" and best in images:
+        candidates = [best] + [c for c in candidates if c != best]
+    overview = fit_size(tw, th, 400)
+    for cand in candidates:
+        columns = [v for v in ("camera", "rawpy", "d_base", cand) if v in images]
+        sheet_rows = []
+        panels = []
+        for v in columns:
+            m = metrics.get(v, {})
+            label = f"{v}\nclip {m.get('clip8_any', float('nan')) * 100:.2f}%  p50d {m.get('mid_p50_diff', float('nan')):+.3f}"
+            panels.append((label, resize_to(to8(images[v]), overview)))
+        sheet_rows.append(labeled_row(panels, f"{capture_id} {mode} overview  ({cand})"))
+        for roi in ("cloud_grad", "fg_dark"):
+            box = rois.get(roi)
+            if box is None:
+                continue
+            crops = []
+            for v in columns:
+                a = align_rois(_gray8(images["camera"]), _gray8(images[v]), {roi: box}, box[2] - box[0]).get(roi, {}) if v != "camera" else {"box": box}
+                vbox = a.get("box") or box
+                m = metrics.get(v, {})
+                key = "grad_texture_ratio" if roi == "cloud_grad" else "fg_p01_diff"
+                crops.append((f"{v} {roi}\n{key} {m.get(key, float('nan')):.3f}", to8(_crop(images[v], vbox))))
+            sheet_rows.append(labeled_row(crops, f"{roi} 1:1"))
+        width = max(r.shape[1] for r in sheet_rows)
+        padded = [np.pad(r, ((0, 8), (0, width - r.shape[1]), (0, 0)), constant_values=24) for r in sheet_rows]
+        save_plain_jpeg(np.concatenate(padded, axis=0), ctx.out / "sheets" / f"{capture_id}_{mode}_{cand}.jpg", quality=92)
+
+
+def diagnosis_tables_md(rows: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> str:
+    """レポート転記用の Markdown（シーン判定・帰属・段階・候補合否・バリアント別の中央値）。"""
+    def fmt(v: Any, digits: int = 4) -> str:
+        if v is None:
+            return "—"
+        if isinstance(v, bool):
+            return "yes" if v else "no"
+        if isinstance(v, float):
+            return "NaN" if not math.isfinite(v) else f"{v:.{digits}f}"
+        return str(v)
+
+    stage_rows = [r for r in rows if r.get("variant") == "stages"]
+    cfa_by = {(r["capture_id"], r["mode"]): r for r in rows if r.get("variant") == "cfa"}
+    lines = ["## シーン判定と帰属（§10）", "",
+             "| capture | mode | scene | sky_bright | cloud_grad | sens.(cam thr) | cfa G | cfa B | cfa cell_any | s1>1 any | s2>1 any | s3≥1 any | clip8 any | c_best | eligible |",
+             "|" + "---|" * 15]
+    for r in stage_rows:
+        c = cfa_by.get((r["capture_id"], r["mode"]), {})
+        sens = r.get("attr_sky_bright_sensor_threshold_sensitive") or r.get("attr_cloud_grad_sensor_threshold_sensitive")
+        lines.append("| " + " | ".join([
+            r["capture_id"], r["mode"], fmt(r.get("scene_class")), fmt(r.get("attr_sky_bright_class")),
+            fmt(r.get("attr_cloud_grad_class")), fmt(sens), fmt(c.get("cfa_sat_g")), fmt(c.get("cfa_sat_b")),
+            fmt(c.get("cfa_sat_cell_any")), fmt(r.get("s1_gt1_any")), fmt(r.get("s2_gt1_any")), fmt(r.get("s3_ge1_any")),
+            fmt(r.get("clip8_any")), fmt(r.get("c_best")), fmt(r.get("taskc_eligible"))]) + " |")
+    lines += ["", "## 帰属の内訳（K に占める割合、lens OFF 幾何）", "",
+              "| capture | mode | ROI | K/ROI | sensor | decoder_tone | gamut_output | unverifiable |", "|" + "---|" * 8]
+    for r in stage_rows:
+        for roi in ("sky_bright", "cloud_grad", "full"):
+            if f"attr_{roi}_k_frac" not in r:
+                continue
+            lines.append("| " + " | ".join([r["capture_id"], r["mode"], roi, fmt(r.get(f"attr_{roi}_k_frac"))]
+                                           + [fmt(r.get(f"attr_{roi}_{c}")) for c in ATTR_CATEGORIES]) + " |")
+    lines += ["", "## 段階と検査（§8.1 / §8.4）", "",
+              "| capture | mode | loss s1s2 | loss s2s3 | loss s3s4 (rate diff) | loss s4s5 | ΔE in-range | S2/S3 absdiff mean | curve ΔL p99 cloud | curve ΔL p99 mid | lens clip diff |",
+              "|" + "---|" * 11]
+    for r in stage_rows:
+        lines.append("| " + " | ".join([r["capture_id"], r["mode"]] + [fmt(r.get(k)) for k in (
+            "stage_loss_s1s2", "stage_loss_s2s3", "stage_loss_s3s4", "stage_loss_s4s5", "delta_e76_inrange",
+            "s2s3_inrange_absdiff_mean", "curve_check_dl_p99_cloud_grad", "curve_check_dl_p99_midtone", "lens_clip_diff")]) + " |")
+    cand_rows = [r for r in rows if r.get("variant") in C_CANDIDATES]
+    lines += ["", "## タスク C 候補の合否（§9。(6) 目視はオーナー）", "",
+              "| capture | mode | candidate | mid_p50_diff | sky clip8 | grad_texture_ratio | fg_p01_diff | magenta | p50 | clip | texture | fg | magenta | auto |",
+              "|" + "---|" * 14]
+    for r in cand_rows:
+        lines.append("| " + " | ".join([r["capture_id"], r["mode"], r["variant"]] + [fmt(r.get(k)) for k in (
+            "mid_p50_diff", "sky_bright_clip8_any", "grad_texture_ratio", "fg_p01_diff", "magenta_rate",
+            "c_pass_p50", "c_pass_clip", "c_pass_texture", "c_pass_fg", "c_pass_magenta", "c_pass_auto")]) + " |")
+    variant_rows = [r for r in rows if r.get("variant") not in ("stages", "cfa") and not r.get("error")]
+    by_variant = summarize_sharpness(variant_rows, DIAG_TABLE_KEYS, ("mode", "variant"))
+    lines += ["", "## バリアント別の中央値", "", table_md(by_variant, ("mode", "variant"), DIAG_TABLE_KEYS, digits=4)]
+    return "\n".join(lines) + "\n"
+
+
+def diagnosis_plan(ctx: RunContext, capture_ids: list[str], full_ids: list[str]) -> list[dict[str, Any]]:
+    """--diagnosis --dry-run: 組んだリクエストと契約検査の結果（CLI は呼ばない）。full の c_best は未定なので除く。"""
+    plan = []
+    for cid, mode in [(c, "preview") for c in capture_ids] + [(c, "full") for c in full_ids]:
+        for variant, spec in diagnosis_mode_specs(mode).items():
+            dump_path = diagnosis_dump_path(ctx.out, cid, mode, variant) if spec.get("dump") else None
+            kwargs = diagnosis_request_kwargs(spec, dump_path)
+            output = coreimage_output_path(ctx, cid, mode, spec["lens"], variant=variant, output_format=kwargs["output_format"])
+            request = coreimage_request(source_file(ctx.source_root, cid, "ARW"), output, mode, spec["lens"],
+                                        max_edge=ctx.max_edge, **kwargs)
+            plan.append({"capture_id": cid, "mode": mode, "variant": variant, "request": request,
+                         "problems": validate_diagnostics_request(request)})
+    return plan
+
+
+def diagnosis_dry_run(ctx: RunContext, capture_ids: list[str], full_ids: list[str]) -> None:
+    plan = diagnosis_plan(ctx, capture_ids, full_ids)
+    version = cli_probe(ctx.cli, "--version")
+    capabilities = cli_probe(ctx.cli, "--capabilities") if not version.get("error") else {}
+    problem = diagnosis_cli_problem(version, capabilities)
+    problems = [p for p in plan if p["problems"]]
+    payload = {"capture_ids": capture_ids, "full_ids": full_ids, "cli": str(ctx.cli), "cli_version": version,
+               "cli_ready": problem is None, "cli_problem": problem, "count": len(plan),
+               "contract_problems": [{k: p[k] for k in ("capture_id", "mode", "variant", "problems")} for p in problems],
+               "plan": plan}
+    (ctx.out / "diagnosis_plan.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    ctx.say(f"[diagnosis] dry-run: CI {len(plan)} リクエスト → {ctx.out / 'diagnosis_plan.json'}")
+    if problem:
+        ctx.say(f"[diagnosis] 注意: 実行時はここで止まります — {problem}")
+    if problems:
+        raise SystemExit(f"--diagnosis のリクエストが設計書 §4 の契約に反します（{len(problems)} 件）")
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value) if math.isfinite(float(value)) else None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        return None
+    return value
+
+
+def run_diagnosis(
+    ctx: RunContext,
+    selection: list[dict[str, Any]],
+    features_by_id: dict[str, dict[str, Any]],
+    full_ids: list[str],
+    *,
+    keep_dumps: bool = False,
+    with_rawpy: bool = True,
+    cfa_loader: Any = None,
+    environment: dict[str, Any] | None = None,
+) -> None:
+    """--diagnosis 本体: preview を全カット回してから full（c_best は preview の結果で決める）。"""
+    import shutil
+
+    loader = cfa_loader or (lambda cid, orientation: cfa_from_file(source_file(ctx.source_root, cid, "ARW"), orientation))
+    started = time.monotonic()
+    free = shutil.disk_usage(ctx.out).free
+    if free < 5 * 1024**3:
+        ctx.say(f"[diagnosis] 注意: 出力先の空きが {free / 1024**3:.1f} GB です（§12 の目安は 5 GB 以上）")
+    rows: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    rois_out: dict[str, dict[str, Any]] = {}
+    cfa_cache: dict[str, dict[str, Any] | None] = {}
+    best_by_id: dict[str, str | None] = {}
+    errors: list[dict[str, Any]] = []
+    cat_by_id = {r["capture_id"]: r["category"] for r in selection}
+    jobs = [(r["capture_id"], "preview") for r in selection] + [(cid, "full") for cid in full_ids]
+    for index, (cid, mode) in enumerate(jobs, 1):
+        ctx.say(f"[diagnosis] ({index}/{len(jobs)}) {cid} {mode}")
+        features = features_by_id[cid]
+        try:
+            if cid not in cfa_cache:
+                try:
+                    cfa_cache[cid] = loader(cid, features.get("orientation"))
+                except Exception as error:  # noqa: BLE001 — CFA が読めなくても CI 側の指標は出す
+                    cfa_cache[cid] = None
+                    errors.append({"capture_id": cid, "mode": mode, "variant": "cfa", "error": f"{type(error).__name__}: {error}"})
+                    ctx.say(f"  ERROR cfa: {type(error).__name__}: {error}")
+            new_rows, summary = diagnosis_capture(
+                ctx, cid, mode, features, cat_by_id.get(cid, "other"), cfa=cfa_cache[cid],
+                best=best_by_id.get(cid) if mode == "full" else None, with_rawpy=with_rawpy, keep_dumps=keep_dumps,
+            )
+            if mode == "preview":
+                best_by_id[cid] = summary["c_best"].get("best")
+            rows.extend(new_rows)
+            summaries.append({"capture_id": cid, "mode": mode, **summary})
+            rois_out.setdefault(cid, {})[mode] = summary["rois"]
+            for r in new_rows:
+                if r.get("error"):
+                    ctx.say(f"  ERROR {r['variant']}: {str(r['error'])[:300]}")
+        except Exception as error:  # noqa: BLE001 — 1 カットの失敗で全体を止めない
+            rows.append({"capture_id": cid, "mode": mode, "variant": "harness", "error": f"{type(error).__name__}: {error}"})
+            ctx.say(f"  ERROR {type(error).__name__}: {error}")
+        write_rows_csv(ctx.out / "diagnosis_metrics.csv", rows, ("capture_id", "mode", "variant"))
+    errors += [{k: r.get(k) for k in ("capture_id", "mode", "variant", "error")} for r in rows if r.get("error")]
+    specs = diagnosis_specs()
+    summary_payload = {
+        "out": str(ctx.out),
+        "environment": environment or {},
+        "captures": [{"capture_id": cid, **{k: features_by_id[cid].get(k) for k in (
+            "iso", "exposure_time", "f_number", "focal_length", "lens_model", "orientation")}} for cid in features_by_id],
+        "selection_count": len(selection), "full_ids": full_ids,
+        "variants": {v: {k: s[k] for k in ("label", "lens", "profile", "overrides", "extra_settings", "output_format",
+                                           "output_color_space", "adjustments", "diagnostics", "dump")} for v, s in specs.items()},
+        "full_variants": list(DIAG_FULL_VARIANTS),
+        "constants": {
+            "mid_p50_tol": MID_P50_TOL, "grad_texture_ratio_min": GRAD_TEXTURE_RATIO_MIN, "grad_recover_min": GRAD_RECOVER_MIN,
+            "fg_p01_drop_max": FG_P01_DROP_MAX, "magenta_rate_max": MAGENTA_RATE_MAX,
+            "attr_min_clip_fraction": ATTR_MIN_CLIP_FRACTION, "attr_major": ATTR_MAJOR_FRACTION, "attr_second": ATTR_SECOND_FRACTION,
+            "white16_linear": WHITE16_LINEAR, "white8_linear": WHITE8_LINEAR, "curve_check_tol": CURVE_CHECK_TOL,
+            "roi_fraction": ROI_FRACTION, "roi_min_response": ROI_MIN_RESPONSE,
+        },
+        "notes": {
+            "tone_curve": "§8.4 の曲線は設計書 §2.4（DSC04705・1200px の 1 カット）の定数置換の標本を PCHIP で補間したもの",
+            "stage_loss_s3s4": "S3（lens OFF）と S4（lens ON）は幾何が違うため、白の率の差（S4 − S3、符号付き）で代えた",
+            "attribution_rule3": "S3 の線形値が 8bit sRGB で 255 に丸まる（≥ WHITE8_LINEAR）なら色域・SDR 出力（clamp・量子化）",
+            "classification": "最大の帰属が 50% 未満のときは mixed",
+            "fg_dark": "構造の閾値は箱の Laplacian 平均の中央値（相対）",
+        },
+        "elapsed_total_s": time.monotonic() - started,
+        "errors": errors,
+        "by_capture": summaries,
+    }
+    (ctx.out / "diagnosis_summary.json").write_text(
+        json.dumps(_jsonable(summary_payload), ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    (ctx.out / "rois.json").write_text(json.dumps(rois_out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (ctx.out / "diagnosis_tables.md").write_text(diagnosis_tables_md(rows, summaries), encoding="utf-8")
+    (ctx.out / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    ctx.say(f"[diagnosis] 完了: {ctx.out}（エラー {len(errors)} 件）")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="rawpy と Core Image CLI を同じ ARW 群で比較します。")
     parser.add_argument("--source-root", type=Path, required=True)
@@ -3793,6 +5489,11 @@ def main(argv: list[str] | None = None) -> None:
         "--adjustments", action="store_true",
         help="Adjustments の評価モード（#72 / #73）: 掃引・後段オラクル・白点・既定リクエスト回帰。CLI 0.3.0 以上が必要",
     )
+    parser.add_argument(
+        "--diagnosis", action="store_true",
+        help="Core Image の白飛びの段階別診断（#92）: CFA 飽和・段階読み出し・ROI 帰属・タスク C 候補。CLI 0.4.0 以上が必要",
+    )
+    parser.add_argument("--keep-dumps", action="store_true", help="--diagnosis の float ダンプ（.f32）を指標の計算後も残す")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="選定だけ行って終了する（--adjustments では組んだリクエストを adjustments_plan.json に書いて契約を検査する）",
@@ -3884,6 +5585,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.adjustments and args.dry_run:
         adjustments_dry_run(ctx, [r["capture_id"] for r in selection])
         return
+    diagnosis_full_ids: list[str] = []
+    if args.diagnosis:
+        diagnosis_full_ids = [validate_capture_id(c) for c in (args.full_ids or [])] if args.full else []
+        if args.full and not args.full_ids:
+            diagnosis_full_ids = full_subset(selection, args.full_limit if args.full_limit > 0 else len(selection))
+        unknown = sorted(set(diagnosis_full_ids) - set(features_by_id))
+        if unknown:
+            raise SystemExit(f"--full-ids は選定済みのカットから指定してください: {', '.join(unknown)}")
+    if args.diagnosis and args.dry_run:
+        diagnosis_dry_run(ctx, [r["capture_id"] for r in selection], diagnosis_full_ids)
+        return
     if args.dry_run:
         return
 
@@ -3894,6 +5606,15 @@ def main(argv: list[str] | None = None) -> None:
         if problem:
             raise SystemExit(f"--adjustments を実行できません: {problem}")
         run_adjustments(ctx, selection, features_by_id)
+        if not (args.sharpness or args.night or args.highlight or args.bracket):
+            return
+    if args.diagnosis:
+        version, capabilities = cli_probe(ctx.cli, "--version"), cli_probe(ctx.cli, "--capabilities")
+        problem = diagnosis_cli_problem(version, capabilities)
+        if problem:
+            raise SystemExit(f"--diagnosis を実行できません: {problem}")
+        env = environment_info(ctx, None)
+        run_diagnosis(ctx, selection, features_by_id, diagnosis_full_ids, keep_dumps=args.keep_dumps, environment=env)
         if not (args.sharpness or args.night or args.highlight or args.bracket):
             return
 
