@@ -25,6 +25,10 @@ if [[ -z "$TRIPLE" ]]; then
   exit 1
 fi
 
+# 後段の Metal カーネル（Kernels/GeoFrameKernels.metal）→ metallib → Generated/KernelLibrary.swift。
+# 生成物が .metal より古いときだけ再生成する（最新なら Metal toolchain が無くても素通り。Issue #73）。
+bash scripts/build-coreimage-kernels.sh
+
 swift build -c release --package-path "$PACKAGE_DIR"
 BIN_DIR="$(swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)"
 SRC="$BIN_DIR/$NAME"
