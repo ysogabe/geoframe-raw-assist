@@ -1467,6 +1467,15 @@ class DiagnosisContractTests(unittest.TestCase):
                     self.assertNotIn("diagnostics", req)  # 通常モードの経路（§4.1 不変条件 1）
         self.assertEqual(specs["d_s1_linear"]["overrides"], {"boost_amount": 0.0})
         self.assertIs(specs["d_s1_linear"]["extra_settings"]["gamut_mapping"], False)
+        # T3（2026-10-21）: C1 の brightness は 1.0 固定（ガンマ空間の乗算で白側が戻るため。レポート §4）。
+        for name in ce.C1_SPECS:
+            self.assertEqual(specs[name]["adjustments"]["brightness"], 1.0)
+            self.assertLess(specs[name]["adjustments"]["exposure"], 0.0)
+        # C3 の CIToneCurve は sRGB ガンマ座標の制御点で、x・y とも単調増加（レポート §4）。
+        pts = [ce.C3_TONE_CURVE[f"inputPoint{i}"] for i in range(5)]
+        self.assertEqual(pts[0], [0.0, 0.0])
+        self.assertEqual(pts[4], [1.0, 1.0])
+        self.assertTrue(all(a[0] < b[0] and a[1] < b[1] for a, b in zip(pts, pts[1:])))
         full = ce.diagnosis_mode_specs("full", "c3_lin_curve")
         self.assertIn("d_lens_off", full)
         self.assertEqual(full["c_best"]["diagnostics"], specs["c3_lin_curve"]["diagnostics"])

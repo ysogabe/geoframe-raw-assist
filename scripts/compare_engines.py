@@ -3807,10 +3807,16 @@ ATTR_CATEGORIES = ("sensor", "decoder_tone", "gamut_output", "unverifiable")
 SCENE_SENSOR_FREE_MAX = 0.01
 #: §8.4: 標本化したトーン曲線を S1 に掛けた値と S2 の ΔL（線形輝度）p99 の許容。
 CURVE_CHECK_TOL = 0.01
-#: §2.4 の定数置換で標本化した boost 1（gamut OFF）の応答（DSC04705・1200px の 1 カットで得た値）。
-#: 0.05 / 0.18 は gamut ON 列の値（1.0 以下では ON / OFF が一致する）。2.0 超は最後の傾き（≈0.145）で外挿する。
-TONE_CURVE_BOOST1 = ((0.0, 0.0), (0.05, 0.0744), (0.18, 0.3875), (0.5, 0.8050), (0.8, 0.9573),
-                     (1.0, 1.0), (1.2, 1.0290), (1.5, 1.0725), (2.0, 1.1450))
+#: 定数置換（diagnostics.linear_space_filter constant）で標本化した boost 1（gamut OFF）の応答。
+#: 2026-10-21（T3）に DSC04705 / DSC04473 / DSC04432 / DSC04532（ISO 100 / 200 / 2000 / 100）で 19 点を標本化し、
+#: 4 カットとも 1e-5 以内で同値だった（画像に依存しない大域的な曲線）。0.0025〜0.015 は影側の追加標本（DSC04705）。
+#: 設計書 §2.4 の 9 点（1 カット）から置き換えた理由: 9 点の PCHIP では 0.3〜0.7 の補間誤差が ΔL 0.015 になり、
+#: §8.4 の許容 0.01 を超えて「局所適応」と誤判定した（実測の曲線は大域的）。2.7 超は最後の傾き（≈0.14）で外挿する。
+TONE_CURVE_BOOST1 = ((0.0, 0.0), (0.0025, 0.00191), (0.005, 0.00405), (0.01, 0.00897), (0.015, 0.01472),
+                     (0.02, 0.02126), (0.05, 0.07436), (0.1, 0.195), (0.18, 0.38745), (0.3, 0.59795),
+                     (0.4, 0.71799), (0.5, 0.805), (0.6, 0.87147), (0.7, 0.92126), (0.8, 0.9573),
+                     (0.9, 0.98257), (0.95, 0.99208), (1.0, 1.0), (1.1, 1.0145), (1.2, 1.029),
+                     (1.5, 1.0725), (2.0, 1.145), (2.5, 1.2175), (2.7, 1.2465))
 DIAG_ROI_NAMES = ("sky_bright", "cloud_grad", "clip_edge", "fg_dark", "midtone")
 #: §7.2: sky_bright の平行移動を流用する ROI（この順）。
 SKY_SHIFT_SOURCES = ("midtone", "clip_edge", "cloud_grad")
@@ -3836,21 +3842,29 @@ DIAG_REQUEST_TOP_KEYS = frozenset({
 DIAG_KEYS = frozenset({"stats", "stats_color_space", "dump_float", "linear_space_filter", "post_filters", "skip_write"})
 DIAG_COLOR_SPACES = ("linear_srgb", "linear_p3")
 
-#: タスク C の候補（§9）。C1 は adjustments（exposure + 後段の lift / brightness）、C2 は settings.exposure_ev +
+#: タスク C の候補（§9）。C1 は adjustments（exposure + 後段の lift）、C2 は settings.exposure_ev +
 #: CIHighlightShadowAdjust、C3 は線形読み出し（boost 0 + gamut OFF）+ 自前トーン圧縮。
+#: C1 の brightness は 1.0 に固定する。後段の brightness は sRGB ガンマ空間の乗算（geoframe_tone）なので 1.1 でも
+#: ガンマ値 0.91（線形 0.80）以上が白に戻り、計測 1 回目（2026-10-21）では exposure −0.7 で 0 だった sky_bright の
+#: clip8 が 0.78〜0.98 に戻った。lift（ピーク x≈1/3、x=1 で 0）だけで中間調を戻す。lift 40 / 55 は 10 カットの掃引
+#: （lift 25〜55）で |mid_p50_diff| ≤ 0.03 を満たすカットが最多だった値。
 C1_SPECS = {
-    "c1_ev-07_lift": {"exposure": -0.7, "shadow_lift": 45.0, "brightness": 1.10},
-    "c1_ev-10_lift": {"exposure": -1.0, "shadow_lift": 60.0, "brightness": 1.15},
+    "c1_ev-07_lift": {"exposure": -0.7, "shadow_lift": 40.0, "brightness": 1.0},
+    "c1_ev-10_lift": {"exposure": -1.0, "shadow_lift": 55.0, "brightness": 1.0},
 }
 C2_HSA = {"name": "CIHighlightShadowAdjust", "inputHighlightAmount": 0.3, "inputShadowAmount": 0.5, "inputRadius": 0.0}
 #: C3: 2.7（S1 の最大）→ 1.0 に収める露出。2^-1.43 ≈ 0.371。
 C3_EXPOSURE_EV = -1.43
-#: C3 のトーン曲線（x は CIExposureAdjust 後の 0..1）。boost 1 の標本（§2.4）を x = v·0.371 へ写して
-#: 0.18 → 0.36、0.5 → 0.75、1.0（元の表示白、x 0.37）→ 0.93 とし、元の 1.0 超（x 0.37..1）を 0.93 → 1.0 に漸近させる。
+#: C3 のトーン曲線。**CIToneCurve の制御点は sRGB ガンマ符号化した座標で、補間は 5 点を通る 3 次スプライン**
+#: （定数置換で確認、2026-10-21: 制御点 x は線形入力を sRGB 符号化した値に対応し、y も sRGB 符号化した出力。
+#: 平坦な区間を置くとスプラインが振動する）。計測 1 回目は線形座標で点を置いたため中間調がカメラ比 +0.33〜+0.38 明るくなった。
+#: 設計: CIExposureAdjust −1.43 後の線形 x = v·0.371 について、v = 0.18 / 0.5 を boost 1 の応答（0.3875 / 0.805）に
+#: 一致させ、v = 1.0（元の表示白）→ 0.90、v = 2.7 → 1.0 とする（1.0 超のヘッドルームを 8bit 243〜255 に収める）。
+#: 応答の実測（DSC04705、定数置換）: v 0.18 → 0.387、0.5 → 0.805、0.8 → 0.892、1.0 → 0.900、1.5 → 0.924、2.0 → 0.955、2.7 → 1.0（単調）。
 C3_TONE_CURVE = {
     "name": "CIToneCurve",
-    "inputPoint0": [0.0, 0.0], "inputPoint1": [0.0667, 0.36], "inputPoint2": [0.1853, 0.75],
-    "inputPoint3": [0.3706, 0.93], "inputPoint4": [1.0, 1.0],
+    "inputPoint0": [0.0, 0.0], "inputPoint1": [0.2867, 0.6557], "inputPoint2": [0.4679, 0.9088],
+    "inputPoint3": [0.6431, 0.9547], "inputPoint4": [1.0, 1.0],
 }
 C3B_EXTRA_EV = 0.3
 C_CANDIDATES = ("c1_ev-07_lift", "c1_ev-10_lift", "c2_ev-07_hsa", "c3_lin_curve", "c3_lin_curve_b")
@@ -5438,7 +5452,7 @@ def run_diagnosis(
             "roi_fraction": ROI_FRACTION, "roi_min_response": ROI_MIN_RESPONSE,
         },
         "notes": {
-            "tone_curve": "§8.4 の曲線は設計書 §2.4（DSC04705・1200px の 1 カット）の定数置換の標本を PCHIP で補間したもの",
+            "tone_curve": "§8.4 の曲線は定数置換で標本化した boost 1 の応答 24 点（4 カット・ISO 100〜2000 で同値、2026-10-21）を PCHIP で補間したもの",
             "stage_loss_s3s4": "S3（lens OFF）と S4（lens ON）は幾何が違うため、白の率の差（S4 − S3、符号付き）で代えた",
             "attribution_rule3": "S3 の線形値が 8bit sRGB で 255 に丸まる（≥ WHITE8_LINEAR）なら色域・SDR 出力（clamp・量子化）",
             "classification": "最大の帰属が 50% 未満のときは mixed",
