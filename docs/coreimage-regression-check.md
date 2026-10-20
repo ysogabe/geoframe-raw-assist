@@ -10,7 +10,7 @@ Core Image（CIRAWFilter）の **`apple_default`・decoder 9・レンズ補正 O
 | 項目 | 値 |
 |---|---|
 | macOS | 27.0.1（Apple M3）。対応 OS は最新の macOS のみ（古い macOS の個別検証はしない） |
-| CLI | `geoframe-ci-develop` 0.1.0（`native/coreimage-cli`） |
+| CLI | `geoframe-ci-develop` 0.1.0（`native/coreimage-cli`）。0.2.0（#79、個別上書きキーと tiff16 の sRGB 出力を追加）でも既定リクエストの `applied` は同一（差分 0 件を確認済み） |
 | リクエスト | `"decoder_version": "9"`, `"settings": {"profile": "apple_default", "lens_correction": true}` |
 | 実効パラメータ | [`coreimage-baseline/applied-params-macos-27.0.1.json`](coreimage-baseline/applied-params-macos-27.0.1.json)（α6400 夜間・長秒 11 カット、ISO 3200 / 6400） |
 | 画質指標 | [比較レポート §9.5](coreimage-engine-comparison.md) の `CI apple_default v9 lens ON`（下表に再掲） |

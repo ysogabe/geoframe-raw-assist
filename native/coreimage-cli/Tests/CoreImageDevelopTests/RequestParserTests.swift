@@ -32,6 +32,8 @@ final class RequestParserTests: XCTestCase {
         XCTAssertEqual(request.settings, Settings())
         XCTAssertEqual(request.settings.profile, .neutral)
         XCTAssertFalse(request.settings.lensCorrection)
+        XCTAssertNil(request.outputColorSpace)
+        XCTAssertNil(request.settings.luminanceNoiseReduction)
     }
 
     func testFullRequestWithAllFields() throws {
@@ -49,6 +51,51 @@ final class RequestParserTests: XCTestCase {
         XCTAssertEqual(request.settings.neutralTint, -3)
         XCTAssertTrue(request.settings.lensCorrection)
         XCTAssertEqual(request.settings.profile, .appleDefault)
+        // tiff16 で output_color_space を省くと互換のため Display P3。
+        XCTAssertEqual(request.outputColorSpace, .displayP3)
+    }
+
+    func testOutputColorSpaceValidation() throws {
+        let tiff = #""input":"/a/x.ARW","output":"/b/o.tif","mode":"full","format":"tiff16""#
+        XCTAssertEqual(try parse("{\(tiff),\"output_color_space\":\"srgb\"}").outputColorSpace, .srgb)
+        XCTAssertEqual(try parse("{\(tiff),\"output_color_space\":\"display_p3\"}").outputColorSpace, .displayP3)
+        XCTAssertEqual(try parse("{\(tiff),\"output_color_space\":null}").outputColorSpace, .displayP3)
+        assertInvalid("{\(tiff),\"output_color_space\":\"adobe_rgb\"}", contains: "output_color_space")
+        assertInvalid("{\(tiff),\"output_color_space\":1}", contains: "output_color_space")
+        // jpeg は常に sRGB なので指定自体を拒否する（null は省略と同じで通る）。
+        let jpeg = #""input":"/a/x.ARW","output":"/b/o.jpg","mode":"preview""#
+        assertInvalid("{\(jpeg),\"output_color_space\":\"srgb\"}", contains: "only allowed with format \"tiff16\"")
+        XCTAssertNil(try parse("{\(jpeg),\"output_color_space\":null}").outputColorSpace)
+    }
+
+    func testSettingsOverridesAreParsedAndRangeChecked() throws {
+        let base = #""input":"/a/x.ARW","output":"/b/o.jpg","mode":"preview""#
+        let request = try parse("""
+        {\(base),"settings":{"profile":"apple_default","luminance_noise_reduction":0,"color_noise_reduction":0.5,
+         "sharpness_amount":1,"detail_amount":2.5,"extended_dynamic_range":1.5,"boost_amount":0.8,"boost_shadow_amount":1.2}}
+        """)
+        XCTAssertEqual(request.settings.luminanceNoiseReduction, 0)
+        XCTAssertEqual(request.settings.colorNoiseReduction, 0.5)
+        XCTAssertEqual(request.settings.sharpnessAmount, 1)
+        XCTAssertEqual(request.settings.detailAmount, 2.5)
+        XCTAssertEqual(request.settings.extendedDynamicRange, 1.5)
+        XCTAssertEqual(request.settings.boostAmount, 0.8)
+        XCTAssertEqual(request.settings.boostShadowAmount, 1.2)
+        // null は「profile の既定値のまま」= nil。
+        let nulls = try parse("{\(base),\"settings\":{\"luminance_noise_reduction\":null,\"boost_amount\":null}}")
+        XCTAssertNil(nulls.settings.luminanceNoiseReduction)
+        XCTAssertNil(nulls.settings.boostAmount)
+        XCTAssertEqual(nulls.settings, Settings())
+        // 値域（CIRAWFilter.h のコメントどおり）と型。
+        assertInvalid("{\(base),\"settings\":{\"luminance_noise_reduction\":1.1}}", contains: "luminance_noise_reduction")
+        assertInvalid("{\(base),\"settings\":{\"color_noise_reduction\":-0.1}}", contains: "color_noise_reduction")
+        assertInvalid("{\(base),\"settings\":{\"sharpness_amount\":2}}", contains: "sharpness_amount")
+        assertInvalid("{\(base),\"settings\":{\"detail_amount\":3.5}}", contains: "detail_amount")
+        assertInvalid("{\(base),\"settings\":{\"extended_dynamic_range\":2.5}}", contains: "extended_dynamic_range")
+        assertInvalid("{\(base),\"settings\":{\"boost_amount\":1.5}}", contains: "boost_amount")
+        assertInvalid("{\(base),\"settings\":{\"boost_shadow_amount\":3}}", contains: "boost_shadow_amount")
+        assertInvalid("{\(base),\"settings\":{\"sharpness_amount\":\"1\"}}", contains: "sharpness_amount")
+        assertInvalid("{\(base),\"settings\":{\"sharpness_amount\":true}}", contains: "sharpness_amount")
     }
 
     func testNullOptionalFieldsUseDefaults() throws {
@@ -268,6 +315,23 @@ final class WriterTests: XCTestCase {
         XCTAssertEqual(props[kCGImagePropertyDepth as String] as? Int, 16)
         XCTAssertNotEqual(props[kCGImagePropertyHasAlpha as String] as? Bool, true)
         XCTAssertEqual(props[kCGImagePropertyProfileName as String] as? String, "Display P3")
+    }
+
+    func testTIFF16CanBeWrittenAsSRGB() throws {
+        let output = directory.appendingPathComponent("srgb.tif")
+        let image = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.6)).cropped(to: CGRect(x: 0, y: 0, width: 6, height: 4))
+        let (space, name) = OutputColor.space(for: .tiff16, colorSpace: .srgb)
+        XCTAssertEqual(name, "sRGB IEC61966-2.1")
+        let cg = try renderRGB16(image, extent: image.extent, colorSpace: space, context: CIContext())
+        try AtomicImageWriter.write(cg, to: output, format: .tiff16, jpegQuality: nil)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any])
+        XCTAssertEqual(props[kCGImagePropertyDepth as String] as? Int, 16)
+        XCTAssertEqual(props[kCGImagePropertyProfileName as String] as? String, "sRGB IEC61966-2.1")
+        // 既定（nil）と display_p3 は従来どおり P3、jpeg は指定に関わらず sRGB。
+        XCTAssertEqual(OutputColor.space(for: .tiff16, colorSpace: nil).1, "Display P3")
+        XCTAssertEqual(OutputColor.space(for: .tiff16, colorSpace: .displayP3).1, "Display P3")
+        XCTAssertEqual(OutputColor.space(for: .jpeg, colorSpace: nil).1, "sRGB IEC61966-2.1")
     }
 
     func testOverwriteReplacesExistingOutput() throws {

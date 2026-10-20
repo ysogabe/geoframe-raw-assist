@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.1.0"
+public let cliVersion = "0.2.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {
@@ -36,6 +36,13 @@ public enum OutputFormat: String {
     case tiff16
 }
 
+/// `tiff16` の出力色空間（Issue #79）。jpeg は常に sRGB なので指定できない。
+public enum OutputColorSpace: String {
+    case srgb
+    /// 互換のための既定（0.1.0 までの tiff16 は常に Display P3 だった）。
+    case displayP3 = "display_p3"
+}
+
 public enum Profile: String {
     /// 表示用 sRGB として妥当な最小処理（ADR 0001 §中立プロファイル）。
     case neutral
@@ -49,6 +56,15 @@ public struct Settings: Equatable {
     public var neutralTint: Double?
     public var lensCorrection: Bool = false
     public var profile: Profile = .neutral
+    /// 以下は profile 適用後に個別に上書きする値（Issue #79）。nil = profile の既定値のまま。
+    /// 値域は CIRAWFilter.h のコメントに従う（README「settings の個別上書き」）。
+    public var luminanceNoiseReduction: Double?
+    public var colorNoiseReduction: Double?
+    public var sharpnessAmount: Double?
+    public var detailAmount: Double?
+    public var extendedDynamicRange: Double?
+    public var boostAmount: Double?
+    public var boostShadowAmount: Double?
 }
 
 /// 検証済みの現像リクエスト。`RequestParser.parse` だけが作る。
@@ -61,6 +77,8 @@ public struct DevelopRequest: Equatable {
     public var format: OutputFormat
     /// jpeg のときだけ値を持つ。
     public var jpegQuality: Double?
+    /// tiff16 のときだけ値を持つ（省略時 display_p3）。jpeg は常に sRGB で nil。
+    public var outputColorSpace: OutputColorSpace?
     /// nil = そのファイルで使える最新の decoderVersion。
     public var decoderVersion: String?
     public var settings: Settings
@@ -75,12 +93,31 @@ public enum RequestParser {
     public static let temperatureRange = 2000.0...50000.0
     public static let tintRange = -150.0...150.0
     public static let allowedDecoderVersions: Set<String> = ["8", "9"]
+    /// 個別上書きキーの値域（CIRAWFilter.h のコメントどおり）。
+    public static let noiseReductionRange = 0.0...1.0
+    public static let sharpnessRange = 0.0...1.0
+    public static let detailRange = 0.0...3.0
+    public static let extendedDynamicRangeRange = 0.0...2.0
+    public static let boostRange = 0.0...1.0
+    public static let boostShadowRange = 0.0...2.0
 
     static let topLevelKeys: Set<String> = [
-        "input", "output", "mode", "max_edge", "format", "jpeg_quality", "decoder_version", "settings",
+        "input", "output", "mode", "max_edge", "format", "jpeg_quality", "output_color_space", "decoder_version", "settings",
     ]
     static let settingsKeys: Set<String> = [
         "exposure_ev", "neutral_temperature", "neutral_tint", "lens_correction", "profile",
+        "luminance_noise_reduction", "color_noise_reduction", "sharpness_amount", "detail_amount",
+        "extended_dynamic_range", "boost_amount", "boost_shadow_amount",
+    ]
+    /// settings の個別上書きキー → (Settings のフィールドを書く closure, 値域, 説明)。
+    static let overrideKeys: [(key: String, range: ClosedRange<Double>, set: (inout Settings, Double) -> Void)] = [
+        ("luminance_noise_reduction", noiseReductionRange, { $0.luminanceNoiseReduction = $1 }),
+        ("color_noise_reduction", noiseReductionRange, { $0.colorNoiseReduction = $1 }),
+        ("sharpness_amount", sharpnessRange, { $0.sharpnessAmount = $1 }),
+        ("detail_amount", detailRange, { $0.detailAmount = $1 }),
+        ("extended_dynamic_range", extendedDynamicRangeRange, { $0.extendedDynamicRange = $1 }),
+        ("boost_amount", boostRange, { $0.boostAmount = $1 }),
+        ("boost_shadow_amount", boostShadowRange, { $0.boostShadowAmount = $1 }),
     ]
 
     public static func parse(_ data: Data) throws -> DevelopRequest {
@@ -148,6 +185,20 @@ public enum RequestParser {
             throw DevelopError(.invalidRequest, "jpeg_quality is only allowed with format \"jpeg\"")
         }
 
+        var outputColorSpace: OutputColorSpace?
+        if format == .tiff16 {
+            if let raw = dict["output_color_space"], !(raw is NSNull) {
+                guard let string = raw as? String, let value = OutputColorSpace(rawValue: string) else {
+                    throw DevelopError(.invalidRequest, "output_color_space must be \"srgb\" or \"display_p3\"")
+                }
+                outputColorSpace = value
+            } else {
+                outputColorSpace = .displayP3
+            }
+        } else if let raw = dict["output_color_space"], !(raw is NSNull) {
+            throw DevelopError(.invalidRequest, "output_color_space is only allowed with format \"tiff16\" (jpeg is always sRGB)")
+        }
+
         var decoderVersion: String?
         if let raw = dict["decoder_version"], !(raw is NSNull) {
             guard let string = raw as? String, allowedDecoderVersions.contains(string) else {
@@ -167,7 +218,7 @@ public enum RequestParser {
 
         return DevelopRequest(
             input: input, output: output, mode: mode, maxEdge: maxEdge, format: format,
-            jpegQuality: jpegQuality, decoderVersion: decoderVersion, settings: settings
+            jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings
         )
     }
 
@@ -208,6 +259,16 @@ public enum RequestParser {
                 throw DevelopError(.invalidRequest, "settings.profile must be \"neutral\" or \"apple_default\"")
             }
             settings.profile = profile
+        }
+        for entry in overrideKeys {
+            guard let value = dict[entry.key], !(value is NSNull) else { continue }
+            guard let amount = number(value), entry.range.contains(amount) else {
+                throw DevelopError(
+                    .invalidRequest,
+                    "settings.\(entry.key) must be null or a number in \(entry.range.lowerBound)...\(entry.range.upperBound)"
+                )
+            }
+            entry.set(&settings, amount)
         }
         return settings
     }
