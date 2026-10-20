@@ -181,10 +181,10 @@ Rust が組み立てる CLI リクエスト（§4.1 の契約）:
 
 | コード | 扱い |
 |---|---|
-| `SIDECAR_NOT_FOUND` / `SIDECAR_SPAWN_FAILED` / `SIDECAR_TIMEOUT` / `SIDECAR_IO_FAILED` / `SIDECAR_BAD_RESPONSE` / `UNSUPPORTED_RAW` / `UNSUPPORTED_DECODER_VERSION` / `RENDER_FAILED` / `WRITE_FAILED` / `OUTPUT_DIR_FAILED` / `PROVENANCE_WRITE_FAILED` / `APP_DATA_DIR_UNAVAILABLE` / `INTERNAL_ERROR` | **Python へフォールバック**（従来の `developRaw(preview: true)`）。成功したら通知: `Core Image での現像に失敗したため rawpy でプレビューしました（<code>）`（tone: info）。フォールバックも失敗したら `develop/fail` |
+| `SIDECAR_NOT_FOUND` / `SIDECAR_SPAWN_FAILED` / `SIDECAR_TIMEOUT` / `SIDECAR_IO_FAILED` / `SIDECAR_BAD_RESPONSE` / `UNSUPPORTED_RAW` / `UNSUPPORTED_DECODER_VERSION` / `RENDER_FAILED` / `WRITE_FAILED` / `OUTPUT_DIR_FAILED` / `PROVENANCE_WRITE_FAILED` / `APP_DATA_DIR_UNAVAILABLE` / `INTERNAL_ERROR`、および `SOURCE_ROOT_NOT_CONFIGURED` / `CONFIG_UNREADABLE` / `CONFIG_INVALID` / `SOURCE_ROOT_NOT_FOUND`（Python の `source_root()` は設定が無い・壊れている・フォルダが無いと既定フォルダへ逃がすので、rawpy なら現像できる場合がある。PR #93 レビュー）と CLI の `INPUT_NOT_FOUND` / `INPUT_NOT_READABLE` / `OUTPUT_DIR_NOT_FOUND` | **Python へフォールバック**（従来の `developRaw(preview: true)`）。成功したら通知: `Core Image での現像に失敗したため rawpy でプレビューしました（<code>）`（tone: info）。フォールバックも失敗したら `develop/fail` |
 | `BUSY` | フォールバックしない（Python でも同じ重さの現像が走るだけ）。`develop/fail` で「別の現像を実行中です」 |
 | `INVALID_REQUEST`（CLI）/ `ADJUSTMENTS_INVALID` / `INVALID_CAPTURE_ID`（Rust） | バグ。フォールバックせず `develop/fail` にコードを含めて表示（開発中に気づけるように） |
-| `SOURCE_ROOT_NOT_CONFIGURED` / `CONFIG_*` / `SOURCE_ROOT_NOT_FOUND` / `ARW_NOT_FOUND` / `ARW_OUTSIDE_SOURCE_ROOT` | 入力の問題。Python でも同じ結果になるのでフォールバックせず `develop/fail` |
+| `ARW_NOT_FOUND` / `ARW_OUTSIDE_SOURCE_ROOT` | 入力の問題。同じフォルダを見る Python でも同じ結果になるのでフォールバックせず `develop/fail` |
 
 - フォールバック時も `generation`（フォルダ世代）の照合は従来どおり（`develop/ok` の reducer が捨てる）。
 - Rust 側は `sidecar_path()` の不在を `SIDECAR_NOT_FOUND` で返すだけでよい（起動時に落とさない）。
@@ -294,7 +294,7 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
 | `shadow_lift` | `lift = v / 100` → `geoframe_tone` | 0..1 | `post.shadow_lift` |
 | `brightness` / `contrast` / `saturation` | そのまま `geoframe_tone` | 契約の値域 | `post.brightness` 等 |
 | `sharpness` (s) | s ≤ 1: `filter.sharpnessAmount = defaults.sharpnessAmount × s`、USM gain 0。s > 1: sharpnessAmount は既定のまま、USM: `sigma, baseGain, coring = captureSharpenParams(longEdge, iso)`（rawpy の定数を移植。長辺は `extent` の長辺）、`gain = min(1.2, baseGain × (s − 1) × 1.5) × isoMult`。ISO は `filter.properties` の EXIF（不明なら coring 0.5/255、減衰なし） | 0.8..1.6 | `sharpness_amount`、`post.usm.{sigma,gain,coring,long_edge,iso}` |
-| `noise_reduction` | off: `(0, 0)`。light: 既定のまま（null）。full: `lum = min(0.5, max(defaults.lum + 0.3, 0.3))`、`color = max(defaults.color, 0.3)`（上限 0.5 は T5 で確定。比較レポート §16.4） | 0..1 | `luminance_noise_reduction_amount`、`color_noise_reduction_amount` |
+| `noise_reduction` | off: `(0, 0)`。light: 既定のまま（null）。full: `lum = max(defaults.lum, min(0.5, max(defaults.lum + 0.3, 0.3)))`（既定が 0.5 を超えるときは既定のまま。full < light を防ぐ）、`color = max(defaults.color, 0.3)`（上限 0.5 は T5 で確定。比較レポート §16.4） | 0..1 | `luminance_noise_reduction_amount`、`color_noise_reduction_amount` |
 | `highlight_recovery` | 何もしない | — | `ignored: ["highlight_recovery"]` |
 
 `noise_reduction` の ISO 帯別の表（`apple_default` v9、macOS 27.0.1 の既定値から。T5 で上限 0.5 に確定済み。CLI README にも同じ表がある）:

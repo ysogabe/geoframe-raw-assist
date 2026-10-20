@@ -1134,11 +1134,20 @@ export function activePreset(state: State): PresetInfo | null {
   return presetFor(state.health, state.presetName);
 }
 
+/**
+ * プリセット既定値 + ユーザー変更分の 9 キー全量。調整値の解決はここ 1 か所だけで行う
+ * （表示用の `effectiveAdjustments` と、Core Image へ渡す `coreimage-api.ts` の再エクスポートが共用）。
+ * Rust（develop_preview_coreimage）は全量を要求するので、上書きの無いキーもプリセット値で埋める。
+ */
+export function resolveAdjustments(preset: PresetInfo, overrides: Partial<Adjustments>): Adjustments {
+  return { ...preset.adjustments, ...overrides };
+}
+
 /** プリセット既定値 + ユーザー変更分。プリセット未取得なら null。 */
 export function effectiveAdjustments(state: State): Adjustments | null {
   const preset = activePreset(state);
   if (!preset) return null;
-  return { ...preset.adjustments, ...state.overrides };
+  return resolveAdjustments(preset, state.overrides);
 }
 
 export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {

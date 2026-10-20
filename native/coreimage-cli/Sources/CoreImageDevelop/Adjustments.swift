@@ -177,9 +177,11 @@ public enum WhiteBalanceMapping {
 ///
 /// - off: (0, 0)
 /// - light: 既定のまま（apple_default は低 ISO でほぼ 0、高 ISO で効く。rawpy の light と同じ形）
-/// - full: `lum = min(1, max(既定 + FULL_LUM_BOOST, FULL_LUM_FLOOR))`、`color = max(既定, FULL_COLOR_FLOOR)`
+/// - full: `lum = max(既定, min(FULL_LUM_CAP, max(既定 + FULL_LUM_BOOST, FULL_LUM_FLOOR)))`、
+///   `color = min(1, max(既定, FULL_COLOR_FLOOR))`
 ///
-/// - full の輝度は `FULL_LUM_CAP`（0.5）で頭打ち。
+/// - full の輝度は `FULL_LUM_CAP`（0.5）で頭打ち。ただし既定（= light）が 0.5 を超える高 ISO では
+///   上限より既定を優先する（full が light より弱くならないように。既定のまま = light と同じ強さ）。
 ///
 /// ISO 帯別の目安（macOS 27.0.1 / decoder 9 の既定から。README「noise_reduction の表」）:
 /// ISO < 800 既定 ≈0.01/0 → full 0.31/0.30、ISO 3200 0.241/0 → full 0.5/0.30、ISO 6400 0.357/0 → full 0.5/0.30。
@@ -204,7 +206,11 @@ public enum NoiseReductionMapping {
         case .light:
             return (nil, nil)
         case .full:
-            let luminance = min(fullLuminanceCap, max(defaultLuminance + fullLuminanceBoost, fullLuminanceFloor))
+            // 上限で切った後に既定と max を取る。既定 > 上限のとき min だけだと full < light になる。
+            let luminance = max(
+                defaultLuminance,
+                min(fullLuminanceCap, max(defaultLuminance + fullLuminanceBoost, fullLuminanceFloor))
+            )
             let color = min(1.0, max(defaultColor, fullColorFloor))
             return (luminance, color)
         }

@@ -548,12 +548,12 @@ export default function Home() {
         scrollToComparison();
         return;
       } catch (error) {
-        // BUSY / 不正リクエスト / 入力・設定の問題は Python でも解決しない（または不具合を隠す）ので表示する。
+        // BUSY / 不正リクエスト / ARW が見つからない等は Python でも解決しない（または不具合を隠す）ので表示する。
         if (!shouldFallbackToRawpy(error)) {
           dispatch({ type: "develop/fail", message: coreImageErrorMessage(error) });
           return;
         }
-        // インフラ側の失敗だけ、従来の Python プレビューで救う。
+        // インフラ側・現像元フォルダ解決の失敗だけ、従来の Python プレビューで救う。
         fallbackCode = coreImageErrorOf(error)?.code;
       }
     }

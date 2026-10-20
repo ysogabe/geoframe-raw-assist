@@ -152,8 +152,11 @@ export function BeforeAfter({
 
       {coreImage && (
         <>
-          {/* highlight_recovery は Core Image では受け取るだけで効かない（adjustments_applied.ignored、#81 で代替を決める）。 */}
-          <p className="engine-note">ハイライト回復は Core Image プレビューでは適用されません（#81 で対応予定）。</p>
+          {/* highlight_recovery は Core Image では受け取るだけで効かない（adjustments_applied.ignored、#81 で代替を決める）。
+              0 なら効かなくても見え方は変わらないので、値を入れたときだけ注記する。 */}
+          {result.adjustments.highlight_recovery > 0 && (
+            <p className="engine-note">ハイライト回復は Core Image プレビューでは適用されません（#81 で対応予定）。</p>
+          )}
           <p className="engine-note">
             書き出し（本現像）は従来エンジン（rawpy）で行うため、このプレビューと見え方が異なる場合があります。
           </p>

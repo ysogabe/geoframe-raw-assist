@@ -178,7 +178,7 @@ final class AdjustmentMappingTests: XCTestCase {
     }
 
     func testNoiseReductionTable() {
-        // off は (0, 0)、light は既定のまま、full は min(0.5, max(既定 + 0.3, 0.3)) / 色 0.3 以上（T5 で確定）。
+        // off は (0, 0)、light は既定のまま、full は max(既定, min(0.5, max(既定 + 0.3, 0.3))) / 色 0.3 以上（T5 で確定）。
         XCTAssertEqual(NoiseReductionMapping.fullLuminanceCap, 0.5)
         let cases: [(Double, Double, NoiseReduction, Double?, Double?)] = [
             (0.01, 0, .off, 0, 0),
@@ -189,7 +189,8 @@ final class AdjustmentMappingTests: XCTestCase {
             (0.15, 0, .full, 0.45, 0.3),
             (0.241, 0, .full, 0.5, 0.3),
             (0.357, 0, .full, 0.5, 0.3),
-            (0.9, 0.5, .full, 0.5, 0.5),
+            (0.5, 0.5, .full, 0.5, 0.5),
+            (0.9, 0.5, .full, 0.9, 0.5),
         ]
         for (lum, color, mode, wantLum, wantColor) in cases {
             let got = NoiseReductionMapping.amounts(mode, defaultLuminance: lum, defaultColor: color)
@@ -197,6 +198,18 @@ final class AdjustmentMappingTests: XCTestCase {
             if let wantLum { XCTAssertEqual(got.luminance!, wantLum, accuracy: 1e-12, label) } else { XCTAssertNil(got.luminance, label) }
             if let wantColor { XCTAssertEqual(got.color!, wantColor, accuracy: 1e-12, label) } else { XCTAssertNil(got.color, label) }
         }
+    }
+
+    func testFullNoiseReductionNeverWeakerThanLightAtHighISO() {
+        // 既定（= light）が上限 0.5 を超える高 ISO では、full は上限で切らず既定のまま（light 以上）にする。
+        for lum in [0.5, 0.501, 0.6, 0.75, 1.0] {
+            let got = NoiseReductionMapping.amounts(.full, defaultLuminance: lum, defaultColor: 0)
+            XCTAssertEqual(got.luminance!, lum, accuracy: 1e-12, "lum \(lum)")
+            XCTAssertGreaterThanOrEqual(got.luminance!, lum, "full は light（既定）より弱くしない: lum \(lum)")
+        }
+        // 既定が上限未満なら従来どおり上限 0.5 で頭打ち。
+        let below = NoiseReductionMapping.amounts(.full, defaultLuminance: 0.49, defaultColor: 0)
+        XCTAssertEqual(below.luminance!, 0.5, accuracy: 1e-12)
     }
 
     func testWhiteDotGuardCondition() {

@@ -67,7 +67,7 @@ CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVAL
 | `shadow_lift` | `lift = v/100` を自前 Metal カーネル `geoframe_tone` で sRGB ガンマ空間に適用（rawpy と同じ式） | 後段 | `post.shadow_lift` |
 | `brightness` / `contrast` / `saturation` | 同じ `geoframe_tone` で rawpy と同じ式（乗算 / 0.5 ピボット / Rec.709 輝度基準）を sRGB ガンマ空間で適用 | 後段 | `post.brightness` 等 |
 | `sharpness` | **ハイブリッド**: s ≤ 1 は `sharpnessAmount = 既定 × s`（USM なし）。s > 1 は `sharpnessAmount` を既定のまま、輝度 USM（自前 Metal カーネル）で増分だけ足す（`sigma, baseGain, coring = captureSharpenParams(長辺, ISO)`、`gain = min(1.2, baseGain × (s−1) × 1.5) × isoMult`）。rawpy の撮影時シャープ（基準 gain）は掛けない（二重がけ回避） | デコード + 後段 | `sharpness_amount`、`post.usm.*` |
-| `noise_reduction` | `off` = 輝度 0 / 色 0、`light` = 既定のまま、`full` = 輝度 `min(0.5, max(既定+0.3, 0.3))` / 色 `max(既定, 0.3)`（下表） | デコード | `luminance_noise_reduction_amount`、`color_noise_reduction_amount`、`post.noise_reduction` |
+| `noise_reduction` | `off` = 輝度 0 / 色 0、`light` = 既定のまま、`full` = 輝度 `max(既定, min(0.5, max(既定+0.3, 0.3)))`（既定が 0.5 を超える高 ISO では既定のまま。full を light より弱くしない） / 色 `max(既定, 0.3)`（下表） | デコード | `luminance_noise_reduction_amount`、`color_noise_reduction_amount`、`post.noise_reduction` |
 | `highlight_recovery` | **no-op**（受理するが効かせない）。CI に対応物が無く、代替は #81 | — | `ignored: ["highlight_recovery"]` |
 
 `noise_reduction` の表（`apple_default` v9・macOS 27.0.1、**輝度の上限 0.5**。旧暫定は ISO 3200 = 0.541、6400 = 0.657 だったが、空の高周波がカメラ比 0.5 を割るため T5 で頭打ちにした）:

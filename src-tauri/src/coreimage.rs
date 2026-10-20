@@ -66,7 +66,8 @@ const STALE_TEMP_AGE: Duration = Duration::from_secs(10 * 60);
 /// キャッシュ名ハッシュの入力形式の版。ハッシュ入力の組み立てや、Rust 側の
 /// Adjustments 正規化規則（クランプ・float 化）を変えたら上げる。
 /// 1: 試験経路（#65）。2: adjustments を含む request 全量の正規形（#72）。
-const CACHE_KEY_SCHEMA: u32 = 2;
+/// 3: CLI 実行ファイルの SHA-256 を足した（#72 レビュー）。
+const CACHE_KEY_SCHEMA: u32 = 3;
 
 /// キャッシュ上限（設計書 §2.3、オーナー判断 8）。件数は `.jpg` + `.json` の組を 1 件と数える。
 /// 超えたら mtime の古い組から消して上限の 80% まで落とす。
@@ -307,6 +308,10 @@ fn read_all_in_thread<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHa
 /// - stdout / stderr は別スレッドで読み切る（パイプが詰まって子が止まり、ウォッチドッグまで
 ///   無駄に待つのを防ぐ）。
 /// - `timeout` を過ぎたら kill して `SIDECAR_TIMEOUT`。
+/// - stdin への書き込みに失敗しても（CLI がリクエストを読み切る前にエラーで終わった EPIPE 等）
+///   すぐには kill せず、同じウォッチドッグで終了を待つ。stdout に CLI の構造化エラー
+///   （`{"ok":false,"error":{"code",...}}`）があればそれを返し、無い・読めないときだけ
+///   `SIDECAR_IO_FAILED` にする（CLI が出した本当の原因を捨てないため）。
 fn run_sidecar(
     program: &Path,
     args: &[&str],
@@ -333,16 +338,14 @@ fn run_sidecar(
     let stdout_reader = child.stdout.take().map(read_all_in_thread);
     let stderr_reader = child.stderr.take().map(read_all_in_thread);
 
+    let mut write_error = None;
     if let Some(bytes) = stdin_bytes {
         // take() で取り出してスコープ末尾で drop する = EOF を送る。
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(error) = stdin.write_all(bytes) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(CoreImageError::new(
-                    "SIDECAR_IO_FAILED",
-                    format!("CLI へのリクエスト送信に失敗しました: {error}"),
-                ));
+                // ここでは kill しない。CLI が先にエラー応答を出して終わった可能性があるので、
+                // 下の終了待ち（ウォッチドッグ付き）に任せてから stdout を確かめる。
+                write_error = Some(error);
             }
         }
     }
@@ -380,11 +383,36 @@ fn run_sidecar(
     let stderr = stderr_reader
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
-    Ok(SidecarOutput {
+    let output = SidecarOutput {
         status,
         stdout,
         stderr,
-    })
+    };
+    if let Some(error) = write_error {
+        // リクエストを渡し切れていないので、成功応答は信用しない。構造化エラーだけ採る。
+        return match parse_response(&output) {
+            Ok(response) if is_cli_error_response(&response) => Ok(output),
+            _ => Err(CoreImageError::new(
+                "SIDECAR_IO_FAILED",
+                format!("CLI へのリクエスト送信に失敗しました: {error}"),
+            )),
+        };
+    }
+    Ok(output)
+}
+
+/// `{"ok":false,"error":{"code":"...","message":"..."}}` の形か（`cli_error` がそのまま詰め替えられる形）。
+fn is_cli_error_response(response: &Value) -> bool {
+    let error = response.get("error");
+    response.get("ok") == Some(&Value::Bool(false))
+        && error
+            .and_then(|e| e.get("code"))
+            .and_then(Value::as_str)
+            .is_some()
+        && error
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+            .is_some()
 }
 
 /// stdout の最後の非空行を JSON として読む（契約上 stdout は JSON 1 行だけ）。
@@ -431,12 +459,50 @@ fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
 // CLI バージョン（キャッシュキーの一部）
 // ---------------------------------------------------------------------------
 
-/// `--version` の応答（cli_version + macOS バージョンを含む）の正規形と、その中の 2 値。
+/// `--version` の応答（cli_version + macOS バージョンを含む）の正規形と、その中の 2 値、
+/// およびサイドカー実行ファイルの SHA-256。
 #[derive(Debug, Clone)]
 struct CliVersion {
     fingerprint: String,
     cli_version: String,
     macos_version: String,
+    /// 実行ファイル本体の SHA-256（16 進 64 桁）。cli_version を上げ忘れたまま CLI の実装
+    /// （写像の定数など）が変わっても、キャッシュが古い出力を返さないようにする。
+    binary_sha256: String,
+}
+
+/// サイドカー実行ファイルの SHA-256（16 進）。パスごとにプロセスで 1 回だけ計算して覚える
+/// （.app 内のバイナリは起動中に変わらない前提。数 MB を現像のたびに読まない）。
+/// 読めなければ `SIDECAR_IO_FAILED`（失敗は覚えない）。
+fn sidecar_sha256(sidecar: &Path) -> Result<String, CoreImageError> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(digest) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(sidecar)
+    {
+        return Ok(digest.clone());
+    }
+    let io_error = |error: std::io::Error| {
+        CoreImageError::new(
+            "SIDECAR_IO_FAILED",
+            format!("{} を読めません: {error}", sidecar.display()),
+        )
+    };
+    let mut file = fs::File::open(sidecar).map_err(io_error)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(io_error)?;
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(sidecar.to_path_buf(), digest.clone());
+    Ok(digest)
 }
 
 /// sidecar ごとに `--version` の結果を覚えておく（プロセス寿命中は変わらない前提）。
@@ -470,6 +536,7 @@ fn cli_version(sidecar: &Path) -> Result<CliVersion, CoreImageError> {
         fingerprint: canonical_json(&response),
         cli_version: text("cli_version"),
         macos_version: text("macos_version"),
+        binary_sha256: sidecar_sha256(sidecar)?,
     };
     let mut guard = CACHE
         .lock()
@@ -548,7 +615,8 @@ fn canonical_json(value: &Value) -> String {
 /// std の `DefaultHasher` は実行ごとに値が変わりうるので使わない。入力（設計書 §2.3）:
 /// schema、リクエスト全量（output 以外。input は canonicalize 済みの絶対パス、settings、
 /// 正規化後の adjustments）、CLI の `--version` 応答全文（cli_version + macos_version。
-/// OS 更新で apple_default の既定値が変わる懸念を含める）、ARW の同一性（サイズ + mtime）。
+/// OS 更新で apple_default の既定値が変わる懸念を含める）、CLI 実行ファイルの SHA-256
+/// （版を上げずに実装が変わった場合）、ARW の同一性（サイズ + mtime）。
 /// パスを含めるのは、`capture_id` がカード／フォルダをまたいで衝突するため。
 fn cache_key(
     request: &serde_json::Map<String, Value>,
@@ -562,6 +630,7 @@ fn cache_key(
         "schema": CACHE_KEY_SCHEMA,
         "request": Value::Object(request),
         "cli": version.fingerprint,
+        "cli_binary_sha256": version.binary_sha256,
         "input_size": size,
         "input_mtime_ns": mtime_ns.to_string(),
     });
@@ -1408,6 +1477,109 @@ mod tests {
         assert_eq!(error.code, "SIDECAR_SPAWN_FAILED");
     }
 
+    /// stdin を読まずに `body` を実行して終わる偽サイドカー（sh スクリプト）。
+    fn script_sidecar(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("no-stdin-cli");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// パイプの容量（macOS は 16〜64KB）を大きく超えるリクエスト。子が読まずに終われば
+    /// write_all は必ず EPIPE で失敗する。
+    fn oversized_request() -> Vec<u8> {
+        vec![b' '; 4 * 1024 * 1024]
+    }
+
+    #[test]
+    fn sidecar_stdin_write_failure_keeps_structured_cli_error() {
+        let dir = TempDir::new("stdin-epipe-json");
+        let program = script_sidecar(
+            dir.path(),
+            r#"printf '%s\n' '{"ok":false,"error":{"code":"INPUT_NOT_FOUND","message":"input does not exist"}}'
+exit 1"#,
+        );
+        let started = Instant::now();
+        let output = run_sidecar(
+            &program,
+            &[],
+            Some(&oversized_request()),
+            Duration::from_secs(10),
+        )
+        .expect("stdout の構造化エラーを返す（SIDECAR_IO_FAILED にしない）");
+        assert!(!output.status.success());
+        let response = parse_response(&output).unwrap();
+        let error = cli_error(&response, output.status);
+        assert_eq!(error.code, "INPUT_NOT_FOUND");
+        assert_eq!(error.message, "input does not exist");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sidecar_stdin_write_failure_without_structured_error_is_io_failed() {
+        let dir = TempDir::new("stdin-epipe-none");
+        // stdout が空 / JSON でない / 成功応答（リクエストを渡し切れていないので信用しない）。
+        let bodies = [
+            "exit 1",
+            "echo 'not json'\nexit 1",
+            r#"printf '%s\n' '{"ok":true}'"#,
+            r#"printf '%s\n' '{"ok":false,"error":{"code":"X"}}'
+exit 1"#,
+        ];
+        for body in bodies {
+            let program = script_sidecar(dir.path(), body);
+            let error = run_sidecar(
+                &program,
+                &[],
+                Some(&oversized_request()),
+                Duration::from_secs(10),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "SIDECAR_IO_FAILED", "{body}");
+        }
+    }
+
+    #[test]
+    fn sidecar_stdin_write_failure_still_honours_watchdog() {
+        let dir = TempDir::new("stdin-epipe-hang");
+        // stdin を閉じてから居座る（書き込みは EPIPE、終了しないのでウォッチドッグで止める）。
+        let program = script_sidecar(dir.path(), "exec 0<&-\nexec sleep 30");
+        let started = Instant::now();
+        let error = run_sidecar(
+            &program,
+            &[],
+            Some(&oversized_request()),
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "SIDECAR_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sidecar_sha256_hashes_binary_and_memoizes_per_path() {
+        let dir = TempDir::new("sidecar-sha");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::write(&a, b"abc").unwrap();
+        fs::write(&b, b"abd").unwrap();
+        // SHA-256("abc") の既知値。
+        assert_eq!(
+            sidecar_sha256(&a).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(sidecar_sha256(&a).unwrap(), sidecar_sha256(&b).unwrap());
+        // パスごとに 1 回だけ計算する（起動中に中身が変わっても読み直さない）。
+        fs::write(&a, b"changed").unwrap();
+        assert_eq!(
+            sidecar_sha256(&a).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let error = sidecar_sha256(&dir.path().join("missing")).unwrap_err();
+        assert_eq!(error.code, "SIDECAR_IO_FAILED");
+    }
+
     #[test]
     fn provenance_temp_is_created_new_and_never_follows_existing_entries() {
         let dir = TempDir::new("provenance");
@@ -1462,6 +1634,7 @@ mod tests {
             fingerprint: format!("{{\"cli_version\":\"{cli}\",\"macos_version\":\"27.0.1\"}}"),
             cli_version: cli.into(),
             macos_version: "27.0.1".into(),
+            binary_sha256: "0".repeat(64),
         }
     }
 
@@ -1560,6 +1733,12 @@ mod tests {
             ..version.clone()
         };
         assert_ne!(key, cache_key(&request, &other_os, 100, 5));
+        // CLI 実行ファイルの SHA-256（版も OS も同じまま実装だけ変わった場合）。
+        let rebuilt = CliVersion {
+            binary_sha256: "1".repeat(64),
+            ..version.clone()
+        };
+        assert_ne!(key, cache_key(&request, &rebuilt, 100, 5));
         // mode / 入力パス / settings / adjustments の有無。
         let full = base_request(input, DevelopMode::Full, Some(&adjustments));
         assert_ne!(key, cache_key(&full, &version, 100, 5));
@@ -1938,6 +2117,28 @@ exit 1"#;
         )
         .unwrap();
         (app_data, source)
+    }
+
+    #[test]
+    fn cache_key_changes_when_cli_binary_changes_without_version_bump() {
+        // --version の応答（cli_version / macos_version）は同じで、実装だけ違う 2 つの CLI。
+        let first = TempDir::new("binary-a");
+        let second = TempDir::new("binary-b");
+        let cli_a = mock_cli(first.path(), MOCK_OK);
+        let cli_b = mock_cli(second.path(), &format!("# rebuilt\n{MOCK_OK}"));
+        let version_a = cli_version(&cli_a).unwrap();
+        let version_b = cli_version(&cli_b).unwrap();
+        assert_eq!(version_a.fingerprint, version_b.fingerprint);
+        assert_ne!(version_a.binary_sha256, version_b.binary_sha256);
+        let request = base_request(
+            Path::new("/abs/DSC00001.ARW"),
+            DevelopMode::Preview,
+            Some(&sample_adjustments()),
+        );
+        assert_ne!(
+            cache_key(&request, &version_a, 100, 5),
+            cache_key(&request, &version_b, 100, 5)
+        );
     }
 
     #[test]

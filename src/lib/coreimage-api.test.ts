@@ -131,16 +131,21 @@ describe("shouldFallbackToRawpy（§2.6）", () => {
     "PROVENANCE_WRITE_FAILED",
     "APP_DATA_DIR_UNAVAILABLE",
     "INTERNAL_ERROR",
+    // Python は設定が無い・壊れている・フォルダが無いと既定フォルダへ逃がすので rawpy で救える。
+    "SOURCE_ROOT_NOT_CONFIGURED",
+    "CONFIG_INVALID",
+    "CONFIG_UNREADABLE",
+    "SOURCE_ROOT_NOT_FOUND",
+    // CLI の入力・出力先チェック。
+    "INPUT_NOT_FOUND",
+    "INPUT_NOT_READABLE",
+    "OUTPUT_DIR_NOT_FOUND",
   ];
   const display = [
     "BUSY",
     "INVALID_REQUEST",
     "ADJUSTMENTS_INVALID",
     "INVALID_CAPTURE_ID",
-    "SOURCE_ROOT_NOT_CONFIGURED",
-    "CONFIG_INVALID",
-    "CONFIG_UNREADABLE",
-    "SOURCE_ROOT_NOT_FOUND",
     "ARW_NOT_FOUND",
     "ARW_OUTSIDE_SOURCE_ROOT",
     "SOMETHING_NEW",

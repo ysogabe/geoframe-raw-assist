@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   currentDevelopmentCandidates,
   currentDevelopmentCandidatesResponse,
+  effectiveAdjustments,
   initialState,
   reducer,
+  resolveAdjustments,
   type Action,
   type State,
 } from "./app-state";
@@ -610,5 +612,23 @@ describe("merge 系", () => {
     };
     const next = reducer(state, { type: "merge/resetFrames", groupId: 5 });
     expect(next.mergeSelections[5]).toEqual(ids.slice(0, 9));
+  });
+});
+
+describe("effectiveAdjustments / resolveAdjustments（調整値の解決は 1 か所）", () => {
+  it("プリセット未取得なら null", () => {
+    expect(effectiveAdjustments({ ...initialState, health: null })).toBeNull();
+  });
+
+  it("選択中プリセットの既定値に overrides を重ね、resolveAdjustments と同じ値を返す", () => {
+    const state: State = { ...withEngine, presetName: "shadow_rescue", overrides: { exposure: 0.7 } };
+    const shadow = HEALTH.presets.find((p) => p.name === "shadow_rescue")!;
+    expect(effectiveAdjustments(state)).toEqual({ ...BASE_ADJ, shadow_lift: 60, exposure: 0.7 });
+    expect(effectiveAdjustments(state)).toEqual(resolveAdjustments(shadow, state.overrides));
+  });
+
+  it("coreimage-api の resolveAdjustments は同じ実装（再エクスポート）", async () => {
+    const api = await import("./coreimage-api");
+    expect(api.resolveAdjustments).toBe(resolveAdjustments);
   });
 });

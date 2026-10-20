@@ -64,10 +64,11 @@ export async function developPreviewCoreImage(
   return await invoke<CoreImagePreviewResult>("develop_preview_coreimage", { captureId, adjustments });
 }
 
-/** プリセット既定値 + ユーザー変更分の 9 キー全量（Rust は全量を要求する）。 */
-export function resolveAdjustments(preset: PresetInfo, overrides: Partial<Adjustments>): Adjustments {
-  return { ...preset.adjustments, ...overrides };
-}
+/**
+ * プリセット既定値 + ユーザー変更分の 9 キー全量（Rust は全量を要求する）。
+ * 実装は app-state.ts の 1 か所（`effectiveAdjustments` と共用）。ここからも import できるよう再エクスポートする。
+ */
+export { resolveAdjustments } from "./app-state";
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -110,8 +111,15 @@ export function toDevelopedResult(result: CoreImagePreviewResult, preset: Preset
 /**
  * Python（rawpy）プレビューへフォールバックしてよいエラーコード（§2.6）。
  * CLI・書き出し・アプリ領域などインフラ側の失敗だけを並べる（許可リスト）。
- * BUSY / INVALID_REQUEST / ADJUSTMENTS_INVALID / INVALID_CAPTURE_ID / 入力・設定エラー、
- * および未知のコードはフォールバックせずエラーとして表示する（不具合を隠さないため）。
+ * BUSY / INVALID_REQUEST / ADJUSTMENTS_INVALID / INVALID_CAPTURE_ID / ARW_NOT_FOUND /
+ * ARW_OUTSIDE_SOURCE_ROOT、および未知のコードはフォールバックせずエラーとして表示する
+ * （不具合を隠さないため）。
+ *
+ * 現像元フォルダの解決（Rust `read_source_root` / `resolve_arw`）の失敗はフォールバックする。
+ * Python の `local_raw/config.py: source_root()` は設定が無い・壊れている・保存したフォルダが
+ * 無いときに既定フォルダへ逃がすので、一覧（= Python が見ているフォルダ）のカットは rawpy なら
+ * 現像できる場合がある。CLI の入力・出力先チェック（INPUT_NOT_FOUND など）も、Rust が直前に
+ * 確かめた後の競合や CLI プロセス側の権限差で起きるもので、rawpy で救える場合がある。
  */
 const FALLBACK_CODES: ReadonlySet<string> = new Set([
   "SIDECAR_NOT_FOUND",
@@ -127,6 +135,15 @@ const FALLBACK_CODES: ReadonlySet<string> = new Set([
   "PROVENANCE_WRITE_FAILED",
   "APP_DATA_DIR_UNAVAILABLE",
   "INTERNAL_ERROR",
+  // 現像元フォルダの解決（Rust coreimage.rs: read_source_root / resolve_arw）
+  "SOURCE_ROOT_NOT_CONFIGURED",
+  "SOURCE_ROOT_NOT_FOUND",
+  "CONFIG_UNREADABLE",
+  "CONFIG_INVALID",
+  // CLI の入力・出力先チェック（Swift Request.swift。Rust の cli_error がコードをそのまま渡す）
+  "INPUT_NOT_FOUND",
+  "INPUT_NOT_READABLE",
+  "OUTPUT_DIR_NOT_FOUND",
 ]);
 
 /** invoke の reject 値が `CoreImageError` の形（code が文字列）なら取り出す。 */
