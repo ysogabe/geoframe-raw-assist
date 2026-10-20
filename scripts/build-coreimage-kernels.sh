@@ -46,7 +46,9 @@ fi
 TMP="$(mktemp -d -t geoframe-kernels)"
 trap 'command rm -rf "$TMP"' EXIT
 
-xcrun -sdk macosx metal -fcikernel -mmacosx-version-min=13.0 -c "$SRC" -o "$TMP/GeoFrameKernels.air"
+# ソースは stdin から渡す。パスで渡すと metallib に .metal の絶対パス（ビルドした機のホームディレクトリ）が
+# 埋め込まれる（-ffile-prefix-map / -fdebug-prefix-map / -g0 / 相対パス指定のいずれでも消えない。実測）。
+xcrun -sdk macosx metal -fcikernel -mmacosx-version-min=13.0 -x metal -c - -o "$TMP/GeoFrameKernels.air" < "$SRC"
 xcrun -sdk macosx metallib -cikernel "$TMP/GeoFrameKernels.air" -o "$TMP/GeoFrameKernels.metallib"
 
 B64="$(base64 < "$TMP/GeoFrameKernels.metallib" | tr -d '\n')"

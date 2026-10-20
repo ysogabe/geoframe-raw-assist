@@ -153,6 +153,9 @@ public struct FailureResponse: Encodable {
 public func encodeJSONLine<T: Encodable>(_ value: T) -> String {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    // filter から読み戻した値が非有限（壊れたメタデータ等）でも応答を落とさない（JSON に数値としては書けないので
+    // 文字列 "nan" / "inf" にする。通常の応答には現れない。`adjustments_applied.guards` の記録を届けるため）。
+    encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
     guard let data = try? encoder.encode(value), let string = String(data: data, encoding: .utf8) else {
         return #"{"error":{"code":"INTERNAL_ERROR","message":"failed to encode response"},"ok":false}"#
     }
@@ -236,7 +239,9 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     var guards: [String] = []
     if let adjustments = request.adjustments {
         let defaults = readDefaults(filter)
-        adjustmentsPlan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
+        let plan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
+        adjustmentsPlan = plan
+        guards.append(contentsOf: plan.guards)
         applyOverrides(request.settings, to: filter)
         // 白点ガード: 白点ガード ＞ 明示の settings.* ＞ adjustments の写像 ＞ profile（§4.2 の優先順位）。
         if WhiteDotGuard.needsGuard(
@@ -253,6 +258,10 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
 
     guard let decoded = filter.outputImage else {
         throw DevelopError(.renderFailed, "CIRAWFilter produced no output image")
+    }
+    // extent の検査は後段（長辺の Int 化・USM の長辺依存）より前に置く（無限・空の extent を Int() に渡さない）。
+    guard isUsableExtent(decoded.extent) else {
+        throw DevelopError(.renderFailed, "decoded image has an invalid extent")
     }
     var image = decoded
     var adjustmentsApplied: AdjustmentsApplied?
@@ -290,10 +299,10 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
             guards: guards
         )
     }
-    let extent = image.extent.integral
-    guard extent.width > 0, extent.height > 0, extent.width.isFinite, extent.height.isFinite else {
+    guard isUsableExtent(image.extent) else {
         throw DevelopError(.renderFailed, "output image has an invalid extent")
     }
+    let extent = image.extent.integral
     let t1 = DispatchTime.now()
 
     let (colorSpace, colorSpaceName) = OutputColor.space(for: request.format, colorSpace: request.outputColorSpace)
@@ -416,6 +425,17 @@ func readDefaults(_ filter: CIRAWFilter) -> DecoderDefaults {
 struct AdjustmentsDecoderPlan {
     let defaults: DecoderDefaults
     let miredShift: Double
+    /// デコード段で飛ばした写像の記録（`adjustments_applied.guards` に載る）。
+    var guards: [String] = []
+}
+
+/// レンダに使える extent か（有限・非空。`CIImage.infinite` や空画像を Int 化・レンダへ渡さない）。
+func isUsableExtent(_ extent: CGRect) -> Bool {
+    // CGRect.infinite は成分が有限（±greatestFiniteMagnitude/2）なので isInfinite で別に弾く。
+    guard !extent.isInfinite, !extent.isNull, !extent.isEmpty else { return false }
+    let integral = extent.integral
+    return extent.origin.x.isFinite && extent.origin.y.isFinite && extent.width.isFinite && extent.height.isFinite
+        && integral.width > 0 && integral.height > 0 && integral.width.isFinite && integral.height.isFinite
 }
 
 /// adjustments のデコード段（exposure / wb_temp / sharpness ≤ 1 / noise_reduction）を filter へ書く（§3.3）。
@@ -427,10 +447,16 @@ func applyAdjustmentsDecoder(_ adjustments: Adjustments, defaults: DecoderDefaul
 
     // wb_temp: 撮影時 WB の K を mired でずらす。tint は触らない。
     var miredShift = 0.0
+    var guards: [String] = []
     if adjustments.wbTemp != 0 {
-        let shifted = WhiteBalanceMapping.shift(k0: defaults.neutralTemperature, wbTemp: adjustments.wbTemp)
-        filter.neutralTemperature = Float(shifted.kelvin)
-        miredShift = shifted.miredShift
+        if WhiteBalanceMapping.isUsableK0(defaults.neutralTemperature) {
+            let shifted = WhiteBalanceMapping.shift(k0: defaults.neutralTemperature, wbTemp: adjustments.wbTemp)
+            filter.neutralTemperature = Float(shifted.kelvin)
+            miredShift = shifted.miredShift
+        } else {
+            // 読み戻した K0 が使えない（NaN・範囲外）: WB の写像は飛ばして記録だけ残す。
+            guards.append(WhiteBalanceMapping.invalidK0Guard)
+        }
     }
 
     // sharpness ≤ 1: デコーダ内シャープを既定 × s に弱める。> 1 は既定のまま（増分は後段 USM）。
@@ -448,7 +474,7 @@ func applyAdjustmentsDecoder(_ adjustments: Adjustments, defaults: DecoderDefaul
     if let color = nr.color { filter.colorNoiseReductionAmount = Float(color) }
 
     // highlight_recovery: 受理するが効かせない（オーナー判断 2。代替は #81）。
-    return AdjustmentsDecoderPlan(defaults: defaults, miredShift: miredShift)
+    return AdjustmentsDecoderPlan(defaults: defaults, miredShift: miredShift, guards: guards)
 }
 
 /// profile / settings を filter へ設定する（decoderVersion 設定後に呼ぶこと）。

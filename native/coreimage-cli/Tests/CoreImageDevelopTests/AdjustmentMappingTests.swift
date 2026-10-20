@@ -144,17 +144,52 @@ final class AdjustmentMappingTests: XCTestCase {
         XCTAssertTrue(WhiteBalanceMapping.kelvinRange.contains(cold.kelvin))
     }
 
+    func testEncodingSurvivesNonFiniteReadbacks() {
+        // 読み戻しが NaN でも応答（guards を含む）が INTERNAL_ERROR にならず書ける
+        let defaults = AdjustmentsApplied.Defaults(
+            sharpness_amount: 1, luminance_noise_reduction_amount: 0, color_noise_reduction_amount: 0,
+            neutral_temperature: .nan, neutral_tint: 0
+        )
+        let line = encodeJSONLine(defaults)
+        XCTAssertTrue(line.contains("\"neutral_temperature\":\"nan\""), line)
+        XCTAssertFalse(line.contains("INTERNAL_ERROR"))
+    }
+
+    func testK0UsabilityGuardsBrokenMetadata() {
+        XCTAssertTrue(WhiteBalanceMapping.isUsableK0(5000))
+        XCTAssertTrue(WhiteBalanceMapping.isUsableK0(2000))
+        XCTAssertTrue(WhiteBalanceMapping.isUsableK0(50000))
+        let bad: [Double] = [.nan, .infinity, -.infinity, 0, -5000, 1999.9, 50000.1, 1e9]
+        for value in bad {
+            XCTAssertFalse(WhiteBalanceMapping.isUsableK0(value), "\(value)")
+        }
+        XCTAssertEqual(WhiteBalanceMapping.invalidK0Guard, "wb_k0_out_of_range")
+    }
+
+    func testUsableExtentRejectsInfiniteAndEmpty() {
+        XCTAssertTrue(isUsableExtent(CGRect(x: 0, y: 0, width: 2400, height: 1600)))
+        XCTAssertTrue(isUsableExtent(CGRect(x: 0.5, y: -0.25, width: 10.2, height: 3.9)))
+        XCTAssertFalse(isUsableExtent(CGRect.infinite))
+        XCTAssertFalse(isUsableExtent(CGRect.null))
+        XCTAssertFalse(isUsableExtent(CGRect(x: 0, y: 0, width: 0, height: 100)))
+        XCTAssertFalse(isUsableExtent(CGRect(x: 0, y: 0, width: 100, height: 0)))
+        XCTAssertFalse(isUsableExtent(CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 100)))
+        XCTAssertFalse(isUsableExtent(CGRect(x: CGFloat.nan, y: 0, width: 100, height: 100)))
+    }
+
     func testNoiseReductionTable() {
-        // off は (0, 0)、light は既定のまま、full は既定 + 0.3 / 色 0.3 以上（暫定表）。
+        // off は (0, 0)、light は既定のまま、full は min(0.5, max(既定 + 0.3, 0.3)) / 色 0.3 以上（T5 で確定）。
+        XCTAssertEqual(NoiseReductionMapping.fullLuminanceCap, 0.5)
         let cases: [(Double, Double, NoiseReduction, Double?, Double?)] = [
             (0.01, 0, .off, 0, 0),
             (0.241, 0, .off, 0, 0),
             (0.241, 0, .light, nil, nil),
             (0.01, 0, .full, 0.31, 0.3),
             (0.0, 0, .full, 0.3, 0.3),
-            (0.241, 0, .full, 0.541, 0.3),
-            (0.357, 0, .full, 0.657, 0.3),
-            (0.9, 0.5, .full, 1.0, 0.5),
+            (0.15, 0, .full, 0.45, 0.3),
+            (0.241, 0, .full, 0.5, 0.3),
+            (0.357, 0, .full, 0.5, 0.3),
+            (0.9, 0.5, .full, 0.5, 0.5),
         ]
         for (lum, color, mode, wantLum, wantColor) in cases {
             let got = NoiseReductionMapping.amounts(mode, defaultLuminance: lum, defaultColor: color)

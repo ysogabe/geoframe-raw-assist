@@ -141,11 +141,21 @@ public func decoderSharpnessAmount(sharpness: Double, defaultAmount: Double) -> 
 // MARK: - wb_temp（カメラ WB の K を mired でずらす）
 
 public enum WhiteBalanceMapping {
-    /// wb_temp 1 単位あたりの mired シフト量。**暫定（ハーネスで較正）**: 設計書 §3.3 の推測値。
-    /// rawpy は R×(1+0.003v)・B×(1−0.003v) で、それと同じ大きさになる係数を T5 で決める。
+    /// wb_temp 1 単位あたりの mired シフト量。設計書 §3.3 の推測値 0.85 を T5（2026-10-20、比較レポート §16）で
+    /// 確認した: rawpy（R×(1+0.003v)・B×(1−0.003v)）の ±60 と近中立パッチの ln(R/B) の変化量を比べると、
+    /// 飽和画素を除いた 9 カットの比の中央値が ≈1.0（0.84〜1.24）だったのでそのまま採用する。
     public static let miredPerUnit = 0.85
     /// CIRAWFilter.neutralTemperature に書く K の範囲（リクエスト settings.neutral_temperature と同じ）。
     public static let kelvinRange = RequestParser.temperatureRange
+    /// `k0`（filter から読み戻した撮影時 WB）が使えないときに `adjustments_applied.guards` へ記録する名前。
+    /// WB の写像は飛ばし、neutralTemperature は既定のまま（他の調整は効く）。
+    public static let invalidK0Guard = "wb_k0_out_of_range"
+
+    /// 読み戻した `k0` が有限で kelvinRange に入っているか。外れた値（NaN・0・1e9 等。壊れたメタデータや
+    /// 将来の OS の挙動変化）で mired が発散・符号反転した K を filter に書かないための検査。
+    public static func isUsableK0(_ k0: Double) -> Bool {
+        k0.isFinite && kelvinRange.contains(k0)
+    }
 
     /// `K0`（撮影時 WB の色温度）と `wb_temp` から書き込む K を求める。
     /// `mired = 1e6/K0 − v × MIRED_PER_UNIT`、K は kelvinRange にクランプ。v > 0（暖）で K が増える。
@@ -169,8 +179,10 @@ public enum WhiteBalanceMapping {
 /// - light: 既定のまま（apple_default は低 ISO でほぼ 0、高 ISO で効く。rawpy の light と同じ形）
 /// - full: `lum = min(1, max(既定 + FULL_LUM_BOOST, FULL_LUM_FLOOR))`、`color = max(既定, FULL_COLOR_FLOOR)`
 ///
+/// - full の輝度は `FULL_LUM_CAP`（0.5）で頭打ち。
+///
 /// ISO 帯別の目安（macOS 27.0.1 / decoder 9 の既定から。README「noise_reduction の表」）:
-/// ISO < 800 既定 ≈0.01/0 → full 0.31/0.30、ISO 3200 0.241/0 → full 0.541/0.30、ISO 6400 0.357/0 → full 0.657/0.30。
+/// ISO < 800 既定 ≈0.01/0 → full 0.31/0.30、ISO 3200 0.241/0 → full 0.5/0.30、ISO 6400 0.357/0 → full 0.5/0.30。
 public enum NoiseReductionMapping {
     /// **暫定（ハーネスで較正）**: full で既定の輝度 NR に足す量。
     public static let fullLuminanceBoost = 0.3
@@ -178,6 +190,10 @@ public enum NoiseReductionMapping {
     public static let fullLuminanceFloor = 0.3
     /// **暫定（ハーネスで較正）**: full の色 NR の下限。
     public static let fullColorFloor = 0.3
+    /// full の輝度 NR の上限。T5（2026-10-20、比較レポート §16）の輝度 NR 掃引（0.3〜0.7、6 カット）で、
+    /// 0.5 を超えると空の高周波がカメラ比 0.5 を割り（ISO 6400 の 0.657 で 0.33）、星の残存率は全段 0.995 以上だった。
+    /// 「light より目に見えて滑らか（空ノイズ light 比 ≈0.8）で塗りつぶしが無い」範囲として 0.5 で頭打ちにする。
+    public static let fullLuminanceCap = 0.5
 
     public static func amounts(
         _ mode: NoiseReduction, defaultLuminance: Double, defaultColor: Double
@@ -188,7 +204,7 @@ public enum NoiseReductionMapping {
         case .light:
             return (nil, nil)
         case .full:
-            let luminance = min(1.0, max(defaultLuminance + fullLuminanceBoost, fullLuminanceFloor))
+            let luminance = min(fullLuminanceCap, max(defaultLuminance + fullLuminanceBoost, fullLuminanceFloor))
             let color = min(1.0, max(defaultColor, fullColorFloor))
             return (luminance, color)
         }

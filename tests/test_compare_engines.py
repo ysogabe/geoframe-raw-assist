@@ -535,6 +535,22 @@ class SkyAndImpulseTests(unittest.TestCase):
         self.assertEqual(ce.impulse_count(gray, exclude)["impulse_count"], 4)
         self.assertEqual(ce.impulse_count(np.full((50, 50), 20, np.uint8))["impulse_count"], 0)
 
+    def test_impulse_count_ignores_points_present_in_reference(self):
+        # 基準（原寸縮小）にも同じ場所に輝点があれば被写体の輝点として数えない。基準に無い点だけが残る
+        gray = np.full((200, 200), 20, np.uint8)
+        for y, x in [(10, 10), (50, 120), (150, 30)]:
+            gray[y, x] = 200
+        ref = np.full((200, 200), 20, np.uint8)
+        ref[10, 10] = 200           # 同じ場所にある
+        ref[51, 121] = 60           # 1px ずれていても近傍（3x3）で見る。min_diff × 0.5 = 12 以上なら「ある」
+        self.assertEqual(ce.impulse_count(gray)["impulse_count"], 3)
+        self.assertEqual(ce.impulse_count(gray, reference_gray8=ref)["impulse_count"], 1)
+        faint = np.full((200, 200), 20, np.uint8)
+        faint[10, 10] = 28          # 差 8 < 12 は「無い」扱い
+        self.assertEqual(ce.impulse_count(gray, reference_gray8=faint)["impulse_count"], 3)
+        with self.assertRaises(ValueError):
+            ce.impulse_count(gray, reference_gray8=ref[:100])
+
     def test_corner_center_noise_ratio(self):
         rng = np.random.default_rng(4)
         gray = np.clip(rng.normal(100, 1.0, (400, 600)), 0, 255)
@@ -933,6 +949,11 @@ class AdjustmentMetricTests(unittest.TestCase):
         warm[:, :64] = (140, 120, 100)
         self.assertGreater(ce.rb_log_ratio(warm, mask), 0.1)
         self.assertTrue(math.isnan(ce.rb_log_ratio(img, np.zeros((64, 128), dtype=bool))))
+        # 測る画像で飽和・黒つぶれした画素は除く（WB を動かしても R/B が動かない）
+        clipped = warm.copy()
+        clipped[:32, :64] = (255, 255, 255)
+        self.assertAlmostEqual(ce.rb_log_ratio(clipped, mask), ce.rb_log_ratio(warm, mask), places=6)
+        self.assertTrue(math.isnan(ce.rb_log_ratio(np.full((64, 128, 3), 255, dtype=np.uint8), mask)))
         # 黒つぶれ・白飛びタイルは近中立に選ばない
         dark = np.zeros((64, 64, 3), dtype=np.uint8)
         self.assertFalse(ce.neutral_tile_mask(dark, block=32).any())
@@ -1048,6 +1069,28 @@ class AdjustmentCheckTests(unittest.TestCase):
         self.assertTrue(checks["highlight_recovery_ignored"]["pass"])
         self.assertTrue(checks["sharpness_ci_edge_monotonic"]["pass"])
         self.assertTrue(checks["nr_ci_monotonic"]["pass"])
+        self.assertTrue(checks["exposure_ci_m1_vs_rawpy"]["pass"])
+        self.assertTrue(checks["sharpness_ci_16_flat_noise_vs_identity"]["pass"])
+
+    def test_nr_checks_accept_relative_criteria(self):
+        # 昼カット: light の時点で star_recall が低くても full が減らさなければ可。空の高周波も light 比で可
+        metrics = _sweep_metrics()
+        metrics["ci"]["identity"]["star_recall"] = 0.92
+        metrics["ci"]["nr_full"]["star_recall"] = 0.915
+        metrics["ci"]["identity"]["sky_hf_ratio"] = 0.2
+        metrics["ci"]["nr_full"]["sky_hf_ratio"] = 0.19
+        checks = self._checks(metrics, camera={"flat_noise": 2.0, "sky_hf_ratio": 0.5})
+        self.assertTrue(checks["nr_ci_full_star_recall"]["pass"])
+        self.assertTrue(checks["nr_ci_full_sky_hf_vs_camera"]["pass"])
+        # 基準点が少なければ 1.5 点分までの低下は揺らぎとして許す（n=30: 0.05）
+        metrics["ci"]["nr_full"]["star_recall"] = 0.88
+        self.assertTrue(self._checks(metrics)["nr_ci_full_star_recall"]["pass"])
+        metrics["ci"]["nr_full"]["star_recall"] = 0.90
+        metrics["ci"]["nr_full"]["star_recall_n"] = 1000
+        metrics["ci"]["nr_full"]["sky_hf_ratio"] = 0.15
+        checks = self._checks(metrics, camera={"flat_noise": 2.0, "sky_hf_ratio": 0.5})
+        self.assertIs(checks["nr_ci_full_star_recall"]["pass"], False)
+        self.assertIs(checks["nr_ci_full_sky_hf_vs_camera"]["pass"], False)
 
     def test_checks_fail_on_wrong_direction_magnitude_and_impulses(self):
         bad = _sweep_metrics(ci_scale=1.6, wb_sign=-1.0)
@@ -1055,7 +1098,8 @@ class AdjustmentCheckTests(unittest.TestCase):
         bad["ci"]["nr_off_sh0"]["ci_adj_guards"] = ""
         bad["ci"]["nr_full"]["star_recall"] = 0.9
         checks = self._checks(bad)
-        for name in ("exposure_ci_m1_stops", "exposure_ci_p1_stops", "wb_p60_ci_direction", "wb_p60_direction_vs_rawpy",
+        for name in ("exposure_ci_m1_stops", "exposure_ci_p1_stops", "exposure_ci_m1_vs_rawpy", "exposure_ci_p1_vs_rawpy",
+                     "wb_p60_ci_direction", "wb_p60_direction_vs_rawpy",
                      "wb_p60_ratio_vs_rawpy", "white_dot_nr_off_sh0_impulse_vs_full", "white_dot_nr_off_sh0_guard",
                      "nr_ci_full_star_recall"):
             self.assertIs(checks[name]["pass"], False, name)
@@ -1068,7 +1112,9 @@ class AdjustmentCheckTests(unittest.TestCase):
         checks = self._checks(metrics, camera={"flat_noise": float("nan"), "sky_hf_ratio": float("nan")})
         self.assertIsNone(checks["sharpness_ci_edge_monotonic"]["pass"])
         self.assertIsNone(checks["sharpness_ci_10_edge_ratio"]["pass"])
-        self.assertIsNone(checks["sharpness_ci_16_flat_noise_vs_camera"]["pass"])
+        metrics["ci"]["identity"]["flat_noise"] = float("nan")
+        checks = self._checks(metrics, camera={"flat_noise": float("nan"), "sky_hf_ratio": float("nan")})
+        self.assertIsNone(checks["sharpness_ci_16_flat_noise_vs_identity"]["pass"])
         self.assertIsNone(checks["nr_ci_full_star_recall"]["pass"])
         self.assertIsNone(checks["nr_ci_full_sky_hf_vs_camera"]["pass"])
 

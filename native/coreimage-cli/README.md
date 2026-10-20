@@ -183,21 +183,21 @@ draft mode は常に OFF。
 | キー | 写像 | 段 |
 |---|---|---|
 | `exposure` | `CIRAWFilter.exposure`（EV、1:1） | デコード |
-| `wb_temp` (v) | `K0` = 読み戻した撮影時 WB の色温度。`mired = 1e6/K0 − v × 0.85`、`K = clamp(1e6/mired, 2000, 50000)` → `neutralTemperature`。tint は触らない。v = 0 は書かない。**係数 0.85 は暫定（ハーネスで較正）** | デコード |
+| `wb_temp` (v) | `K0` = 読み戻した撮影時 WB の色温度。`mired = 1e6/K0 − v × 0.85`、`K = clamp(1e6/mired, 2000, 50000)` → `neutralTemperature`。tint は触らない。v = 0 は書かない。係数 0.85 はハーネスで確認済み（rawpy の ±60 と同じ大きさ。比較レポート §16）。`K0` が有限でない・2000..50000 の外なら写像を飛ばし `adjustments_applied.guards` に `"wb_k0_out_of_range"` を記録する | デコード |
 | `shadow_lift` (v) | `x + (v/100)·2.0·x·(1−x)²` → [0,1] クリップ（rawpy `_apply_shadow_lift_array`） | 後段 |
 | `highlight_recovery` | **受理するが効かせない**（no-op、`adjustments_applied.ignored`。代替は #81） | — |
 | `brightness` / `contrast` / `saturation` | `x·b` → `(x−0.5)·c+0.5` → Rec.709 輝度 Y 基準 `Y + (x−Y)·s`（rawpy `_apply_tone_array`。途中はクリップしない） | 後段 |
 | `sharpness` (s) | s < 1: `sharpnessAmount = 既定 × s`。s = 1: 既定のまま。s > 1: 既定のまま + 後段の輝度 USM（増分だけ: `gain = min(1.2, baseGain × (s−1) × 1.5) × ISO 減衰`）。σ・baseGain・コアリング・ISO 減衰は rawpy `_capture_sharpen_params` の定数をそのまま移植（長辺は出力 extent の長辺、ISO は EXIF。不明ならコアリング 0.5/255・減衰なし） | デコード + 後段 |
-| `noise_reduction` | off: 輝度・色 NR とも 0。light: apple_default の既定のまま。full: `輝度 = min(1, max(既定 + 0.3, 0.3))`、`色 = max(既定, 0.3)`（**暫定（ハーネスで較正）**） | デコード |
+| `noise_reduction` | off: 輝度・色 NR とも 0。light: apple_default の既定のまま。full: `輝度 = min(0.5, max(既定 + 0.3, 0.3))`、`色 = max(既定, 0.3)`（上限 0.5 はハーネスの輝度 NR 掃引で確定。比較レポート §16） | デコード |
 
-#### noise_reduction の表（apple_default v9・macOS 27.0.1、**暫定**）
+#### noise_reduction の表（apple_default v9・macOS 27.0.1）
 
 | ISO 帯 | light（= 既定）輝度 / 色 | off | full |
 |---|---|---|---|
 | < 800 | ≈0.01 / 0 | 0 / 0 | ≈0.31 / 0.30 |
-| 800〜1600 | 未計測 | 0 / 0 | 既定 + 0.3 / 0.30 |
-| 3200 | 0.241 / 0 | 0 / 0 | 0.541 / 0.30 |
-| 6400 | 0.357 / 0 | 0 / 0 | 0.657 / 0.30 |
+| 800〜1600 | 未計測 | 0 / 0 | min(0.5, 既定 + 0.3) / 0.30 |
+| 3200 | 0.241 / 0 | 0 / 0 | 0.5 / 0.30 |
+| 6400 | 0.357 / 0 | 0 / 0 | 0.5 / 0.30 |
 
 既定値は OS 更新で変わりうる。実際の値は応答の `adjustments_applied.defaults` と `applied` を見ること。
 

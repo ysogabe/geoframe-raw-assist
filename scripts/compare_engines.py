@@ -1822,16 +1822,38 @@ def sky_stats(rgb8: np.ndarray, sky_pixels: np.ndarray, exclude: np.ndarray | No
     return out
 
 
+#: ``impulse_count(reference_gray8=...)`` で「基準画像にも同じ場所に局所的な明点がある」と見なす閾値（min_diff 比）。
+#: 基準（原寸を INTER_AREA で縮めたもの）の 3x3 メディアンとの差が min_diff × この比以上なら、その候補は
+#: 白点ではなく被写体の輝点（葉の照り返し・草の穂など）として数えない。
+#: T5（2026-10-20、比較レポート §16）の実測: 昼 6 カットの identity で 1818 / 660 / 74 / 150 / 1 / 2 が
+#: 0.5 で 1 / 0 / 0 / 0 / 0 / 0 になり、本物の白点（neutral・NR 0・sharpness 0、DSC07415 2400px）は 209 → 208 残る
+#: （0.33 でも 204 残る。基準側の輝点と本物の白点は分離できる）。
+IMPULSE_REFERENCE_RATIO = 0.5
+
+
 def impulse_count(gray8: np.ndarray, exclude: np.ndarray | None = None,
-                  min_diff: float = IMPULSE_MIN_DIFF, max_area: int = IMPULSE_MAX_AREA) -> dict[str, float]:
+                  min_diff: float = IMPULSE_MIN_DIFF, max_area: int = IMPULSE_MAX_AREA,
+                  reference_gray8: np.ndarray | None = None) -> dict[str, float]:
     """孤立した 1〜3 px の高輝度点（白点ノイズ）を数える。
 
     3x3 メディアンとの差が min_diff 以上の画素の連結成分で、面積 max_area 以下かつ exclude（星候補を
     膨らませたマスク）に触れないもの。count と 100 万画素あたりの数を返す。
+
+    ``reference_gray8``（同寸の基準。``impulse_vs_full`` では原寸レンダを INTER_AREA で縮めたもの）を渡すと、
+    基準側でも同じ場所（3x3 近傍の最大）が 3x3 メディアンより ``min_diff × IMPULSE_REFERENCE_RATIO`` 以上明るい
+    候補は「基準にもある輝点」として数えない。星候補マスク（``exclude``）は暗い空の点にしか効かず、昼の葉や草の
+    照り返し（1〜3 px の輝点が密集し、preview の縮小経路の方が INTER_AREA より鋭い）を白点として数えてしまうため。
     """
     g = gray8.astype(np.float32)
     med = cv2.medianBlur(gray8.astype(np.uint8), 3).astype(np.float32)
     cand = ((g - med) >= min_diff).astype(np.uint8)
+    ref_excess: np.ndarray | None = None
+    if reference_gray8 is not None:
+        if reference_gray8.shape != gray8.shape:
+            raise ValueError("impulse_count の reference_gray8 は同寸が必要です")
+        rg = reference_gray8.astype(np.float32)
+        rmed = cv2.medianBlur(reference_gray8.astype(np.uint8), 3).astype(np.float32)
+        ref_excess = cv2.dilate(rg - rmed, np.ones((3, 3), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(cand, 8)
     hits = 0
     if count > 1:
@@ -1849,8 +1871,11 @@ def impulse_count(gray8: np.ndarray, exclude: np.ndarray | None = None,
             patch = g[y0:y1, x0:x1]
             inside = labels[y0:y1, x0:x1] == index
             peak = float(patch[inside].max())
-            if float(patch[~inside].max()) <= peak - min_diff:
-                hits += 1
+            if float(patch[~inside].max()) > peak - min_diff:
+                continue
+            if ref_excess is not None and float(ref_excess[y0:y1, x0:x1][inside].max()) >= min_diff * IMPULSE_REFERENCE_RATIO:
+                continue
+            hits += 1
     h, w = g.shape
     return {"impulse_count": hits, "impulse_per_mpx": hits / (h * w / 1e6)}
 
@@ -2243,7 +2268,9 @@ def night_measure(
         if full_refs and variant in full_refs:
             ref_gray01 = luma_of(full_refs[variant].astype(np.float32) / 255.0)
             ref_points = dilate_mask(star_point_mask(ref_gray01), 2)
-            row["impulse_vs_full"] = impulse_count(gray8, ref_points)["impulse_count"]
+            # 基準側にも同じ場所に輝点があれば数えない（昼の葉・草の照り返しの誤検出を除く。IMPULSE_REFERENCE_RATIO）
+            ref_gray8 = cv2.cvtColor(full_refs[variant], cv2.COLOR_RGB2GRAY)
+            row["impulse_vs_full"] = impulse_count(gray8, ref_points, reference_gray8=ref_gray8)["impulse_count"]
             row["impulse_vs_full_per_mpx"] = row["impulse_vs_full"] / (gray8.shape[0] * gray8.shape[1] / 1e6)
         row.update(corner_center_noise(gray8))
         row.update(image_metrics(rgb, None if variant == "camera" else camera))
@@ -2809,14 +2836,36 @@ ADJ_ORACLE_VARIANTS: tuple[tuple[str, dict[str, Any] | str, str], ...] = (
 #: オラクルの暫定閾値（設計書 §3.7）: ΔE76 の中央値 ≤ 0.3、チャンネル差の p99 ≤ 1/255。
 ORACLE_DE76_MEDIAN_MAX = 0.3
 ORACLE_CHANNEL_P99_MAX = 1.0 / 255.0
-#: その他の合否の目安（設計書 §3.7。すべて暫定）
-ADJ_EXPOSURE_STOP_TOL = 0.15
+#: その他の合否の目安（設計書 §3.7 の暫定値を T5（2026-10-20、昼 6 + 夜 3 カット。比較レポート §16）で確定したもの）。
+#: exposure: ±1 EV の log2 差の許容。§3.7 の 0.15 → 0.4。rawpy は `bright = 2**exposure`（リニアの純粋な 2 倍）なのに
+#: 同じ指標が全 9 カットで ±1.15〜1.21 を読む（出力ガンマ・非クリップ画素の選別による指標自身の偏り）。CI は
+#: apple_default のトーンカーブ越しに ±1.0〜1.38 と読める。絶対値は粗い健全性確認に下げ、大きさは rawpy 比で見る。
+ADJ_EXPOSURE_STOP_TOL = 0.4
+#: exposure: CI の log2 差 / rawpy の log2 差。実測 0.81〜1.18（昼・夜）。
+ADJ_EXPOSURE_RATIO_RANGE = (0.8, 1.25)
 ADJ_WB_RATIO_RANGE = (0.7, 1.4)
+#: sharpness 1.0（= apple_default のデコーダ内シャープ既定）のエッジ幅のカメラ比。較正できる定数が無く
+#: （デコーダの既定値）、カット・レンズで 0.87〜1.02 に散るので §3.7 の ±0.05 → ±0.15（0.80..1.10）。
 ADJ_SHARP_BASELINE_WIDTH = 0.95
-ADJ_SHARP_BASELINE_TOL = 0.05
+ADJ_SHARP_BASELINE_TOL = 0.15
+#: sharpness 1.6 の flat_noise。§3.7 は「カメラ比 1.5 倍以内」だったが、identity（1.0）の時点でカメラ比 0.9〜1.41 と
+#: カット差が大きい（apple_default は低 ISO で NR ≈ 0）。USM が足すノイズを見るのが目的なので identity 比にする。
+#: 実測 1.02〜1.21。
 ADJ_SHARP16_NOISE_MAX = 1.5
+#: NR full の星の残存率。星空カットの絶対値（§3.7 の 0.99）に加え、昼カットでは「light より減らない」で判定する
+#: （昼の「強い点」は葉の照り返しで、identity の時点で 0.92〜0.99。full はそれを 1 つも減らしていない）。
 ADJ_NR_FULL_RECALL_MIN = 0.99
-ADJ_NR_FULL_HF_MIN = 0.7
+#: light からの残存率の低下の許容。基準点が少ないカットでは 1 点分（1/n）の揺らぎが 0.01 を超える
+#: （DSC07402: 81 点中 1 点 = 0.012。輝度 NR 0.5 で 1 点落ち、0.6 では落ちない = 測定の揺らぎ）ので、
+#: 1.5 点分までは許す（max(0.01, 1.5/n)）。
+ADJ_NR_FULL_RECALL_DROP_MAX = 0.01
+ADJ_NR_FULL_RECALL_DROP_POINTS = 1.5
+#: NR full の空の高周波比（塗りつぶし防止）。§3.7 は camera 比 0.7 だったが、輝度 NR の掃引（0.3〜0.7、6 カット）では
+#: ISO 3200 で 0.5 以上・ISO 6400 で 0.42 以上にすると 0.7 を割る一方、星の残存率は全段 0.995〜1.0 で塗りつぶしは
+#: 目視でも出ない（§16）。full の表を 0.5 で頭打ちにし、閾値は camera 比 0.5 にする。light の時点で camera 比 0.7 を
+#: 割るカット（昼の望遠 DSC04872: 0.57）は「空」が空でないので、light 比 0.9 以上なら可とする。
+ADJ_NR_FULL_HF_MIN = 0.5
+ADJ_NR_FULL_HF_VS_LIGHT_MIN = 0.9
 ADJ_IMPULSE_MAX = 10
 ADJ_ELAPSED_RATIO_MAX = 1.5
 #: 近中立タイル（カメラ JPEG で彩度下位 10%）と暗部（輝度下位 25%）
@@ -2957,13 +3006,29 @@ def neutral_tile_mask(camera_rgb8: np.ndarray, block: int = NEUTRAL_TILE_BLOCK, 
     return mask
 
 
-def rb_log_ratio(rgb8: np.ndarray, mask: np.ndarray) -> float:
-    """mask 画素のリニア R 平均 / B 平均の自然対数（暖色ほど大きい）。"""
+#: ``rb_log_ratio`` で測る画素の最大チャンネルの範囲（測る画像自身で判定）。白飛び・黒つぶれに近い画素は WB を
+#: 動かしても R/B 比が動かない（apple_default は 0.9 付近からハイライトを圧縮し、rawpy の明るい現像は 0.98 で飽和する）。
+#: T5（2026-10-20）: 近中立タイルをカメラ JPEG だけで決めていたため、rawpy が明るく現像する DSC04453 では rawpy 側の
+#: 37〜42% が飽和して rawpy の効きが半分に、逆光の DSC04473 では CI 側の 19〜22% が飽和して CI の効きが 1/3 に見えた
+#: （比 1.93 / 0.37）。上限 0.98 では 0.71 / 0.47〜0.76、0.9 で 0.84〜1.03 に収まる。
+RB_PIXEL_RANGE = (0.05, 0.9)
+
+
+def rb_log_ratio(rgb8: np.ndarray, mask: np.ndarray, pixel_range: tuple[float, float] = RB_PIXEL_RANGE) -> float:
+    """mask 画素のリニア R 平均 / B 平均の自然対数（暖色ほど大きい）。
+
+    測る画像自身で最大チャンネルが ``pixel_range`` の外（飽和・黒つぶれ）の画素は除く（``RB_PIXEL_RANGE``）。
+    """
     if not mask.any():
         return float("nan")
-    lin = srgb_to_linear(rgb8.astype(np.float32) / 255.0)
-    r = float(lin[..., 0][mask].mean())
-    b = float(lin[..., 2][mask].mean())
+    rgb01 = rgb8.astype(np.float32) / 255.0
+    peak = rgb01.max(axis=2)
+    valid = mask & (peak > pixel_range[0]) & (peak < pixel_range[1])
+    if valid.sum() < 64:
+        return float("nan")
+    lin = srgb_to_linear(rgb01)
+    r = float(lin[..., 0][valid].mean())
+    b = float(lin[..., 2][valid].mean())
     return math.log(r / b) if r > 0 and b > 0 else float("nan")
 
 
@@ -3170,6 +3235,11 @@ def adjustment_checks(
     m1, p1 = stops("exp_m1", "ci"), stops("exp_p1", "ci")
     checks.append(_check("exposure_ci_m1_stops", m1, f"-1±{ADJ_EXPOSURE_STOP_TOL}", abs(m1 + 1) <= ADJ_EXPOSURE_STOP_TOL if fin(m1) else None))
     checks.append(_check("exposure_ci_p1_stops", p1, f"+1±{ADJ_EXPOSURE_STOP_TOL}", abs(p1 - 1) <= ADJ_EXPOSURE_STOP_TOL if fin(p1) else None))
+    # 大きさは rawpy 比（指標自身の偏りが打ち消える。ADJ_EXPOSURE_RATIO_RANGE）
+    rlo, rhi = ADJ_EXPOSURE_RATIO_RANGE
+    for variant in ("exp_m1", "exp_p1"):
+        rm = _num(d.get((variant, "exposure_stops"), {}).get("ratio"))
+        checks.append(_check(f"exposure_ci_{variant[-2:]}_vs_rawpy", rm, f"{rlo}..{rhi}", (rlo <= rm <= rhi) if fin(rm) else None))
     for engine_name in ("ci", "rawpy"):
         a, b = stops("exp_m1", engine_name), stops("exp_p1", engine_name)
         checks.append(_check(f"exposure_{engine_name}_monotonic", f"{a:.3f} < 0 < {b:.3f}", "-1 < 0 < +1", (a < 0 < b) if fin(a, b) else None))
@@ -3195,23 +3265,32 @@ def adjustment_checks(
                          (w08 > w10 > w16) if fin(w08, w10, w16) else None))
     checks.append(_check("sharpness_ci_10_edge_ratio", w10, f"{ADJ_SHARP_BASELINE_WIDTH}±{ADJ_SHARP_BASELINE_TOL}",
                          abs(w10 - ADJ_SHARP_BASELINE_WIDTH) <= ADJ_SHARP_BASELINE_TOL if fin(w10) else None))
-    n16, ncam = _num(ci.get("sharp_16", {}).get("flat_noise")), _num(camera.get("flat_noise"))
-    nratio = n16 / ncam if fin(n16, ncam) and ncam > 0 else float("nan")
-    checks.append(_check("sharpness_ci_16_flat_noise_vs_camera", nratio, f"≤{ADJ_SHARP16_NOISE_MAX}",
-                         nratio <= ADJ_SHARP16_NOISE_MAX if fin(nratio) else None))
+    n16, n10, ncam = (_num(ci.get("sharp_16", {}).get("flat_noise")), _num(ci.get("identity", {}).get("flat_noise")),
+                      _num(camera.get("flat_noise")))
+    nratio = n16 / n10 if fin(n16, n10) and n10 > 0 else float("nan")
+    checks.append(_check("sharpness_ci_16_flat_noise_vs_identity", nratio, f"≤{ADJ_SHARP16_NOISE_MAX}",
+                         nratio <= ADJ_SHARP16_NOISE_MAX if fin(nratio) else None,
+                         flat_noise_vs_camera=n16 / ncam if fin(n16, ncam) and ncam > 0 else float("nan")))
     # noise_reduction: off > light > full（空があれば sky_noise、無ければ flat_noise）、full の星と塗りつぶし
     key = "sky_noise" if fin(*(_num(ci.get(v, {}).get("sky_noise")) for v in ("nr_off", "identity", "nr_full"))) else "flat_noise"
     off, light, full = (_num(ci.get(v, {}).get(key)) for v in ("nr_off", "identity", "nr_full"))
     checks.append(_check("nr_ci_monotonic", f"{off:.3f} > {light:.3f} > {full:.3f}", f"off > light > full（{key}）",
                          (off > light > full) if fin(off, light, full) else None))
     recall = _num(ci.get("nr_full", {}).get("star_recall"))
-    has_stars = _num(ci.get("nr_full", {}).get("star_recall_n")) > 0
-    checks.append(_check("nr_ci_full_star_recall", recall, f"≥{ADJ_NR_FULL_RECALL_MIN}",
-                         recall >= ADJ_NR_FULL_RECALL_MIN if fin(recall) and has_stars else None,
-                         light_star_recall=_num(ci.get("identity", {}).get("star_recall"))))
+    light_recall = _num(ci.get("identity", {}).get("star_recall"))
+    recall_n = _num(ci.get("nr_full", {}).get("star_recall_n"))
+    has_stars = recall_n > 0
+    drop_max = max(ADJ_NR_FULL_RECALL_DROP_MAX, ADJ_NR_FULL_RECALL_DROP_POINTS / recall_n) if has_stars else ADJ_NR_FULL_RECALL_DROP_MAX
+    recall_ok = recall >= ADJ_NR_FULL_RECALL_MIN or (fin(light_recall) and recall >= light_recall - drop_max)
+    checks.append(_check("nr_ci_full_star_recall", recall,
+                         f"≥{ADJ_NR_FULL_RECALL_MIN} か light − max({ADJ_NR_FULL_RECALL_DROP_MAX}, {ADJ_NR_FULL_RECALL_DROP_POINTS}/n) 以上",
+                         recall_ok if fin(recall) and has_stars else None, light_star_recall=light_recall, recall_drop_max=drop_max))
     hf, hf_cam = _num(ci.get("nr_full", {}).get("sky_hf_ratio")), _num(camera.get("sky_hf_ratio"))
+    hf_light = _num(ci.get("identity", {}).get("sky_hf_ratio"))
+    hf_ok = hf >= ADJ_NR_FULL_HF_MIN * hf_cam or (fin(hf_light) and hf >= ADJ_NR_FULL_HF_VS_LIGHT_MIN * hf_light)
     checks.append(_check("nr_ci_full_sky_hf_vs_camera", hf / hf_cam if fin(hf, hf_cam) and hf_cam > 0 else float("nan"),
-                         f"≥{ADJ_NR_FULL_HF_MIN}", (hf >= ADJ_NR_FULL_HF_MIN * hf_cam) if fin(hf, hf_cam) else None))
+                         f"≥{ADJ_NR_FULL_HF_MIN} か light 比 ≥{ADJ_NR_FULL_HF_VS_LIGHT_MIN}", hf_ok if fin(hf, hf_cam) else None,
+                         hf_vs_light=hf / hf_light if fin(hf, hf_light) and hf_light > 0 else float("nan")))
     # 白点: impulse_vs_full ≤ 10、ガードは nr_off_sh0 だけで発動
     for variant in ADJ_WHITE_DOT_VARIANTS:
         imp = _num(ci.get(variant, {}).get("impulse_vs_full"))
@@ -3576,6 +3655,10 @@ def run_adjustments(ctx: RunContext, selection: list[dict[str, Any]], features_b
             "sharp_baseline_width": ADJ_SHARP_BASELINE_WIDTH, "sharp_baseline_tol": ADJ_SHARP_BASELINE_TOL,
             "sharp16_noise_max": ADJ_SHARP16_NOISE_MAX, "nr_full_recall_min": ADJ_NR_FULL_RECALL_MIN,
             "nr_full_hf_min": ADJ_NR_FULL_HF_MIN, "impulse_max": ADJ_IMPULSE_MAX, "elapsed_ratio_max": ADJ_ELAPSED_RATIO_MAX,
+            "exposure_ratio_range": ADJ_EXPOSURE_RATIO_RANGE, "nr_full_recall_drop_max": ADJ_NR_FULL_RECALL_DROP_MAX,
+            "nr_full_recall_drop_points": ADJ_NR_FULL_RECALL_DROP_POINTS,
+            "nr_full_hf_vs_light_min": ADJ_NR_FULL_HF_VS_LIGHT_MIN, "impulse_reference_ratio": IMPULSE_REFERENCE_RATIO,
+            "rb_pixel_range": RB_PIXEL_RANGE,
         },
         "baseline": str(ADJ_BASELINE_JSON.relative_to(PROJECT_ROOT)),
         "regression_script": "scripts/coreimage-regression-applied.sh <ARW のフォルダ>",

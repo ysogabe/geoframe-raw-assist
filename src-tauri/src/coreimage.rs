@@ -841,13 +841,26 @@ static DEVELOP_SLOT: DevelopSlot = DevelopSlot::new(MAX_WAITING);
 // ---------------------------------------------------------------------------
 
 /// 来歴 JSON を一時ファイル経由で原子的に書く。
+/// 一時ファイルを新規作成でだけ開く（既存のファイル・シンボリックリンクを辿って書かない）。
+fn create_new_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 fn write_provenance(path: &Path, body: &str) -> Result<(), CoreImageError> {
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let temp = path.with_file_name(provenance_temp_name(&file_name));
-    let result = fs::write(&temp, body).and_then(|_| fs::rename(&temp, path));
+    let result = create_new_file(&temp)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+        })
+        .and_then(|_| fs::rename(&temp, path));
     if let Err(error) = result {
         let _ = fs::remove_file(&temp);
         return Err(CoreImageError::new(
@@ -1393,6 +1406,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "SIDECAR_SPAWN_FAILED");
+    }
+
+    #[test]
+    fn provenance_temp_is_created_new_and_never_follows_existing_entries() {
+        let dir = TempDir::new("provenance");
+        let target = dir.path().join("DSC00001.json");
+        write_provenance(&target, "{\"ok\":true}").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"ok\":true}");
+        // 2 回目は上書き（rename で置き換える）
+        write_provenance(&target, "{\"ok\":2}").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"ok\":2}");
+        // 既にある名前（シンボリックリンク）は create_new で拒まれ、リンク先は書き換わらない
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, "keep").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let error = create_new_file(&link).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
     }
 
     #[test]
