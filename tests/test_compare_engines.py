@@ -437,3 +437,297 @@ class SharpnessMetricTests(unittest.TestCase):
         sharpened = ce.apply_rawpy_finish(edge, 100)
         # USM のオーバーシュートでエッジ直近の明側が 200 を超える
         self.assertGreater(int(sharpened[:, 32, 0].max()), int(sharpened[:, 50, 0].max()))
+
+
+# --- 夜景・星空・ブラケット・ハイライト（--night / --bracket / --highlight）の純粋関数 ----------------
+
+
+def _night_sky(seed=0, size=(240, 320), sky=0.06, noise=0.01, stars=40, star_level=0.6):
+    """暗い空 + ガウスノイズ + 点状の星（2x2）の合成 RGB（0..1 float）と星の位置を返す。"""
+    rng = np.random.default_rng(seed)
+    h, w = size
+    img = np.clip(rng.normal(sky, noise, (h, w, 3)), 0, 1).astype(np.float32)
+    pts = []
+    for _ in range(stars):
+        y, x = int(rng.integers(8, h - 8)), int(rng.integers(8, w - 8))
+        img[y:y + 2, x:x + 2] = star_level
+        pts.append((y, x))
+    return img, pts
+
+
+class SrgbLinearTests(unittest.TestCase):
+    def test_round_trip_known_values(self):
+        self.assertAlmostEqual(float(ce.srgb_to_linear(np.array([0.0]))[0]), 0.0)
+        self.assertAlmostEqual(float(ce.srgb_to_linear(np.array([1.0]))[0]), 1.0, places=5)
+        # sRGB 0.5 → リニア 0.214
+        self.assertAlmostEqual(float(ce.srgb_to_linear(np.array([0.5]))[0]), 0.2140, places=3)
+        self.assertAlmostEqual(float(ce.srgb_to_linear(np.array([0.02]))[0]), 0.02 / 12.92, places=6)
+
+
+class StarMetricTests(unittest.TestCase):
+    def test_star_point_mask_and_metrics_count_synthetic_stars(self):
+        img, pts = _night_sky(stars=80)
+        gray = ce.luma_of(img)
+        mask = ce.star_point_mask(gray)
+        # 全ての星がマスクに入り、空はほぼ入らない
+        self.assertTrue(all(mask[y, x] for y, x in pts))
+        self.assertLess(mask.sum(), len(pts) * 12)
+        rgb8 = (img * 255).astype(np.uint8)
+        m = ce.star_metrics(rgb8, {"iso": 3200, "exposure_time": 10.0, "f_number": 2.8})
+        self.assertEqual(m["point_count"], len(pts))
+        self.assertTrue(m["is_star_scene"])
+        self.assertGreaterEqual(m["star_count"], len(pts) * 0.9)
+        # NR 相当（ぼかし）で微光星が消えると point_count が減る
+        import cv2
+
+        blurred = cv2.GaussianBlur(img, (0, 0), 2.5)
+        m2 = ce.star_metrics((blurred * 255).astype(np.uint8), None)
+        self.assertLess(m2["point_count"], m["point_count"])
+
+    def test_star_metrics_without_stars_is_zero(self):
+        img, _ = _night_sky(stars=0)
+        m = ce.star_metrics((img * 255).astype(np.uint8), None)
+        self.assertEqual(m["point_count"], 0)
+        self.assertFalse(m["is_star_scene"])
+
+
+class SkyAndImpulseTests(unittest.TestCase):
+    def test_flat_tile_mask_picks_the_flat_region(self):
+        rng = np.random.default_rng(3)
+        gray = np.full((256, 256), 30, np.uint8)
+        gray[128:, :] = rng.integers(0, 256, (128, 256), dtype=np.uint8)  # 下半分は構造あり
+        mask = ce.flat_tile_mask(gray, block=32, fraction=0.5)
+        self.assertEqual(mask.shape, (8, 8))
+        self.assertTrue(mask[:4].all())
+        self.assertFalse(mask[4:].any())
+        px = ce.tile_mask_to_pixels(mask, gray.shape, 32)
+        self.assertEqual(px.shape, gray.shape)
+        self.assertTrue(px[:128].all() and not px[128:].any())
+        self.assertFalse(ce.flat_tile_mask(np.zeros((16, 16), np.uint8)).any())
+
+    def test_sky_stats_measures_noise_and_excludes_points(self):
+        img, pts = _night_sky(noise=0.02)
+        rgb8 = (img * 255).astype(np.uint8)
+        sky_px = np.ones(img.shape[:2], dtype=bool)
+        exclude = ce.dilate_mask(ce.star_point_mask(ce.luma_of(img)), 3)
+        with_stars = ce.sky_stats(rgb8, sky_px, None)
+        without = ce.sky_stats(rgb8, sky_px, exclude)
+        self.assertLess(without["sky_noise"], with_stars["sky_noise"])
+        self.assertAlmostEqual(without["sky_mean_luma"], 0.06, delta=0.01)
+        quiet, _ = _night_sky(noise=0.003, stars=0)
+        self.assertLess(ce.sky_stats((quiet * 255).astype(np.uint8), sky_px)["sky_noise"], without["sky_noise"])
+        self.assertTrue(math.isnan(ce.sky_stats(rgb8, np.zeros_like(sky_px))["sky_noise"]))
+
+    def test_impulse_count_counts_isolated_points_and_respects_exclusion(self):
+        gray = np.full((200, 200), 20, np.uint8)
+        pts = [(10, 10), (50, 120), (150, 30), (180, 180)]
+        for y, x in pts:
+            gray[y, x] = 200
+        gray[100:104, 100:104] = 200  # 4x4 の塊（とその角）は数えない
+        gray[60:62, 60:62] = 200      # 2x2 の孤立点は数える
+        gray[70, 70] = 200
+        gray[71, 70] = 150            # 明るい隣接画素が残る点は孤立していない → 数えない
+        out = ce.impulse_count(gray)
+        self.assertEqual(out["impulse_count"], 5)
+        self.assertAlmostEqual(out["impulse_per_mpx"], 5 / 0.04)
+        exclude = np.zeros_like(gray, dtype=bool)
+        exclude[8:13, 8:13] = True
+        self.assertEqual(ce.impulse_count(gray, exclude)["impulse_count"], 4)
+        self.assertEqual(ce.impulse_count(np.full((50, 50), 20, np.uint8))["impulse_count"], 0)
+
+    def test_corner_center_noise_ratio(self):
+        rng = np.random.default_rng(4)
+        gray = np.clip(rng.normal(100, 1.0, (400, 600)), 0, 255)
+        # 四隅だけノイズを 4 倍に
+        s = 60
+        for ys, xs in ((slice(0, s), slice(0, s)), (slice(0, s), slice(-s, None)), (slice(-s, None), slice(0, s)), (slice(-s, None), slice(-s, None))):
+            gray[ys, xs] = np.clip(rng.normal(100, 4.0, (s, s)), 0, 255)
+        out = ce.corner_center_noise(gray.astype(np.uint8), fraction=0.15)
+        self.assertGreater(out["corner_noise_ratio"], 2.5)
+        self.assertAlmostEqual(out["corner_luma_ratio"], 1.0, delta=0.02)
+
+    def test_global_shift_and_shift_mask(self):
+        rng = np.random.default_rng(5)
+        base = cv2_blur((rng.random((300, 400)) * 255).astype(np.float32), 1.5)
+        moved = np.roll(np.roll(base, 6, axis=1), -4, axis=0)
+        dx, dy, response = ce.global_shift(base, moved)
+        self.assertAlmostEqual(dx, 6.0, delta=0.6)
+        self.assertAlmostEqual(dy, -4.0, delta=0.6)
+        self.assertGreater(response, 0.2)
+        mask = np.zeros((20, 20), dtype=bool)
+        mask[5, 5] = True
+        shifted = ce.shift_mask(mask, 3, -2)
+        self.assertTrue(shifted[3, 8])
+        self.assertEqual(shifted.sum(), 1)
+        self.assertEqual(ce.dilate_mask(mask, 1).sum(), 5)
+
+
+class RecallAndPiecewiseShiftTests(unittest.TestCase):
+    def test_point_recall(self):
+        ref = np.zeros((50, 50), dtype=bool)
+        for y, x in ((10, 10), (20, 30), (40, 40)):
+            ref[y, x] = True
+        tgt = np.zeros_like(ref)
+        tgt[11, 11] = True  # 1px ずれても残っている扱い
+        tgt[20, 30] = True
+        out = ce.point_recall(ref, tgt, radius=2)
+        self.assertEqual(out["n_ref"], 3)
+        self.assertAlmostEqual(out["recall"], 2 / 3)
+        self.assertTrue(math.isnan(ce.point_recall(np.zeros_like(ref), tgt)["recall"]))
+
+    def test_piecewise_shift_follows_local_displacement(self):
+        rng = np.random.default_rng(11)
+        base = cv2_blur((rng.random((240, 360)) * 255).astype(np.float32), 1.5)
+        # 左半分は +4px、右半分は −4px に動かした画像（局所的に違う平行移動）
+        moved = base.copy()
+        moved[:, :180] = np.roll(base, 4, axis=1)[:, :180]
+        moved[:, 180:] = np.roll(base, -4, axis=1)[:, 180:]
+        mask = np.zeros(base.shape, dtype=bool)
+        mask[100, 60] = True
+        mask[100, 300] = True
+        out = ce.piecewise_shift_mask(mask, base, moved, grid=(2, 2))
+        self.assertTrue(out[100, 64])
+        self.assertTrue(out[100, 296])
+        self.assertEqual(out.sum(), 2)
+
+
+def cv2_blur(img, sigma):
+    import cv2
+
+    return cv2.GaussianBlur(img, (0, 0), sigma)
+
+
+class BracketMetricTests(unittest.TestCase):
+    def test_exposure_ratio_recovers_one_stop(self):
+        rng = np.random.default_rng(6)
+        lin = rng.uniform(0.02, 0.3, (120, 160, 3)).astype(np.float32)
+        srgb = lambda v: np.where(v <= 0.0031308, 12.92 * v, 1.055 * v ** (1 / 2.4) - 0.055)  # noqa: E731
+        a = (srgb(lin) * 255).astype(np.uint8)
+        b = (srgb(np.clip(lin * 2.0, 0, 1)) * 255).astype(np.uint8)
+        out = ce.exposure_ratio_stops(a, b)
+        self.assertAlmostEqual(out["stops"], 1.0, delta=0.05)
+        self.assertGreater(out["pixel_fraction"], 0.9)
+        # float 0..1 入力も同じ
+        self.assertAlmostEqual(ce.exposure_ratio_stops(a / 255.0, b / 255.0)["stops"], 1.0, delta=0.05)
+        with self.assertRaises(ValueError):
+            ce.exposure_ratio_stops(a, a[:, :100])
+        # クリップした画素ばかりなら NaN
+        white = np.full_like(a, 255)
+        self.assertTrue(math.isnan(ce.exposure_ratio_stops(white, white)["stops"]))
+
+    def test_corner_shift_consistency_detects_radial_mismatch(self):
+        rng = np.random.default_rng(7)
+        base = cv2_blur((rng.random((400, 600)) * 255).astype(np.float32), 1.5)
+        same = np.roll(base, 3, axis=1)
+        out = ce.corner_shift_consistency(base, same)
+        self.assertEqual(out["n_valid"], 5)
+        self.assertLess(out["max_corner_deviation_px"], 0.6)
+        self.assertAlmostEqual(out["shift_center"][0], 3.0, delta=0.5)
+        # 中央はそのまま、四隅だけ放射状に 5px ずれた画像
+        import cv2
+
+        h, w = base.shape
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        r = np.sqrt((xx - w / 2) ** 2 + (yy - h / 2) ** 2) / math.hypot(w / 2, h / 2)
+        k = 1.0 + 0.02 * r ** 2
+        radial = cv2.remap(base, ((xx - w / 2) * k + w / 2).astype(np.float32), ((yy - h / 2) * k + h / 2).astype(np.float32), cv2.INTER_LINEAR)
+        out = ce.corner_shift_consistency(base, radial)
+        self.assertGreater(out["max_corner_deviation_px"], 2.0)
+        # カメラ側（same）と CI 側（radial）の各パッチの差: 中央は一致し隅がずれる
+        dev = ce.patch_shift_deviation(ce.corner_shift_consistency(base, same), out)
+        self.assertGreater(dev, 2.0)
+        self.assertTrue(math.isnan(ce.patch_shift_deviation({}, out)))
+
+    def test_bracket_pairs_from_exif(self):
+        feats = [
+            _feat("DSC00010", exposure_time=10.0, f_number=1.4, iso=6400, captured_at="2026:01:01 22:43:49"),
+            _feat("DSC00011", exposure_time=10.0, f_number=1.4, iso=3200, captured_at="2026:01:01 22:46:39"),
+            _feat("DSC00012", exposure_time=10.0, f_number=1.6, iso=3200, captured_at="2026:01:01 22:47:09"),
+            _feat("DSC00013", exposure_time=10.0, f_number=1.6, iso=3200, captured_at="2026:01:01 22:47:40"),  # 同露出
+            _feat("DSC00014", exposure_time=20.0, f_number=2.8, iso=3200, lens_model="LENS B", captured_at="2026:01:01 22:50:00"),
+            _feat("DSC00015", exposure_time=10.0, f_number=1.4, iso=3200, captured_at="2026:01:02 05:00:00"),  # 時間が離れる
+        ]
+        pairs = ce.bracket_pairs(feats)
+        self.assertEqual([(p["a"], p["b"]) for p in pairs], [("DSC00010", "DSC00011"), ("DSC00011", "DSC00012")])
+        # ISO 6400 → 3200 は b が 1 段暗い（ΔEV = ev100_a − ev100_b = −1）
+        self.assertAlmostEqual(pairs[0]["delta_ev"], -1.0, places=6)
+        self.assertAlmostEqual(pairs[1]["delta_ev"], -math.log2((1.6 / 1.4) ** 2), places=6)
+        self.assertEqual(pairs[0]["gap_s"], 170.0)
+        self.assertEqual(ce.bracket_pairs(feats, max_gap_s=60), [pairs[1]])
+        self.assertIsNone(ce.captured_at_seconds("2026-01-01"))
+
+
+class HighlightMetricTests(unittest.TestCase):
+    def test_channel_clip_rates(self):
+        img = np.zeros((10, 10, 3), np.uint8)
+        img[:2, :, 0] = 255           # R だけ 2 行
+        img[2:3, :, :] = 255          # 全チャンネル 1 行
+        out = ce.channel_clip_rates(img)
+        self.assertAlmostEqual(out["clip_r"], 0.3)
+        self.assertAlmostEqual(out["clip_g"], 0.1)
+        self.assertAlmostEqual(out["clip_any"], 0.3)
+        self.assertAlmostEqual(out["clip_all"], 0.1)
+
+    def test_clip_boundary_magenta_rate(self):
+        img = np.full((40, 40, 3), 120, np.uint8)
+        img[10:30, 10:30] = 255  # 白飛び領域
+        # 外側 3px の帯の左側だけマゼンタ寄り（R, B > G）
+        img[10:30, 7:10] = (200, 120, 200)
+        out = ce.clip_boundary_magenta_rate(img, band=3)
+        self.assertGreater(out["band_pixels"], 0)
+        self.assertAlmostEqual(out["magenta_rate"], (20 * 3) / out["band_pixels"], places=6)
+        none = ce.clip_boundary_magenta_rate(np.full((8, 8, 3), 100, np.uint8))
+        self.assertTrue(math.isnan(none["magenta_rate"]))
+        self.assertEqual(none["band_pixels"], 0)
+
+    def test_highlight_measure_uses_camera_as_reference(self):
+        cam = np.full((32, 32, 3), 128, np.uint8)
+        var = cam.copy()
+        var[:8] = 255
+        out = ce.highlight_measure({"camera": cam, "x": var}, ["camera", "x"])
+        self.assertAlmostEqual(out["x"]["clip_any"], 0.25)
+        self.assertNotIn("camera_delta_e76", out["camera"])
+        self.assertGreater(out["x"]["camera_luma_diff"], 0)
+
+
+class NightMeasureTests(unittest.TestCase):
+    def test_night_measure_on_synthetic_variants(self):
+        import cv2
+
+        img, pts = _night_sky(noise=0.015, stars=60)
+        cam = (img * 255).astype(np.uint8)
+        # NR0 相当: 同じ画像に白点ノイズを 30 個足す（星の無い場所）
+        noisy = cam.copy()
+        rng = np.random.default_rng(9)
+        added = 0
+        star_mask = ce.dilate_mask(ce.star_point_mask(ce.luma_of(img)), 6)
+        while added < 30:
+            y, x = int(rng.integers(4, cam.shape[0] - 4)), int(rng.integers(4, cam.shape[1] - 4))
+            if not star_mask[y - 2:y + 3, x - 2:x + 3].any():
+                noisy[y, x] = 255
+                star_mask[y - 2:y + 3, x - 2:x + 3] = True
+                added += 1
+        # NR 相当: ぼかして星を弱める
+        smooth = (cv2.GaussianBlur(img, (0, 0), 2.0) * 255).astype(np.uint8)
+        metrics, ref = ce.night_measure({"camera": cam, "noisy": noisy, "smooth": smooth}, {"iso": 3200, "exposure_time": 10, "f_number": 2.8}, ["camera", "noisy", "smooth"])
+        self.assertEqual(ref["camera_points"], 60)
+        self.assertAlmostEqual(metrics["camera"]["point_ratio"], 1.0)
+        self.assertEqual(metrics["camera"]["impulse_count"], 0)
+        self.assertGreaterEqual(metrics["noisy"]["impulse_count"], 25)
+        self.assertLess(metrics["smooth"]["point_ratio"], 0.8)
+        self.assertLess(metrics["smooth"]["sky_noise_ratio"], 0.6)
+        self.assertAlmostEqual(metrics["noisy"]["sky_luma_diff"], 0.0, delta=0.01)
+        self.assertTrue(ref["sky_fraction"] > 0.2)
+        self.assertNotIn("impulse_vs_full", metrics["noisy"])
+        # 原寸縮小の基準（= 白点を足す前の画像）があれば、足した白点だけが impulse_vs_full に数えられる
+        metrics2, _ = ce.night_measure({"camera": cam, "noisy": noisy}, None, ["camera", "noisy"], {"noisy": cam})
+        self.assertGreaterEqual(metrics2["noisy"]["impulse_vs_full"], 25)
+        self.assertLessEqual(metrics2["noisy"]["impulse_vs_full"], 30)
+
+    def test_best_box_and_table_md(self):
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[60:80, 20:40] = True
+        self.assertEqual(ce.best_box_by_mask(mask, 20), (20, 60, 40, 80))
+        md = ce.table_md([{"mode": "preview", "variant": "a", "n": 2, "x": 1.23456, "y": None, "z": 3}], ("mode", "variant"), ("x", "y", "z"))
+        self.assertIn("| preview | a | 2 | 1.235 | — | 3 |", md)
+        self.assertEqual(ce.magnify(np.zeros((3, 4, 3), np.uint8), 2).shape, (6, 8, 3))

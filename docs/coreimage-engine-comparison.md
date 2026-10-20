@@ -2,7 +2,7 @@
 
 現行エンジン（rawpy/LibRaw, `local_raw/engine.py`）と Core Image CLI（`geoframe-ci-develop`,
 [`native/coreimage-cli/README.md`](../native/coreimage-cli/README.md)）を、同じ α6400 ARW 21 カットで
-比較した記録（§9 は解像感＝ピント甘さに絞った追加評価、29 カット）。**採否の判断は PR4 で行う**。この文書は事実・所見・判断材料（論点）までに留める。
+比較した記録（§9 は解像感＝ピント甘さに絞った追加評価、29 カット。§10〜§15 は ADR 0002 の移行条件の確認＝夜景・星空・長秒 #70、ブラケットの前提、白点 #77、ハイライト #71 の道具）。**採否の判断は ADR 0002 で行う**。この文書は事実・所見・判断材料（論点）までに留める。
 
 関連: [ADR 0001](adr/0001-coreimage-raw-poc.md)（CLI の設計判断）、
 [パラメータ対応表](coreimage-parameter-mapping.md)。
@@ -501,3 +501,295 @@ DSC04716 / DSC04872 / DSC04880 / DSC04430 / DSC04453（full）、DSC04651 / DSC0
 - 隅（corner）ROI の比は周辺減光補正によるノイズ増幅の影響が大きく（rawpy full で 2.96 等）、解像の指標としては使っていない。
 - Core Image apple_default の内部パラメータ（ISO 依存のシャープ・NR 量）は API から読めない値があり、OS 更新での変化は未確認。
 - 目視は 11 カット・各 1〜2 ROI。ブラインド比較ではない。
+
+## 10. 夜景・星空・長秒の評価（Issue #70、設計書 §4.1）
+
+### 10.1 目的
+
+ADR 0002「置き換えに進む条件」のうち最重要とされた「夜景・星空・長秒のサンプルで破綻（ノイズの塗りつぶし、星の消失、色かぶり）が
+無い。`apple_default` の NR が星を消さないこと」を、実データで確かめる。あわせて設計書 §4.1 の観点（空の明るさ＝Issue #50 の再発確認、
+空のノイズ・色ノイズ、白点ノイズ、周辺減光補正の四隅への影響）を同じ出力で測る。Issue #79 の CLI 拡張（settings の個別上書き）を使い、
+「`apple_default` のトーン・色のまま NR だけ 0」のバリアントも並べる。
+
+### 10.2 手順（再現コマンド）
+
+```sh
+npm run build:coreimage            # CLI 0.2.0（#79 の output_color_space / settings 上書き入り）
+RAW=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw   # 星空 11 組（ARW は小文字 .arw、JPG は .JPG）
+.venv/bin/python scripts/compare_engines.py --source-root $RAW \
+  --captures DSC07402 DSC07404 DSC07405 DSC07407 DSC07408 DSC07412 DSC07415 DSC07416 DSC07419 DSC07422 DSC07423 \
+  --night --full --full-ids DSC07415 DSC07407 DSC07402 --night-scales DSC07415 DSC07407 \
+  --out work/engine-comparison/night1
+# #77 の原因切り分けバリアント（§12）を CI_SCALE_REQUESTS に足した後の掃引だけの再実行
+.venv/bin/python scripts/compare_engines.py --source-root $RAW --captures DSC07415 DSC07407 \
+  --night --night-scales DSC07415 DSC07407 --out work/engine-comparison/night1-scale
+```
+
+- 実行: 2026-10-20、§1 と同じマシン（macOS 27.0.1 / M3）。11 カット × preview（長辺 2400px）+ 3 カット × full（原寸）+ 2 カットの
+  scale 掃引。night1 は 15.6 分、night1-scale は 6.0 分。エラー 0 件。1 カットにつき CI 9 バリアント + rawpy を 4 並列で現像し、
+  preview では各 CI バリアントの原寸レンダも作る（§10.4 の `impulse_vs_full` の基準）。処理時間はこの節では比較しない。
+- 出力（gitignore 対象の `work/engine-comparison/night1/`）: `night_metrics.csv`（カット × モード × バリアント）、`night_scale_metrics.csv`、
+  `night_summary.json`、`night_tables.md`、`sheets/<ID>_<mode>_{sky,stars,corner}_g{1,2,3}.jpg`（160px パッチを最近傍 2 倍、
+  4 バリアントずつ、ラベル付き、EXIF なし）。`rawpy/` 配下の rawpy 出力そのものは §3 と同じくペア JPG の EXIF を継承している。
+- **サンプル**: `scripts/eval_cases/candidates_baseline.json` の `stars` セット 11 組。**1 セッション（2022-11-19 夜）、レンズ 2 本
+  （Sony E 16mm F2.8、Sigma 30mm F1.4）、ISO 3200 × 6 / 6400 × 5**。10〜30 秒の三脚長秒が 10 枚（空だけのカットと地上の前景を含む
+  カットが混在）、DSC07402 だけ 1/13 秒の手持ち夜景（ISO 3200。`classify_scene` では `night`、星空ではない）。
+  空は薄明・光害で明るめ（カメラ JPEG の空の平均輝度 0.11〜0.44、中央値 0.28）。**暗い空（0.2 未満）は 4 カット**
+  （DSC07402 / 07404 / 07405 / 07419）。rawpy は全カットで暗所判定（`dark_scene` = true、固定倍率・ビネット補正スキップ）。
+- ハーネスの ARW / JPG 探索は `local_raw.source_files` 経由にし、拡張子の大文字小文字を問わなくした（この評価 PR で修正）。
+
+### 10.3 バリアント
+
+| variant | 内容 |
+|---|---|
+| camera | カメラ JPEG（基準）。preview は 2400px へ INTER_AREA 縮小、full は原寸 |
+| rawpy | 現行エンジン（`ENGINE_VERSION` 17、既定プリセット、暗所判定あり） |
+| ci_apple_v9_l1 | **ADR 0002 の基本路線**: `apple_default`、decoder 9、lens ON |
+| ci_apple_v9_l1_nr0 | 同上 + `luminance_noise_reduction: 0, color_noise_reduction: 0`（#79。この ISO では color NR は元々 0 なので実質は輝度 NR 0.241 / 0.357 → 0） |
+| ci_apple_v9_l1_nr0_sh0 | 同上 + `sharpness_amount: 0` |
+| ci_apple_v9_l0 / ci_apple_v9_l0_nr0 | `apple_default` v9 で lens OFF（周辺減光補正の影響の把握用）/ + NR 0 |
+| ci_apple_v8_l1 / ci_apple_v8_l1_nr0 | `apple_default` decoder 8、lens ON / + NR 0 |
+| ci_v9_l1 / ci_v8_l1 | neutral（sharpness / detail / NR / moire / contrast / EDR = 0）decoder 9 / 8、lens ON |
+
+CLI 応答の `applied`（`coreimage/<mode>/*.json` に保存）で確認した `apple_default` v9 の実効値: ISO 3200 は sharpness 1.0・
+輝度 NR 0.241、ISO 6400 は sharpness 0.806〜0.826・輝度 NR 0.357。**color NR・detail・contrast・moire・EDR はどちらの ISO でも 0**、
+boost 1.0・boostShadow 0.9。したがってこのサンプルでは `apple_default` = neutral + sharpness + 輝度 NR であり、実際に
+`ci_apple_v9_l1_nr0_sh0` と `ci_v9_l1` の指標は全カットで一致した（CSV で同値）。decoder 8 の `apple_default` は輝度 NR 0.676（ISO 3200）で
+color NR も有効（色ノイズが NR 0 版の 1/13）。
+
+### 10.4 指標の定義（`scripts/compare_engines.py` の純粋関数、`tests/test_compare_engines.py` で検証）
+
+| 指標 | 定義 |
+|---|---|
+| point_count / point_density | `development_candidates._point_light_count` そのもの（gray − σ3 ガウス ≥ 0.04 の小連結成分で最大差 ≥ 0.08）。PSO の星判定と同じ検出。**高 ISO では粒状ノイズも拾う**（カメラ JPEG で 2400px あたり 1.4 万点）ので、絶対数ではなく比（point_ratio）と下の recall で読む |
+| point_count_strong / point_strong_ratio | 同じ検出で最大差 ≥ 0.16 に絞った「強い星」の数 / カメラ比 |
+| **star_recall** | カメラ JPEG の強い星（≥ 0.16）の成分のうち、バリアント側に点（≥ 0.08）が残っている割合。カメラの星成分をセル単位（6×8）の位相相関シフトで動かし、2px 膨らませた足跡で判定。**星の残り方の主指標** |
+| star_count / star_halo / star_color_saturation | `development_candidates._star_measurements`（99.35 パーセンタイル閾値の点、周辺リングの輝度比、星ごとの白飛び割合）。star_count は画像ごとの相対閾値なので NR の有無で動きにくい |
+| sky_mean_luma / sky_luma_diff | 空領域（カメラ JPEG の 32px タイルで、構造が小さい下位 25%。全バリアント同じタイル。星候補を 3px 膨らませて除外）の Rec.709 輝度平均 / カメラ JPEG との差 |
+| sky_noise / sky_noise_ratio | 同じ空画素でのハイパス（原画 − σ1.5）標準偏差（8bit）/ カメラ比。flat_noise と同じ量 |
+| sky_chroma_noise | 空画素での Lab a\*, b\* のハイパス標準偏差の二乗和平方根（色ノイズ） |
+| sky_hf_ratio | 空画素のハイパス分散 / 全分散。NR の塗りつぶしで小さくなる（補助） |
+| impulse_count | 3×3 メディアンより 24 階調以上明るい面積 ≤ 3px の孤立点のうち、周囲 1px がすべて暗く、カメラ JPEG の星候補（セル単位で位置合わせ・膨張）に触れないもの。**lens OFF のバリアントでは位置合わせの残差で星が漏れ込むので使わない** |
+| **impulse_vs_full** | 同じ設定の原寸レンダを INTER_AREA で同寸に縮めたものを基準にし、「preview にあって原寸縮小には無い孤立点」の数。幾何が同一なので位置合わせに依らない。**白点（scaleFactor 経路の生む点）の主指標**（preview のみ） |
+| center_noise / corner_noise / corner_noise_ratio | 短辺 15% の箱（中央 / 四隅の中央値）での flat_noise とその比 |
+| corner_luma_ratio | 四隅の平均輝度 / 中央の平均輝度（周辺減光補正の効き） |
+| camera_delta_e76 / camera_luma_diff / flat_noise / mean_luma 等 | §3 と同じ |
+
+### 10.5 集計（preview 2400px、11 カット中央値。括弧は最小..最大）
+
+**星の残り方・白点**:
+
+| variant | star_recall | point_strong_ratio | star_halo | star_color_sat | impulse_vs_full |
+|---|---|---|---|---|---|
+| camera | 1.00 | 1.00 | 0.539 | 0.014 | — |
+| rawpy | 0.991 (0.970..1.000) | 0.68 | 0.594 | 0.052 | —（impulse_count 3） |
+| **ci_apple_v9_l1** | **1.000 (0.991..1.000)** | 1.11 | 0.494 | 0.064 | **1 (0..8)** |
+| ci_apple_v9_l1_nr0 | 1.000 (0.992..1.000) | 1.13 | 0.494 | 0.065 | 1 (0..8) |
+| ci_apple_v9_l1_nr0_sh0 (= ci_v9_l1) | 0.997 (0.990..1.000) | 0.82 | 0.588 | 0.043 | **5746 (123..34353)** |
+| ci_apple_v8_l1 | 0.987 (0.960..1.000) | 0.59 | 0.582 | 0.043 | 0 (0..3) |
+| ci_apple_v8_l1_nr0 | 0.989 | 0.62 | 0.582 | 0.051 | 0 |
+| ci_v8_l1 | 0.989 (0.983..1.000) | 0.62 | 0.583 | 0.050 | 0 (0..1) |
+| ci_apple_v9_l0 / _nr0 | 0.985 / 0.986（lens OFF は位置合わせの残差を含む） | 1.29 / 1.33 | 0.497 | 0.062 | 1 / 2 |
+
+**空**:
+
+| variant | sky_luma_diff | sky_noise_ratio | sky_chroma_noise | sky_hf_ratio | corner_noise_ratio | corner_luma_ratio | ΔE76 |
+|---|---|---|---|---|---|---|---|
+| camera | 0 | 1.00 | 0.33 | 0.035 | 0.84 | 0.625 | — |
+| rawpy | +0.015 (−0.024..+0.029) | 1.72 (1.19..2.88) | 6.05 | 0.166 | 1.08 | 0.694 | 8.56 |
+| **ci_apple_v9_l1** | **+0.013 (−0.013..+0.016)** | **1.05 (0.89..1.24)** | 0.43 | 0.048 | 0.66 | 0.635 | 3.59 |
+| ci_apple_v9_l1_nr0 | +0.013 (−0.012..+0.016) | 1.36 (1.22..1.40) | 0.44 | 0.059 | 0.71 | 0.636 | 3.66 |
+| ci_apple_v9_l1_nr0_sh0 (= ci_v9_l1) | +0.029 | 2.47 (1.25..4.55) | 0.59 | 0.169 | 1.06 | 0.650 | 4.71 |
+| ci_apple_v9_l0 / _nr0 | +0.012 / +0.013 | 1.44 / 1.70 | 0.60 / 0.60 | 0.070 / 0.100 | 0.74 / 0.76 | 0.616 / 0.618 | 4.56 / 4.64 |
+| ci_apple_v8_l1 | +0.011 | 0.79 | 0.34 | 0.032 | 0.74 | 0.633 | 3.20 |
+| ci_apple_v8_l1_nr0 / ci_v8_l1 | +0.010 | 1.59 | 4.51 | 0.110 | 0.95 | 0.631 | 7.30 |
+
+ISO 帯別（`ci_apple_v9_l1` / rawpy）: star_recall ISO 3200 1.000 / 0.978、6400 0.995 / 0.993。sky_noise_ratio 3200 1.20 / 1.31、
+6400 0.97 / 1.82。sky_chroma_noise 3200 1.01 / 5.22、6400 0.41 / 7.70。
+
+**full（原寸、3 カット: DSC07415 ISO 3200 10s / DSC07407 ISO 6400 30s / DSC07402 手持ち）**:
+
+| variant | star_recall | sky_noise_ratio | sky_chroma_noise | impulse_count | ΔE76 |
+|---|---|---|---|---|---|
+| camera | 1.00 | 1.00 | 0.21 | 0 | — |
+| rawpy | 0.980 (0.979..0.984) | 1.81 (1.47..2.05) | 4.19 | 4 (2..33) | 9.33 |
+| ci_apple_v9_l1 | 0.989 (0.965..0.998) | 1.16 (1.11..1.27) | 0.44 | 8 (0..41) | 3.95 |
+| ci_apple_v9_l1_nr0 | 0.989 (0.972..0.998) | 1.41 (1.33..1.96) | 0.46 | 9 (1..50) | 4.02 |
+| ci_v9_l1 (= apple NR0 sharp0) | 0.973 | 0.78 | 0.39 | 0 | 3.93 |
+| ci_apple_v8_l1 | 0.989 | 1.16 | 0.33 | 6 | 3.82 |
+
+**周辺減光補正（lens ON / OFF の差、`apple_default` v9、preview 11 カット）**: corner_luma_ratio は lens ON 0.635 / OFF 0.616
+（カット別の差は +0.002〜+0.020）、カメラ JPEG 0.625。corner_noise_ratio は ON 0.66 / OFF 0.74。**CI のレンズ補正は四隅をほとんど
+明るくしておらず（差 3% 未満）、四隅のノイズも増やしていない**（設計書の目安「中央の 1.5 倍以内」を満たす）。rawpy はビネット補正を
+スキップしているのに corner_luma_ratio 0.694 と最も明るいが、これは暗所の固定倍率とトーンの差で、補正の効きではない【推測】。
+
+### 10.6 目視所見（2 倍拡大パッチ、EXIF なし）
+
+見たシート（それ以外は見ていない）: `night1/sheets/` の DSC07402_preview_sky_g1、DSC07402_full_stars_g1、DSC07404_preview_stars_g1、
+DSC07404_preview_sky_g2、DSC07407_preview_{sky_g1,corner_g1,sky_g3,corner_g2}、DSC07415_preview_stars_g2、DSC07415_full_{stars_g1,sky_g1,sky_g2}、
+および同じ設定の試走 `night-smoke2/sheets/` の DSC07415_preview_{sky_g1,corner_g2}。ブラインド比較ではない。
+
+- **星（DSC07415 preview / full、ISO 3200 30mm）**: `ci_apple_v9_l1` はカメラ JPEG より星が小さく締まり、青白〜橙の星の色が残る。
+  NR 0 との見た目の差は小さく、NR 0 の方が粒子がやや細かく見える程度。rawpy は全面に赤・青の粗い色ノイズが乗り、星の色はノイズに
+  紛れる。原寸ではカメラ JPEG が強い NR で空が筆跡状に塗られ星が白い塊になるのに対し、CI `apple_default` は細かい粒子と色付きの
+  星が残る。decoder 8 の `apple_default`（輝度 NR 0.68）は原寸でカメラ JPEG に近い塗り方になる。
+- **空（DSC07407 preview、ISO 6400 30s 16mm、明るい空）**: `ci_apple_v9_l1` はカメラ JPEG と同程度に滑らかで微光星も残る。
+  NR 0 は細かい粒子が見えるがブロッチ（塗りつぶしの島）は無い。rawpy は輝度・色ノイズともに明らかに多い。§9.6 で neutral v9 の
+  原寸に見た「水彩・蝋状」の塗りつぶしは、`apple_default` の preview / full では見つからなかった（数値でも sky_hf_ratio 0.048 で
+  カメラ 0.035 より高く、neutral v9 full の 0.008 のような低下は無い）。
+- **白点**: `ci_v9_l1`（= apple NR 0 + sharp 0）の preview は、DSC07404 / 07407 の暗い空・隅に**白い点が全面に散る**（DSC07404 で
+  3 万点超）。`ci_apple_v9_l1` と NR 0 だけの変種には見えない。§12 で切り分ける。
+- **隅（DSC07407 corner）**: `ci_apple_v9_l1` の隅はカメラ JPEG と同じ暗さ・ノイズ感。lens OFF はごく僅かに暗い程度で、
+  目視では区別しにくい。rawpy の隅は色ノイズで埋まる。
+- **暗い空（DSC07402、手持ち 1/13s）**: 空はほぼ黒で、`apple_default` はカメラ JPEG と同じく黒く沈んだまま（灰白色に浮かない）。
+  rawpy はノイズの粒が見えるぶん明るい印象を受けるが、空の平均輝度は 3 者とも同程度で、数値ではむしろカメラより暗い
+  （sky_luma_diff は rawpy −0.024 / CI −0.013）。
+  このカットの「stars」パッチは前景の光（水面の反射）で、星ではない。
+- **DSC07404 の「stars」パッチ**も前景の木と灯りで、星の判断には使えない（星候補の検出が明るい前景の点を拾ったため）。
+
+### 10.7 結論（#70 の判断材料）
+
+1. **`apple_default` v9 lens ON の NR は星を消していない。** カメラ JPEG の強い星の残存率は 11 カットすべてで 0.991 以上
+   （中央値 1.000）、rawpy 現行（0.970..1.000）以上。強い星の数はカメラ比 1.11 倍、ハロー指標はカメラ・rawpy より低い。
+   NR を 0 にしても残存率は変わらず（1.000）、「NR が消した星の数」は検出できる範囲では 0 だった。
+2. **空の明るさは Issue #50 の再発に当たらない。** `apple_default` の空の輝度差はカメラ比 −0.013..+0.016（目安 ±0.05 の内側）で、
+   rawpy（−0.024..+0.029）より狭い。暗い空のカットでも浮かず、沈まない。
+3. **空のノイズは rawpy 現行より少なく、塗りつぶしも無い。** sky_noise_ratio 1.05（rawpy 1.72）、色ノイズは rawpy の 1/14。
+   NR 0 にすると 1.36（それでも rawpy 以下）。
+4. **白点は `apple_default` では実質出ない**（preview 2400px で impulse_vs_full 最大 8/枚。長辺 1600px では 1 カットで数十点出るが、同じ条件の neutral v9 の 1/25 以下。§12）。大量に出るのは NR 0 かつ sharpness 0（= neutral v9）の preview。
+5. **周辺減光補正は四隅のノイズを増やさない**（lens ON/OFF で corner_noise_ratio 0.66 / 0.74）。そもそも CI の補正は四隅を
+   ほとんど明るくしていない（3% 未満）。rawpy の「暗所でビネット補正をスキップ」に相当する措置は CI では要らない【推測: 他のレンズ
+   （10-18mm 等）では未確認】。
+6. **星の色の白飛び（star_color_saturation）は rawpy より僅かに多い**（0.064 vs 0.052）。`apple_default` のシャープと
+   コントラストで明るい星の芯が飛びやすい。目視では星の色は残っているが、明るい星ほど白く見える傾向。
+
+## 11. 長秒ブラケットの前提確認（設計書 §4.1、Issue #83 の前提）
+
+### 11.1 手順
+
+```sh
+.venv/bin/python scripts/compare_engines.py --source-root $RAW --select auto --bracket --out work/engine-comparison/bracket1
+```
+
+`--bracket` は EXIF から「同一レンズ・焦点距離・向きで、600 秒以内に撮られ、|ΔEV| ≥ 0.3 の隣接カット」をペア候補にする
+（`bracket_pairs`。`--bracket-pairs A,B` で明示も可）。各ペアを camera JPEG / rawpy（`bracket._decode_frame`、`no_auto_bright`、
+レンズ補正なし）/ CI `apple_default` v9 lens ON の **sRGB tiff16**（#79 の `output_color_space: "srgb"`）で 2400px に揃え、
+(a) 露出比 `exposure_ratio_stops`（両フレームで最大チャンネルが 8..240 の中央 60% 領域、sRGB を外してリニア輝度平均の比を log2）、
+(b) 幾何 `corner_shift_consistency`（中央 + 四隅の位相相関シフト。カメラ JPEG のシフトとの差 `max_patch_deviation_from_camera_px`）、
+(c) `bracket._align_frames` + `_merge_frames`（アプリと同じ AlignMTB / Mertens）の合成シートを出す。所要 25 秒。
+
+### 11.2 結果
+
+**三脚ブラケット（同一構図の露出違い連続カット）はサンプルに無かった。** 候補 3 ペアのうち:
+
+| pair | ΔEV（EXIF） | 構図 | 露出比（stop）camera / rawpy / CI | 幾何（カメラとの差）CI / rawpy |
+|---|---|---|---|---|
+| DSC07405→07407（10s→30s） | +1.585 | **別構図**（相関が取れるパッチ 0） | 2.95 / 2.46 / 2.78（別の内容を比べているので無効） | n/a |
+| DSC07412→07415（ISO 6400→3200） | −1.000 | **別構図**（パッチ 0〜1） | −1.05 / −0.93 / −1.03（参考値） | n/a |
+| DSC07415→07416（f/1.4→f/1.6） | −0.385 | 同じ空だが**約 39px（2400px 時）動いている**。5 パッチすべて相関あり | −0.23 / −0.18 / −0.21 | **0.92 px / 6.74 px** |
+
+- **露出差の保存**: DSC07415→07416 で CI は −0.21 stop、カメラ JPEG −0.23、rawpy `no_auto_bright` −0.18。EXIF の −0.385 からは
+  3 者とも同じ方向に 0.16〜0.20 stop ずれている（絞り 1/3 段の実際の露光差が EXIF どおりでない、または両フレームの間の空の明るさの
+  変化によるもの【推測】）。**CI の露出比はカメラ JPEG と rawpy `no_auto_bright` の間に収まり、`apple_default` の処理が露出差を
+  潰していない。** 設計書の目安「2^ΔEV の ±0.3 stop 以内」はカメラ JPEG 自身が満たさないため、「カメラ JPEG・rawpy と 0.05 stop
+  以内で一致」と読み替えて満たしている。別構図の 2 ペアでも CI はカメラ JPEG と 0.03〜0.17 stop 差（参考）。
+- **レンズ補正の幾何一致**: 2 フレーム間の動き（中央 −39.4px, +6.3px、隅で 33〜50px）はカメラ JPEG・CI・rawpy の全部に出ており
+  実際の動き（三脚の揺れ・星の日周運動）。**CI の 5 パッチのシフトはカメラ JPEG（カメラ内レンズ補正）と最大 0.92 px で一致**し、
+  放射状の不一致は無い。rawpy の 6.7 px はこの経路で lensfun を掛けていないための歪曲差であり、rawpy の欠点ではない。
+  設計書の目安「四隅と中央が 1 px 以内」は、CI の幾何がカメラ内補正と 1 px 以内で一致している、という形で満たしている。
+- **Mertens 合成の目視**: `bracket1/sheets/bracket_DSC07415-DSC07416_{center,ci_apple_v9_l1_overview}.jpg` を見た。39 px の動きは
+  AlignMTB の探索上限（短辺の 2% = 32 px）を超えており、CI・rawpy とも星が二重になり、合成全体に波状の干渉模様が出る。
+  **これは入力が三脚ブラケットでないために出るもので、CI 出力の問題ではない。** 同一構図のブラケットでの合成品質は**未確認**。
+  rawpy 合成は `no_auto_bright` のため全体が暗い（平均輝度 0.175、CI 0.339）。
+- sRGB tiff16 → OpenCV Mertens の経路（設計書 B3 の足場）は動いた（`bracket_pair_eval`）。原寸ではなく 2400px で回している。
+
+## 12. decoder 9 の白点ノイズの原因切り分け（Issue #77、設計書 §4.3）
+
+### 12.1 手順
+
+§10.2 の `--night-scales`。DSC07415（ISO 3200、30mm）と DSC07407（ISO 6400、16mm）について、preview 長辺 1200 / 1600 / 2400 /
+3000 / 4000（scaleFactor 0.2〜0.67）で 10 バリアントを現像し、各バリアント自身の原寸レンダ縮小版を基準に `impulse_vs_full` を数える。
+原寸（scaleFactor 1.0）は §10 の full 行。
+
+### 12.2 結果（2 カット中央値の impulse_vs_full。full 列は `impulse_count`、3 カット中央値）
+
+| variant | 1200 | 1600 | 2400 | 3000 | 4000 | full |
+|---|---|---|---|---|---|---|
+| ci_v9_l1（neutral: NR 0・sharp 0） | 28 | 1539 | 2978 | **21839** | 14068 | 0 |
+| ci_v9_l0（同 lens OFF） | 1 | **7104** | 0 | 2 | **46764** | — |
+| ci_v9_l1_sh01（neutral + sharpness 0.1） | 3 | 56 | 1 | 4 | 0 | — |
+| ci_v9_l1_nr024（neutral + 輝度 NR 0.24） | 3 | 38 | 0 | 2 | 0 | — |
+| ci_apple_v9_l1 | 3 | 34 | 1 | 14 | 0 | 8 |
+| ci_apple_v9_l1_nr0 | 3 | 41 | 1 | 18 | 0 | 9 |
+| ci_apple_v9_l1_sh0（apple + sharpness 0） | 3 | 38 | 0 | 2 | 0 | — |
+| ci_apple_v9_l0（apple lens OFF） | 3 | 122 | 6 | 35 | 0 | — |
+| ci_apple_v8_l1 | 7 | 21 | 2 | 4 | 1 | 6 |
+| ci_v8_l1（neutral v8） | 2 | 14 | 0 | 0 | 1 | 1 |
+
+カット別（preview 2400px、`ci_v9_l1`）: 123〜34,353 点/枚（ISO 6400 の 4 カットで 5,746〜34,353）。同じカットの `ci_apple_v9_l1` は 0〜8。
+
+### 12.3 所見
+
+1. **白点は decoder 9 で「輝度 NR 0 かつ sharpness 0」のときに、scaleFactor < 1 の preview でだけ出る。** 原寸（full）では
+   同じ設定でも 0。sharpness を 0.1 にするか輝度 NR を 0.24 にするかのどちらか一方で消える（最大 56 → 実質 0）。
+   `apple_default` で sharpness だけ 0 にしても出ない（輝度 NR が残るため）。
+2. **lens ON だけの現象ではない。** lens OFF でも出るが、出る長辺が違う（lens ON は 1600〜4000 で連続、lens OFF は 1600 と 4000 で
+   突出）。レンズ補正のリサンプルで実効の縮小比が変わるため、特定の縮小比で起きるデコーダ内の縮小処理の問題と見える【推測】。
+   §9.6 の「lens ON で出る」という観察は 2400px に限った話だった。
+3. **decoder 8 では出ない**（neutral v8 / apple v8 とも全長辺で ≤ 21）。
+4. **`apple_default` で NR だけ 0 にしても白点は増えない**（表の値は 2 カット中央値で、長辺 1600px の 41 は `apple_default` 既定の
+   34 と同程度。カット別の最大は 1600px の DSC07415 で既定 62 / NR 0 で 71 と、同条件の neutral v9（1539）の 1/25 以下）。したがって設計書 §4.3 の懸念「NR 0 にすると白点が出るなら星景で NR を切る案は使えない」は当たらず、**NR 0 は
+   sharpness > 0 である限り安全**。
+5. `src-tauri/src/coreimage.rs` の現在の既定（`PROFILE="neutral"`、decoder 9、preview 2400）は、まさに白点が出る組み合わせである。
+   #72 で `apple_default` に切り替えるまでは、試験経路のプレビューに白点が出る。
+
+## 13. 逆光・ハイライトの評価（Issue #71、設計書 §4.2）— 道具のみ、実データは未実施
+
+- `--highlight` モードを追加した: バリアントは camera / rawpy / neutral v9 / `apple_default` v9 / EDR 0.5, 1.0, 2.0 /
+  boost 0.6, 0.8 / boostShadow 0.5, 1.3 / exposure −0.7EV（いずれも #79 の上書き）。指標は `channel_clip_rates`（R/G/B/any/all の
+  255 画素率）、`clip_boundary_magenta_rate`（クリップ領域の外側 3px の帯で R > G かつ B > G かつ min(R,B) − G ≥ 0.06 の画素率）、
+  §3 の輝度・ΔE。シートはカメラ JPEG のクリップ境界が最も多い 200px 箱の 2 倍拡大（4 バリアントずつ）。
+- **逆光サンプル（`/Volumes/Backup/100MSDCF`、DSC04473 / DSC04607 ほか）は作業開始時・終了前ともマウントされておらず、
+  実データの評価は未実施。** 動作確認として星空の DSC07402 で 1 回回した（`work/engine-comparison/highlight-smoke/`。クリップ率 0.06%
+  の夜景なので結果に意味は無い。エラー 0）。
+- `CIHighlightShadowAdjust.highlightAmount`（後段）は CLI に入れておらず**未評価**。
+- 再実行コマンド（ボリュームが戻ったとき）:
+  `.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF --captures DSC04473 DSC04607 DSC04532 DSC04759 --highlight --full --full-ids DSC04473 DSC04607 --out work/engine-comparison/highlight1`
+
+## 14. ADR 0002 の移行条件への判定案と後続 Issue への示唆
+
+| 条件 | 判定案 | 根拠 |
+|---|---|---|
+| 夜景・星空・長秒で破綻が無い。`apple_default` の NR が星を消さない | **満たしている（このサンプルの範囲で）** | §10.7: 星の残存率 ≥ 0.991（rawpy 以上）、空の輝度差 ±0.016、空ノイズ・色ノイズは rawpy 以下、塗りつぶし・白点なし（目視・数値）。限界は §15 |
+| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない | **未確認のまま**（道具は用意、サンプル未マウント） | §13 |
+
+後続 Issue への示唆:
+
+- **#81（`highlight_recovery` の置き換え）**: 実データは無いが、`apple_default` の EDR は ISO 3200/6400 で既定 0 なので「EDR を
+  上げる」レバーは既定からの追加になる。`--highlight` の掃引表（EDR / boost / boostShadow / exposure）がそのまま材料になる。
+- **#83（ブラケット合成）**: §11 のとおり露出差の保存とレンズ補正の幾何一致（カメラ内補正と 1 px 以内）は満たす。合成品質は同一構図の
+  サンプルが無く未確認。CI sRGB tiff16 → OpenCV Mertens の足場（B3）は `bracket_pair_eval` として動いており、原寸対応と
+  実ブラケットでの確認が残る。
+- **#88（暗所判定の扱い）**: このサンプルでは N1（廃止）で問題が見えない（空の輝度差はカメラ比 +0.013、ビネット補正は四隅のノイズを
+  増やさない）。N2（星空なら NR 0）を採る場合、**decoder 9 では sharpness を 0 にしないこと**が条件（§12）。NR 0 の利点は数値上
+  小さく（星の残存率は変わらず、空ノイズが 1.05 → 1.36 に増える）、目視でも差は僅かなので、既定の `apple_default` のままで足りる
+  可能性が高い【推測: 微光星の多い暗い空での差は未確認】。
+- **#72（プレビューの CI 化）**: Rust 側の `neutral` 既定は白点の出る組み合わせなので、`apple_default` への切り替えは必須。
+- **#75（回帰確認）**: この PR で CLI を 0.2.0 にしたが既定リクエストは変えておらず、`scripts/coreimage-regression-applied.sh` は
+  ベースライン 27.0.1 と差分 0 件だった（2026-10-20）。`--night` の指標（star_recall / sky_noise_ratio / impulse_vs_full）を
+  回帰確認の星空側の項目に加えられる。
+
+## 15. §10〜§13 の限界・未確認事項
+
+- サンプルは 1 セッション・2 本のレンズ・ISO 3200/6400・明るめの空に偏る。暗い空（輝度 0.2 未満）は 4 カット、前景の無い純粋な
+  星野は少なく、天の川の濃淡や微光星の多い暗所での「NR が微光星を消す」可能性はこのデータでは検出できない。
+  10-18mm（周辺減光の大きいレンズ）での四隅の挙動は未確認。
+- `point_count` / `star_count` は高 ISO の粒状ノイズも数えるため、星の絶対数としては読めない。星の残存率は「カメラ JPEG の強い星」を
+  基準にしており、カメラ JPEG 自身の NR で消えた微光星は評価できない。
+- `impulse_count` は lens OFF のバリアントで位置合わせの残差を含む（apple v9 l0 で impulse_count 747 に対し impulse_vs_full 6）。
+  lens OFF の `star_recall`（0.985）も同じ理由で低めに出る。lens OFF は `impulse_vs_full` と `corner_*` だけで読むこと。
+- 白点の scale 掃引は 2 カット、原因の切り分けは「どの設定で消えるか」までで、デコーダ内部の機構は分からない（非公開）。
+  OS 更新で変わりうる（#75 の対象）。
+- 露出差の保存は三脚ブラケットが無く、動いたペア 1 組と別構図 2 組での確認。合成品質は未確認。
+- ハイライト（#71）は実データ未実施。`CIHighlightShadowAdjust` は未評価。
+- 目視は 15 枚のシート・2 倍拡大パッチ（160px）で、ブラインド比較ではない。

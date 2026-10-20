@@ -19,7 +19,9 @@ swift test                      # 単体テスト + スモークテスト
 ```
 
 スモークテストは `/Volumes/Backup/100MSDCF/DSC04430.ARW`（横位置）/ `DSC04553.ARW`（縦位置, Orientation=8）が
-読めるときだけ走り、無ければ skip される。テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。
+読めるときだけ走り、無ければ skip される。個別上書き（下記）のスモークは、上記か星空サンプル
+（`~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
+最初に読めるものを使う。テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。
 ビルド成果物 `.build/` は `.gitignore` 済み。
 
 ## 使い方
@@ -28,7 +30,7 @@ swift test                      # 単体テスト + スモークテスト
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.1.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.2.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
@@ -39,7 +41,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.1.0","engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded"},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.2.0","engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
@@ -104,14 +106,36 @@ open -n --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "src-tauri/target/release/bundle/m
 | `max_edge` | integer 64..20000 | | 2400 | preview のみ（full で指定するとエラー）。`scaleFactor = min(1, max_edge / 長辺)` |
 | `format` | `"jpeg"` \| `"tiff16"` | | `"jpeg"` | |
 | `jpeg_quality` | number 0..1 | | 0.92 | jpeg のみ（tiff16 で指定するとエラー） |
+| `output_color_space` | `"srgb"` \| `"display_p3"` | | `"display_p3"` | tiff16 のみ（jpeg は常に sRGB なので指定するとエラー）。既定は互換のため P3（Issue #79） |
 | `decoder_version` | `"8"` \| `"9"` | | そのファイルの最新 | **アプリからは明示指定を推奨**（省略値は OS 更新で変わりうる） |
 | `settings.exposure_ev` | number -5..5 | | 0 | `CIRAWFilter.exposure`（EV、baselineExposure に加算） |
 | `settings.neutral_temperature` | number 2000..50000 \| null | | null（= 撮影時 WB） | `neutralTemperature`（K） |
 | `settings.neutral_tint` | number -150..150 \| null | | null | `neutralTint` |
 | `settings.lens_correction` | boolean | | false | `isLensCorrectionEnabled`。CIRAWFilter 既定は ON だが、CLI では明示時のみ ON |
 | `settings.profile` | `"neutral"` \| `"apple_default"` | | `"neutral"` | 下記 |
+| `settings.luminance_noise_reduction` | number 0..1 \| null | | null | `luminanceNoiseReductionAmount` の個別上書き（下記） |
+| `settings.color_noise_reduction` | number 0..1 \| null | | null | `colorNoiseReductionAmount` |
+| `settings.sharpness_amount` | number 0..1 \| null | | null | `sharpnessAmount` |
+| `settings.detail_amount` | number 0..3 \| null | | null | `detailAmount` |
+| `settings.extended_dynamic_range` | number 0..2 \| null | | null | `extendedDynamicRangeAmount` |
+| `settings.boost_amount` | number 0..1 \| null | | null | `boostAmount`（0 でトーンカーブ無し＝リニア） |
+| `settings.boost_shadow_amount` | number 0..2 \| null | | null | `boostShadowAmount`（`boost_amount` が 0 なら無効） |
 
 `null` を渡したキーは省略と同じ扱い。
+
+### settings の個別上書き（Issue #79）
+
+`luminance_noise_reduction` 以下の 7 キーは、**profile を適用した後に、指定されたものだけ**を `CIRAWFilter` へ書く。
+`apple_default` では OS が ISO ごとに決めた既定値を、`neutral` では 0 をそれぞれ置き換える。null / 省略は「profile の
+既定値のまま」。値域は `CIRAWFilter.h` のコメントどおりで、外れると `INVALID_REQUEST`。
+
+- 用途: 星景で「`apple_default` のトーン・色はそのまま、輝度 NR だけ 0」にする（#70 / #77）、ハイライト評価で
+  EDR / boost を掃引する（#71）。
+- **`apple_default` の既定値は OS 更新で変わりうる**（例: macOS 27.0.1 / decoder 9 / ISO 3200 では
+  sharpness 1.0・luminance NR 0.241・color NR 0・EDR 0・boost 1.0・boostShadow 0.9）。評価や比較では必ず応答の
+  `applied` を記録し、「上書きしていない値が何だったか」を残すこと。
+- `applied` には読み戻した値が載る。実測では `extended_dynamic_range` に 2 を超える値を書くと 2.0 に丸められる
+  （CLI の値域検査は 0..2 なので通常は起きない）。
 
 ### profile
 
@@ -120,6 +144,7 @@ open -n --env GEOFRAME_COREIMAGE_EXPERIMENT=1 "src-tauri/target/release/bundle/m
   既定のまま。根拠は ADR §4。
 - `apple_default`: CIRAWFilter 既定値のまま（NR・シャープは ISO と decoderVersion で変わる）。
   `lens_correction` だけは settings に従う。
+- どちらの profile でも、上記の個別上書きキーを指定したものだけがその後に置き換わる。
 
 draft mode は常に OFF。
 
@@ -130,7 +155,7 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 ### 成功（終了コード 0）
 
 ```json
-{"applied":{"baseline_exposure":0.4,"bit_depth":8,"boost_amount":1,"boost_shadow_amount":0.9,"color_noise_reduction_amount":0,"color_space":"sRGB IEC61966-2.1","contrast_amount":0,"decoder_version":"9","detail_amount":0,"draft_mode_enabled":false,"exposure":0,"extended_dynamic_range_amount":0,"gamut_mapping_enabled":true,"lens_correction_enabled":false,"lens_correction_supported":true,"local_tone_map_amount":0,"local_tone_map_supported":false,"luminance_noise_reduction_amount":0,"moire_reduction_amount":0,"neutral_temperature":6414.951,"neutral_tint":9.99706,"orientation":8,"orientation_handling":"CIRAWFilter applies the source EXIF orientation (8) to outputImage; pixels are written upright and the output Orientation tag is 1 (no second rotation)","profile":"neutral","scale_factor":0.4,"shadow_bias":3,"sharpness_amount":0,"working_color_space":"extended linear sRGB (RGBAh)"},"cli_version":"0.1.0","decoder_version":"9","elapsed_ms":{"decode":350.7,"render_encode":891.8,"total":1242.5},"engine":"coreimage","format":"jpeg","height":2400,"input":"/Volumes/Backup/100MSDCF/DSC04553.ARW","macos_version":"27.0.1","mode":"preview","ok":true,"output":"/tmp/ci-poc/out/DSC04553_preview_neutral.jpg","source":{"camera_model":"ILCE-6400","iso":100,"lens_model":"10-18mm F2.8 DC DN | Contemporary 023","native_height":4000,"native_width":6000,"orientation":8},"width":1600}
+{"applied":{"baseline_exposure":0.4,"bit_depth":8,"boost_amount":1,"boost_shadow_amount":0.9,"color_noise_reduction_amount":0,"color_space":"sRGB IEC61966-2.1","contrast_amount":0,"decoder_version":"9","detail_amount":0,"draft_mode_enabled":false,"exposure":0,"extended_dynamic_range_amount":0,"gamut_mapping_enabled":true,"lens_correction_enabled":false,"lens_correction_supported":true,"local_tone_map_amount":0,"local_tone_map_supported":false,"luminance_noise_reduction_amount":0,"moire_reduction_amount":0,"neutral_temperature":6414.951,"neutral_tint":9.99706,"orientation":8,"orientation_handling":"CIRAWFilter applies the source EXIF orientation (8) to outputImage; pixels are written upright and the output Orientation tag is 1 (no second rotation)","profile":"neutral","scale_factor":0.4,"shadow_bias":3,"sharpness_amount":0,"working_color_space":"extended linear sRGB (RGBAh)"},"cli_version":"0.2.0","decoder_version":"9","elapsed_ms":{"decode":350.7,"render_encode":891.8,"total":1242.5},"engine":"coreimage","format":"jpeg","height":2400,"input":"/Volumes/Backup/100MSDCF/DSC04553.ARW","macos_version":"27.0.1","mode":"preview","ok":true,"output":"/tmp/ci-poc/out/DSC04553_preview_neutral.jpg","source":{"camera_model":"ILCE-6400","iso":100,"lens_model":"10-18mm F2.8 DC DN | Contemporary 023","native_height":4000,"native_width":6000,"orientation":8},"width":1600}
 ```
 
 - `applied`: 全パラメータを設定し終えた後に **filter から読み戻した値**（Float は最短表記に丸め）。
@@ -147,7 +172,7 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 
 | code | 条件 |
 |---|---|
-| `INVALID_REQUEST` | JSON でない / オブジェクトでない / 未知キー / 型・値域違反 / 相対パス / 入力が `.ARW` でない / 出力拡張子が format と不一致 / `max_edge` を full で指定 / `jpeg_quality` を tiff16 で指定 / input と output が同一実体（同一パス・シンボリックリンク・ハードリンク） / input や output がディレクトリ / 未知のコマンドライン引数（終了コード 2） |
+| `INVALID_REQUEST` | JSON でない / オブジェクトでない / 未知キー / 型・値域違反 / 相対パス / 入力が `.ARW` でない / 出力拡張子が format と不一致 / `max_edge` を full で指定 / `jpeg_quality` を tiff16 で指定 / `output_color_space` を jpeg で指定 / input と output が同一実体（同一パス・シンボリックリンク・ハードリンク） / input や output がディレクトリ / 未知のコマンドライン引数（終了コード 2） |
 | `INPUT_NOT_FOUND` | input が存在しない |
 | `INPUT_NOT_READABLE` | input が読めない（権限） |
 | `OUTPUT_DIR_NOT_FOUND` | output の親ディレクトリが無い |
@@ -162,7 +187,7 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 | format | 画素 | 色空間 / ICC | メタデータ |
 |---|---|---|---|
 | `jpeg` | 8bit RGB | sRGB IEC61966-2.1。ICC（3144 byte）を APP2 に埋め込み | Software、Orientation=1、ImageIO 既定の最小 EXIF |
-| `tiff16` | 16bit/ch RGB（アルファ無し） | Display P3 ICC 埋め込み | Software、Orientation=1 |
+| `tiff16` | 16bit/ch RGB（アルファ無し） | 既定 Display P3 ICC 埋め込み。`output_color_space: "srgb"` で sRGB ICC | Software、Orientation=1 |
 
 - 作業空間は extended linear sRGB（half float）。
 - ImageIO は sRGB JPEG に ICC を書かない（EXIF ColorSpace=1 のみ）ため、CLI が Apple の sRGB プロファイルを

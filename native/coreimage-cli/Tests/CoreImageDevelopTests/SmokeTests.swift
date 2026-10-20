@@ -8,6 +8,14 @@ import XCTest
 final class SmokeTests: XCTestCase {
     static let landscape = "/Volumes/Backup/100MSDCF/DSC04430.ARW"
     static let portrait = "/Volumes/Backup/100MSDCF/DSC04553.ARW"
+    /// 個別上書き（#79）のスモーク用。外付けボリュームが無い環境でも走るよう、星空サンプル
+    /// （`scripts/eval_cases/candidates_baseline.json` の `stars` ルート。拡張子は小文字 .arw）も候補にする。
+    /// 環境変数 `GEOFRAME_CI_SMOKE_ARW` で任意の ARW を指すこともできる。
+    static let highISOCandidates = [
+        ProcessInfo.processInfo.environment["GEOFRAME_CI_SMOKE_ARW"],
+        "/Volumes/Backup/100MSDCF/DSC04430.ARW",
+        NSString(string: "~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw").expandingTildeInPath,
+    ].compactMap { $0 }
 
     private var directory: URL!
 
@@ -28,6 +36,13 @@ final class SmokeTests: XCTestCase {
 
     private func run(_ json: String) throws -> SuccessResponse {
         try develop(try RequestParser.parse(Data(json.utf8)))
+    }
+
+    private func firstReadable(_ candidates: [String]) throws -> String {
+        guard let path = candidates.first(where: { FileManager.default.isReadableFile(atPath: $0) }) else {
+            throw XCTSkip("sample RAW not available: \(candidates.joined(separator: ", "))")
+        }
+        return path
     }
 
     func testLandscapePreviewNeutralJPEG() throws {
@@ -61,6 +76,41 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(response.applied.lens_correction_enabled)
         XCTAssertEqual(response.applied.color_space, "Display P3")
         XCTAssertEqual(response.applied.bit_depth, 16)
+    }
+
+    func testAppleDefaultOverridesAreAppliedAndReadBack() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        let output = directory.appendingPathComponent("override.jpg")
+        let response = try run("""
+        {"input":"\(input)","output":"\(output.path)","mode":"preview","max_edge":300,"decoder_version":"9",
+         "settings":{"profile":"apple_default","lens_correction":true,"luminance_noise_reduction":0,"color_noise_reduction":0,
+                     "boost_shadow_amount":1.2}}
+        """)
+        XCTAssertEqual(response.applied.profile, "apple_default")
+        XCTAssertEqual(response.applied.luminance_noise_reduction_amount, 0)
+        XCTAssertEqual(response.applied.color_noise_reduction_amount, 0)
+        XCTAssertEqual(response.applied.boost_shadow_amount, 1.2, accuracy: 1e-6)
+        // 上書きしていない値は apple_default の既定のまま（sharpness は ISO で変わるので 0 でないことだけ見る）。
+        XCTAssertGreaterThan(response.applied.sharpness_amount, 0)
+        XCTAssertEqual(response.applied.boost_amount, 1)
+        XCTAssertTrue(response.applied.lens_correction_enabled)
+    }
+
+    func testTIFF16SRGBOutputHasSRGBProfile() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        let output = directory.appendingPathComponent("srgb.tif")
+        let response = try run("""
+        {"input":"\(input)","output":"\(output.path)","mode":"preview","max_edge":300,"format":"tiff16","output_color_space":"srgb",
+         "decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true,"luminance_noise_reduction":0}}
+        """)
+        XCTAssertEqual(response.applied.color_space, "sRGB IEC61966-2.1")
+        XCTAssertEqual(response.applied.bit_depth, 16)
+        XCTAssertEqual(response.applied.luminance_noise_reduction_amount, 0)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any])
+        XCTAssertEqual(props[kCGImagePropertyProfileName as String] as? String, "sRGB IEC61966-2.1")
+        XCTAssertEqual(props[kCGImagePropertyDepth as String] as? Int, 16)
+        XCTAssertNil(props[kCGImagePropertyGPSDictionary as String])
     }
 
     func testPortraitIsWrittenUpright() throws {

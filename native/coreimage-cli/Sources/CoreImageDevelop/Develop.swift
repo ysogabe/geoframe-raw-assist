@@ -107,11 +107,11 @@ public let ilce6400ModelName = "Sony Alpha ILCE-6400"
 
 /// 出力色空間の表記（応答 `applied.color_space` に載せる）。
 enum OutputColor {
-    static func space(for format: OutputFormat) -> (CGColorSpace, String) {
-        switch format {
-        case .jpeg:
+    static func space(for format: OutputFormat, colorSpace: OutputColorSpace?) -> (CGColorSpace, String) {
+        switch (format, colorSpace ?? .displayP3) {
+        case (.jpeg, _), (.tiff16, .srgb):
             return (CGColorSpace(name: CGColorSpace.sRGB)!, "sRGB IEC61966-2.1")
-        case .tiff16:
+        case (.tiff16, .displayP3):
             return (CGColorSpace(name: CGColorSpace.displayP3)!, "Display P3")
         }
     }
@@ -166,6 +166,7 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     filter.isDraftModeEnabled = false
 
     applyProfile(request.settings, to: filter)
+    applyOverrides(request.settings, to: filter)
 
     guard let image = filter.outputImage else {
         throw DevelopError(.renderFailed, "CIRAWFilter produced no output image")
@@ -176,7 +177,7 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     }
     let t1 = DispatchTime.now()
 
-    let (colorSpace, colorSpaceName) = OutputColor.space(for: request.format)
+    let (colorSpace, colorSpaceName) = OutputColor.space(for: request.format, colorSpace: request.outputColorSpace)
     let context = CIContext(options: [
         .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
         .workingFormat: CIFormat.RGBAh,
@@ -285,6 +286,19 @@ func applyProfile(_ settings: Settings, to filter: CIRAWFilter) {
     // CIRAWFilter の既定は ON だが、この CLI では明示指定時だけ ON にする（両 profile 共通）。
     filter.isLensCorrectionEnabled = settings.lensCorrection
     filter.isDraftModeEnabled = false
+}
+
+/// settings の個別上書き（Issue #79）。profile 適用後に、指定されたキーだけを filter へ書く。
+/// `apple_default` では OS が決めた既定値を、`neutral` では 0 をそれぞれ置き換えることになる。
+/// 実際に効いた値は `applied` に読み戻しで載る（例: extendedDynamicRangeAmount は実測で 2.0 に丸められる）。
+func applyOverrides(_ settings: Settings, to filter: CIRAWFilter) {
+    if let value = settings.luminanceNoiseReduction { filter.luminanceNoiseReductionAmount = Float(value) }
+    if let value = settings.colorNoiseReduction { filter.colorNoiseReductionAmount = Float(value) }
+    if let value = settings.sharpnessAmount { filter.sharpnessAmount = Float(value) }
+    if let value = settings.detailAmount { filter.detailAmount = Float(value) }
+    if let value = settings.extendedDynamicRange { filter.extendedDynamicRangeAmount = Float(value) }
+    if let value = settings.boostAmount { filter.boostAmount = Float(value) }
+    if let value = settings.boostShadowAmount { filter.boostShadowAmount = Float(value) }
 }
 
 /// 16bit/チャンネル・アルファ無しの RGB として描画する（TIFF に余計な alpha を書かないため）。
@@ -449,7 +463,10 @@ public struct Capabilities: Encodable {
             supported_decoder_versions = nil
             probe_input = probe?.path
         }
-        output_formats = ["jpeg": "8-bit JPEG, sRGB IEC61966-2.1 ICC embedded", "tiff16": "16-bit RGB TIFF, Display P3 ICC embedded"]
+        output_formats = [
+            "jpeg": "8-bit JPEG, sRGB IEC61966-2.1 ICC embedded",
+            "tiff16": "16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\"",
+        ]
         profiles = [Profile.neutral.rawValue, Profile.appleDefault.rawValue]
     }
 }
