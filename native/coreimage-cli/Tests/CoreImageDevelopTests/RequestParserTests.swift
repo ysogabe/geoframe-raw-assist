@@ -98,6 +98,28 @@ final class RequestParserTests: XCTestCase {
         assertInvalid("{\(base),\"settings\":{\"sharpness_amount\":true}}", contains: "sharpness_amount")
     }
 
+    /// 診断用の settings 2 キー（CLI 0.4.0、Issue #92 設計書 §4.2）。#79 の個別上書きと同じ規則。
+    func testDiagnosticSettingsGamutMappingAndBaselineExposure() throws {
+        let base = #""input":"/a/x.ARW","output":"/b/o.jpg","mode":"preview""#
+        let request = try parse("{\(base),\"settings\":{\"gamut_mapping\":false,\"baseline_exposure\":0}}")
+        XCTAssertEqual(request.settings.gamutMapping, false)
+        XCTAssertEqual(request.settings.baselineExposure, 0)
+        XCTAssertEqual(try parse("{\(base),\"settings\":{\"gamut_mapping\":true,\"baseline_exposure\":-5}}").settings.baselineExposure, -5)
+        // 省略・null は CIRAWFilter の既定のまま（既定リクエストと同じ Settings）。
+        let nulls = try parse("{\(base),\"settings\":{\"gamut_mapping\":null,\"baseline_exposure\":null}}")
+        XCTAssertEqual(nulls.settings, Settings())
+        XCTAssertNil(try parse("{\(base)}").settings.gamutMapping)
+        assertInvalid("{\(base),\"settings\":{\"gamut_mapping\":0}}", contains: "settings.gamut_mapping")
+        assertInvalid("{\(base),\"settings\":{\"gamut_mapping\":\"false\"}}", contains: "settings.gamut_mapping")
+        assertInvalid("{\(base),\"settings\":{\"baseline_exposure\":5.5}}", contains: "settings.baseline_exposure")
+        assertInvalid("{\(base),\"settings\":{\"baseline_exposure\":true}}", contains: "settings.baseline_exposure")
+        // adjustments との同時指定は可（§4.2）。
+        let adj = #"{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":60,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}"#
+        let both = try parse("{\(base),\"settings\":{\"profile\":\"apple_default\",\"gamut_mapping\":false,\"baseline_exposure\":0.2},\"adjustments\":\(adj)}")
+        XCTAssertEqual(both.settings.gamutMapping, false)
+        XCTAssertNotNil(both.adjustments)
+    }
+
     func testNullOptionalFieldsUseDefaults() throws {
         let request = try parse("""
         {"input":"/a/x.ARW","output":"/b/o.jpeg","mode":"preview","max_edge":null,"format":null,"jpeg_quality":null,

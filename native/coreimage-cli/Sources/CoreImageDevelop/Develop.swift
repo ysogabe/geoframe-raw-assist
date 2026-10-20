@@ -73,6 +73,8 @@ public struct SuccessResponse: Encodable {
     /// `adjustments` 指定時だけ値を持つ（Issue #73）。nil のときはキー自体を出さない（synthesized Encodable は
     /// Optional を encodeIfPresent で書く）。既定リクエストの応答は 0.2.0 と同じキー集合のまま。
     public var adjustments_applied: AdjustmentsApplied? = nil
+    /// `diagnostics` 指定時だけ値を持つ（CLI 0.4.0、Issue #92 設計書 §4.4）。nil のときはキー自体を出さない。
+    public var diagnostics: DiagnosticsReport? = nil
 }
 
 /// `adjustments` をどう解釈したか（応答のトップレベル `adjustments_applied`。設計書 §4.2）。
@@ -256,6 +258,13 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
         applyOverrides(request.settings, to: filter)
     }
 
+    // 診断モード: linearSpaceFilter は outputImage の取得より前に設定する（diagnostics 指定時のみ）。
+    if let linear = request.diagnostics?.linearSpaceFilter {
+        filter.linearSpaceFilter = linear.makeFilter()
+    }
+
+    // outputImage の参照はここ 1 回だけ。同じ filter で 2 回以上参照すると extent が半分ずつ縮む
+    // （設計書 §2.2。macOS 27.0.1 で確認）ので、以降は `decoded` を使い回す。
     guard let decoded = filter.outputImage else {
         throw DevelopError(.renderFailed, "CIRAWFilter produced no output image")
     }
@@ -264,6 +273,11 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
         throw DevelopError(.renderFailed, "decoded image has an invalid extent")
     }
     var image = decoded
+    // 診断モードの post_filters（outputImage → post_filters → adjustments の後段の順。設計書 §4.3）。
+    var postFilterReports: [PostFilterReport]?
+    if let postFilters = request.diagnostics?.postFilters {
+        (image, postFilterReports) = try DiagnosticsPipeline.applyPostFilters(decoded, postFilters)
+    }
     var adjustmentsApplied: AdjustmentsApplied?
     if let adjustments = request.adjustments, let plan = adjustmentsPlan {
         let decodedExtent = decoded.extent.integral
@@ -279,7 +293,7 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
             usmGain: usmGainForCoreImage(sharpness: adjustments.sharpness, base: base),
             usmCoring: base.coring
         )
-        image = try PostChain.apply(decoded, params)
+        image = try PostChain.apply(image, params)
         adjustmentsApplied = AdjustmentsApplied(
             defaults: plan.defaults.encodable,
             post: AdjustmentsApplied.Post(
@@ -311,18 +325,40 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
         .workingFormat: CIFormat.RGBAh,
         .cacheIntermediates: false,
     ])
-    let cgImage: CGImage
-    switch request.format {
-    case .jpeg:
-        guard let rendered = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: colorSpace) else {
-            throw DevelopError(.renderFailed, "Core Image failed to render the image")
+    let outputWidth: Int
+    let outputHeight: Int
+    let written: Bool
+    if request.diagnostics?.skipWrite == true {
+        // 診断モードの skip_write: 画像のレンダ・エンコード・書き込みをしない（output のパス検証は済んでいる）。
+        outputWidth = Int(extent.width)
+        outputHeight = Int(extent.height)
+        written = false
+    } else {
+        let cgImage: CGImage
+        switch request.format {
+        case .jpeg:
+            guard let rendered = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: colorSpace) else {
+                throw DevelopError(.renderFailed, "Core Image failed to render the image")
+            }
+            cgImage = rendered
+        case .tiff16:
+            cgImage = try renderRGB16(image, extent: extent, colorSpace: colorSpace, context: context)
         }
-        cgImage = rendered
-    case .tiff16:
-        cgImage = try renderRGB16(image, extent: extent, colorSpace: colorSpace, context: context)
+
+        try AtomicImageWriter.write(cgImage, to: request.output, format: request.format, jpegQuality: request.jpegQuality)
+        outputWidth = cgImage.width
+        outputHeight = cgImage.height
+        written = true
     }
 
-    try AtomicImageWriter.write(cgImage, to: request.output, format: request.format, jpegQuality: request.jpegQuality)
+    // 診断モード: 統計・float dump（レンダ直前の `image` を RGBAf で描画する）。時間は render_encode に含める。
+    var diagnosticsReport: DiagnosticsReport?
+    if let diagnostics = request.diagnostics {
+        diagnosticsReport = try DiagnosticsPipeline.run(
+            diagnostics, image: image, extent: extent, context: context, written: written,
+            filter: filter, decodedExtent: decoded.extent, postFilterReports: postFilterReports
+        )
+    }
     let t2 = DispatchTime.now()
 
     let properties = filter.properties
@@ -370,8 +406,8 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
         output: request.output.path,
         mode: request.mode.rawValue,
         format: request.format.rawValue,
-        width: cgImage.width,
-        height: cgImage.height,
+        width: outputWidth,
+        height: outputHeight,
         elapsed_ms: ElapsedMS(decode: millis(t0, t1), render_encode: millis(t1, t2), total: millis(t0, t2)),
         applied: applied,
         source: SourceInfo(
@@ -382,7 +418,8 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
             native_height: Int(native.height),
             orientation: sourceOrientation
         ),
-        adjustments_applied: adjustmentsApplied
+        adjustments_applied: adjustmentsApplied,
+        diagnostics: diagnosticsReport
     )
 }
 
@@ -519,6 +556,9 @@ func applyOverrides(_ settings: Settings, to filter: CIRAWFilter) {
     if let value = settings.extendedDynamicRange { filter.extendedDynamicRangeAmount = Float(value) }
     if let value = settings.boostAmount { filter.boostAmount = Float(value) }
     if let value = settings.boostShadowAmount { filter.boostShadowAmount = Float(value) }
+    // 診断用（CLI 0.4.0、Issue #92 §4.2）。省略時は書かない（既定リクエストに影響しない）。
+    if let value = settings.gamutMapping { filter.isGamutMappingEnabled = value }
+    if let value = settings.baselineExposure { filter.baselineExposure = Float(value) }
 }
 
 /// 16bit/チャンネル・アルファ無しの RGB として描画する（TIFF に余計な alpha を書かないため）。
@@ -670,6 +710,8 @@ public struct Capabilities: Encodable {
     public let output_formats: [String: String]
     public let profiles: [String]
     public let adjustments: AdjustmentsCapability
+    /// 診断モード（CLI 0.4.0、Issue #92）。本番では使わない。
+    public let diagnostics: DiagnosticsCapability
 
     public init(probe: URL?) {
         let models = CIRAWFilter.supportedCameraModels
@@ -690,6 +732,7 @@ public struct Capabilities: Encodable {
         ]
         profiles = [Profile.neutral.rawValue, Profile.appleDefault.rawValue]
         adjustments = AdjustmentsCapability()
+        diagnostics = DiagnosticsCapability()
     }
 }
 

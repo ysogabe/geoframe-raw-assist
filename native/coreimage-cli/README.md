@@ -29,7 +29,9 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 スモークテストは `/Volumes/Backup/100MSDCF/DSC04430.ARW`（横位置）/ `DSC04553.ARW`（縦位置, Orientation=8）が
 読めるときだけ走り、無ければ skip される。個別上書き（下記）のスモークは、上記か星空サンプル
 （`~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
-最初に読めるものを使う。テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。
+最初に読めるものを使う。診断モード（0.4.0）のスモークのうち線形読み出し・`baseline_exposure`・`linear_space_filter` の確認は
+明るい空のカット `/Volumes/Backup/100MSDCF/DSC04705.ARW`（または環境変数 `GEOFRAME_CI_DIAG_ARW`）が読めるときだけ走る。
+テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。
 ビルド成果物 `.build/` は `.gitignore` 済み。
 
 ## 使い方
@@ -38,7 +40,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.3.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.4.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
@@ -49,11 +51,12 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.3.0","engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.4.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
 `supported_decoder_versions` が埋まる（渡さなければキー自体が出ない）。
+`diagnostics` は下記「診断モード」（0.4.0）の対応状況と `post_filters` の許可リスト。
 
 ## アプリからの使い方（Issue #65 PR2、#72/#73 で既定に）
 
@@ -129,7 +132,10 @@ CLI の起動失敗などインフラ側のエラー時は、フロントが自�
 | `settings.extended_dynamic_range` | number 0..2 \| null | | null | `extendedDynamicRangeAmount` |
 | `settings.boost_amount` | number 0..1 \| null | | null | `boostAmount`（0 でトーンカーブ無し＝リニア） |
 | `settings.boost_shadow_amount` | number 0..2 \| null | | null | `boostShadowAmount`（`boost_amount` が 0 なら無効） |
+| `settings.gamut_mapping` | boolean \| null | | null（= CIRAWFilter 既定 true） | `isGamutMappingEnabled` の上書き（0.4.0、**診断専用**。下記「診断モード」） |
+| `settings.baseline_exposure` | number -5..5 \| null | | null（= ファイル値） | `baselineExposure` の上書き（0.4.0、**診断専用**） |
 | `adjustments` | object \| null | | null | アプリのスライダー 9 キー（0.3.0、Issue #73）。下記「adjustments」。省略時は 0.2.0 と同じ処理 |
+| `diagnostics` | object \| null | | null | 診断モード（0.4.0、Issue #92）。**本番（アプリ）では使わない**。下記「診断モード」。省略時は 0.3.0 と同じ処理 |
 
 `null` を渡したキーは省略と同じ扱い。
 
@@ -223,6 +229,94 @@ decoder 9 は「輝度 NR 0 ∧ sharpness 0 ∧ scaleFactor < 1」のときだ�
 - 恒等の adjustments（exposure 0、wb_temp 0、shadow_lift 0、brightness・contrast・saturation・sharpness 1、light）は filter に何も書かず、
   後段もほぼ素通し（16bit sRGB TIFF で既定リクエストとの差 最大 0.23/255）。
 
+### 診断モード（CLI 0.4.0、Issue #92）
+
+**ハイライトの白飛びを段階別に切り分けるための観測専用の機能で、本番（アプリ・Tauri）からは使わない。**
+比較ハーネス（`scripts/compare_engines.py --diagnosis`）が `work/` 配下へ書くためのもの。設計と根拠は
+[`docs/design/coreimage-highlight-diagnosis.md`](../../docs/design/coreimage-highlight-diagnosis.md) §2・§4。
+
+- `diagnostics` が無い（省略 / null）リクエストは、コード経路・出力のバイト列・応答のキー集合・`applied` が 0.3.0 と同一
+  （0.3.0 の実バイナリと tiff16 / jpeg を突き合わせ、ソフトウェア名の版表記以外のバイト一致を確認済み）。
+- 応答の `applied` のキー集合は変えない（回帰スクリプトがキー集合の差も数えるため）。診断の結果は応答のトップレベル `diagnostics` に載る。
+
+#### settings の診断用キー
+
+`settings.gamut_mapping`（`isGamutMappingEnabled`）と `settings.baseline_exposure`（`baselineExposure`）は、個別上書き（#79）と
+同じ規則（省略 / null = 既定のまま、値域外は `INVALID_REQUEST`、profile・adjustments の写像の後に適用）。読み戻しは既存の
+`applied.gamut_mapping_enabled` / `applied.baseline_exposure`。`adjustments` との同時指定も可。
+
+- `gamut_mapping: false` + `boost_amount: 0` で、CI の線形段（S1）を表示白（1.0）で切らずに読み出せる。
+  `gamut_mapping: false` だけならトーン後（S2）。既定（gamut ON）は 1.0 で clamp される（S3）。
+- `baseline_exposure: 0` は `exposure_ev: −(ファイル値)` と同じ統計になる（冗長。スモークテストで確認）。
+- **本番で使う予定は無い**（アプリのリクエストは常に省略）。
+
+#### リクエスト `diagnostics`
+
+```jsonc
+"diagnostics": {
+  "stats": true,                              // 全画面の float 統計（既定 true）
+  "stats_color_space": "linear_srgb",         // "linear_srgb"（extended linear sRGB、既定）| "linear_p3"（extended linear Display P3）
+  "dump_float": {"path": "/abs/work/x_s1.f32", "color_space": "linear_srgb"},   // 任意。clamp しない float 画像
+  "linear_space_filter": {"kind": "scale", "value": 0.5},                        // 任意。identity | scale（0.01..8）| constant（0..8）
+  "post_filters": [{"name": "CIExposureAdjust", "inputEV": -1.43}],              // 任意。許可リスト制
+  "skip_write": false                         // true なら output に画像を書かない（output のパス検証は従来どおり）
+}
+```
+
+規則（違反は `INVALID_REQUEST`）:
+
+- 未知キーは拒否。`diagnostics: {}` は「統計だけ」の最小指定。
+- `dump_float.path`: 絶対パス・拡張子 `.f32`・親ディレクトリが存在すること（無ければ `OUTPUT_DIR_NOT_FOUND`）。input / output と
+  同一実体（シンボリックリンク・ハードリンク含む）は不可、既存ディレクトリも不可。output と同じく一時ファイル + `rename(2)` で書く。
+- `linear_space_filter`: `CIRAWFilter.linearSpaceFilter` に `CIColorMatrix` を挿す。identity（×1）/ scale（×value）/ constant
+  （RGB を value で置換。トーン応答の標本化用）。identity に `value` を付けるとエラー。`exposure` / `baselineExposure` はこの**前**に掛かる。
+- `post_filters`（最大 16 個）: 下表の名前とパラメータだけ受ける。数値か配列（`[x, y]` / `[r, g, b, a]`）のみ。null は「CIFilter の既定のまま」。
+
+  | name | パラメータ |
+  |---|---|
+  | `CIHighlightShadowAdjust` | `inputHighlightAmount` 0..1、`inputShadowAmount` −1..1、`inputRadius` 0..10 |
+  | `CIToneCurve` | `inputPoint0`〜`inputPoint4`（各 `[x, y]`、x 0..1、y 0..2。指定しなかった点は既定値で補い、x が狭義単調増加であること）。入力は [0,1] に clamp されるので、1.0 超を扱うときは前に `CIExposureAdjust` を置く |
+  | `CIExposureAdjust` | `inputEV` −5..5 |
+  | `CIColorClamp` | `inputMinComponents` / `inputMaxComponents`（各 `[r, g, b, a]`、有限の数値） |
+
+- 処理順は固定: `outputImage` → `post_filters` → `adjustments` の後段（先頭で [0,1] clamp）→ レンダ。`post_filters` は端を
+  `clampedToExtent` で延長してから掛け、`outputImage` の extent に切り戻す（`inputRadius` で寸法が変わらない）。
+- **`outputImage` は 1 回だけ参照する**。同じ filter で 2 回以上参照すると extent が半分ずつ縮む（macOS 27.0.1 で確認。
+  `SmokeTests.testDoubleReferenceOfOutputImageShrinksExtent` がこの挙動を、`testReadbackExtentMatchesScaleFactor` が CLI が縮んでいないことを検査する）。
+
+#### 応答 `diagnostics`（`diagnostics` 指定時だけ出る）
+
+例（DSC04705、`max_edge` 1200、`boost_amount: 0` + `gamut_mapping: false`、`skip_write` + `dump_float`。数値は丸めて表示）:
+
+```json
+"diagnostics":{"cli_diagnostics_version":1,"dump_float":{"byte_order":"little","bytes":11520000,"channels":3,"color_space":"linear_srgb","dtype":"float32","height":800,"layout":"interleaved_rgb_row_major","path":"/abs/work/diag/s1.f32","width":1200},"readback":{"baseline_exposure":0.4,"extent":[0,0,1200,800],"gamut_mapping_enabled":false},"stats":{"all_gt_1":0.2473,"any_gt_1":0.3826,"b":{"frac_ge_1":0.3826,"frac_gt_1":0.3826,"frac_lt_0":0.0000073,"max":2.6997209,"mean":0.6774,"min":-0.022789825,"p50":0.045065697,"p99":2.3279364,"p999":2.5276783},"g":{...},"r":{...},"height":800,"width":1200},"stats_color_space":"linear_srgb","stats_source":"render_input","written":false}
+```
+
+- `stats`: レンダ直前の画像（`post_filters` / 後段を含む）を `stats_color_space` の extended linear 空間・RGBAf で全画面描画した
+  チャンネル別統計。`adjustments` 指定時は後段の clamp の後の値になる（1.0 超は出ない）。`stats: false` ならキーごと出さない。
+  - `mean` / `min` / `max` / `p50` / `p99` / `p999`（順位統計は近似せず厳密値。順位は `min(n−1, ⌊n·q⌋)`、p50 は `n/2` 番目）
+  - `frac_gt_1`（> 1.0）/ `frac_ge_1`（≥ 1 − 1/65535 = 16bit で白）/ `frac_lt_0`（< 0）、`any_gt_1` / `all_gt_1`（いずれか / 3ch とも 1.0 超の画素）
+  - CLI の統計は**全画面のみ**。ROI の統計は dump からハーネスが計算する。
+- `dump_float`: RGB 3 チャンネル float32 little-endian・行優先・アルファ無し。Python は
+  `np.fromfile(path, "<f4").reshape(height, width, 3)`。サイズは preview 2400px で約 46 MB、full で 288 MB。
+  stats と同じ色空間なら描画は 1 回で共有する。
+- `linear_space_filter`: `{kind, value, filter: "CIColorMatrix"}`（identity の `value` は null）。
+- `post_filters`: `[{name, applied_parameters}]`。`applied_parameters` は許可リストのパラメータを filter から読み戻した値
+  （指定しなかったものは CIFilter の既定値）。
+- `readback`: `gamut_mapping_enabled` / `baseline_exposure`（filter の読み戻し）と `extent`（`outputImage` の `[x, y, w, h]`）。
+- `written`: output に画像を書いたか（`skip_write: true` なら false。応答の `output` は要求パスのまま、`width` / `height` は extent から）。
+- 統計 / dump の描画は通常のレンダと別に同じ画像をもう一度描くので、時間（`elapsed_ms.render_encode` に含まれる）は約 2 倍。
+  full の float 描画はバッファ 384 MB（RGBAf）。
+
+#### 例
+
+```sh
+# 線形読み出し（S1）の統計と float dump。画像は書かない（出力先は work/ 配下）
+echo '{"input":"/Volumes/Backup/100MSDCF/DSC04705.ARW","output":"'$PWD'/work/diag/s1.jpg","mode":"preview","max_edge":1200,
+  "decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true,"boost_amount":0,"gamut_mapping":false},
+  "diagnostics":{"skip_write":true,"dump_float":{"path":"'$PWD'/work/diag/s1.f32"}}}' | $B
+```
+
 ## レスポンス（stdout に JSON 1 行）
 
 stdout には JSON 1 行だけを書く。ログは stderr。キーはソート済み。
@@ -251,6 +345,7 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
   ```json
   "adjustments_applied":{"defaults":{"color_noise_reduction_amount":0,"luminance_noise_reduction_amount":0.24097165,"neutral_temperature":4353.8257,"neutral_tint":8.204875,"sharpness_amount":1},"guards":[],"ignored":["highlight_recovery"],"post":{"brightness":1,"contrast":1.03,"noise_reduction":"light","saturation":1.02,"shadow_lift":0.15,"usm":{"coring":0.00392156862745098,"gain":0.12150000000000002,"iso":3200,"long_edge":2400,"sigma":0.64},"wb":{"k0":4353.8257,"mired_per_unit":0.85,"mired_shift":-17}}}
   ```
+- `diagnostics`: **`diagnostics` を指定したときだけ**出る（上記「診断モード」）。省略時はキー自体が無い。
 - `elapsed_ms.decode`: フィルタ生成〜`outputImage` 取得。Core Image は遅延評価なので、実際の
   デモザイクは `render_encode`（レンダリング＋エンコード＋rename）に含まれる。
 
@@ -262,10 +357,10 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 
 | code | 条件 |
 |---|---|
-| `INVALID_REQUEST` | JSON でない / オブジェクトでない / 未知キー / 型・値域違反 / `adjustments` の欠落キー・`apple_default` 以外との組み合わせ・`settings.exposure_ev` 等との同時指定 / 相対パス / 入力が `.ARW` でない / 出力拡張子が format と不一致 / `max_edge` を full で指定 / `jpeg_quality` を tiff16 で指定 / `output_color_space` を jpeg で指定 / input と output が同一実体（同一パス・シンボリックリンク・ハードリンク） / input や output がディレクトリ / 未知のコマンドライン引数（終了コード 2） |
+| `INVALID_REQUEST` | JSON でない / オブジェクトでない / 未知キー / 型・値域違反 / `adjustments` の欠落キー・`apple_default` 以外との組み合わせ・`settings.exposure_ev` 等との同時指定 / `diagnostics` の未知キー・型・値域違反・許可リスト外の `post_filters`・`dump_float.path` が `.f32` でない / input と `dump_float.path` が同一実体 / 相対パス / 入力が `.ARW` でない / 出力拡張子が format と不一致 / `max_edge` を full で指定 / `jpeg_quality` を tiff16 で指定 / `output_color_space` を jpeg で指定 / input と output が同一実体（同一パス・シンボリックリンク・ハードリンク） / input や output がディレクトリ / 未知のコマンドライン引数（終了コード 2） |
 | `INPUT_NOT_FOUND` | input が存在しない |
 | `INPUT_NOT_READABLE` | input が読めない（権限） |
-| `OUTPUT_DIR_NOT_FOUND` | output の親ディレクトリが無い |
+| `OUTPUT_DIR_NOT_FOUND` | output（または `diagnostics.dump_float.path`）の親ディレクトリが無い |
 | `UNSUPPORTED_RAW` | CIRAWFilter が開けない・寸法が取れない（壊れた／非 RAW ファイル） |
 | `UNSUPPORTED_DECODER_VERSION` | 指定 `decoder_version` がそのファイルで使えない |
 | `RENDER_FAILED` | `outputImage` が無い / レンダリング失敗 |
