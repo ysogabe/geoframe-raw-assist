@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.3.0"
+public let cliVersion = "0.4.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {
@@ -65,6 +65,10 @@ public struct Settings: Equatable {
     public var extendedDynamicRange: Double?
     public var boostAmount: Double?
     public var boostShadowAmount: Double?
+    /// 診断用の CIRAWFilter プロパティ上書き（CLI 0.4.0、Issue #92 設計書 §4.2）。nil = CIRAWFilter の既定のまま。
+    /// 本番（アプリ）では使わない。
+    public var gamutMapping: Bool?
+    public var baselineExposure: Double?
 }
 
 /// 検証済みの現像リクエスト。`RequestParser.parse` だけが作る。
@@ -84,6 +88,8 @@ public struct DevelopRequest: Equatable {
     public var settings: Settings
     /// アプリのスライダー 9 キー（Issue #73）。nil = 指定なし（0.2.0 と同じ処理）。
     public var adjustments: Adjustments? = nil
+    /// 診断モード（CLI 0.4.0、Issue #92 設計書 §4.3）。nil = 通常モード（0.3.0 と同じ処理）。
+    public var diagnostics: Diagnostics? = nil
 }
 
 /// stdin の JSON を構文・値域だけで検証する（ファイルシステムには触れない）。
@@ -102,15 +108,17 @@ public enum RequestParser {
     public static let extendedDynamicRangeRange = 0.0...2.0
     public static let boostRange = 0.0...1.0
     public static let boostShadowRange = 0.0...2.0
+    public static let baselineExposureRange = -5.0...5.0
 
     static let topLevelKeys: Set<String> = [
         "input", "output", "mode", "max_edge", "format", "jpeg_quality", "output_color_space", "decoder_version", "settings",
-        "adjustments",
+        "adjustments", "diagnostics",
     ]
     static let settingsKeys: Set<String> = [
         "exposure_ev", "neutral_temperature", "neutral_tint", "lens_correction", "profile",
         "luminance_noise_reduction", "color_noise_reduction", "sharpness_amount", "detail_amount",
         "extended_dynamic_range", "boost_amount", "boost_shadow_amount",
+        "gamut_mapping", "baseline_exposure",
     ]
     /// settings の個別上書きキー → (Settings のフィールドを書く closure, 値域, 説明)。
     static let overrideKeys: [(key: String, range: ClosedRange<Double>, set: (inout Settings, Double) -> Void)] = [
@@ -121,6 +129,7 @@ public enum RequestParser {
         ("extended_dynamic_range", extendedDynamicRangeRange, { $0.extendedDynamicRange = $1 }),
         ("boost_amount", boostRange, { $0.boostAmount = $1 }),
         ("boost_shadow_amount", boostShadowRange, { $0.boostShadowAmount = $1 }),
+        ("baseline_exposure", baselineExposureRange, { $0.baselineExposure = $1 }),
     ]
 
     public static func parse(_ data: Data) throws -> DevelopRequest {
@@ -215,6 +224,7 @@ public enum RequestParser {
         if adjustments != nil {
             try validateAdjustmentsAgainstSettings(dict["settings"], settings)
         }
+        let diagnostics = try parseDiagnostics(dict["diagnostics"])
 
         guard input.pathExtension.lowercased() == "arw" else {
             throw DevelopError(.invalidRequest, "input must be a Sony .ARW file")
@@ -222,11 +232,19 @@ public enum RequestParser {
         if input.standardizedFileURL.path == output.standardizedFileURL.path {
             throw DevelopError(.invalidRequest, "input and output must be different paths")
         }
+        if let dump = diagnostics?.dumpFloat {
+            if dump.path.path == input.standardizedFileURL.path {
+                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from input")
+            }
+            if dump.path.path == output.standardizedFileURL.path {
+                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from output")
+            }
+        }
 
         return DevelopRequest(
             input: input, output: output, mode: mode, maxEdge: maxEdge, format: format,
             jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings,
-            adjustments: adjustments
+            adjustments: adjustments, diagnostics: diagnostics
         )
     }
 
@@ -267,6 +285,12 @@ public enum RequestParser {
                 throw DevelopError(.invalidRequest, "settings.profile must be \"neutral\" or \"apple_default\"")
             }
             settings.profile = profile
+        }
+        if let value = dict["gamut_mapping"], !(value is NSNull) {
+            guard let flag = boolean(value) else {
+                throw DevelopError(.invalidRequest, "settings.gamut_mapping must be null or a boolean")
+            }
+            settings.gamutMapping = flag
         }
         for entry in overrideKeys {
             guard let value = dict[entry.key], !(value is NSNull) else { continue }
@@ -409,6 +433,9 @@ public enum PathValidator {
         }
         if request.input.resolvingSymlinksInPath().path == request.output.resolvingSymlinksInPath().path {
             throw DevelopError(.invalidRequest, "input and output refer to the same file")
+        }
+        if let dump = request.diagnostics?.dumpFloat {
+            try validateDump(dump.path, input: request.input, output: request.output, fileManager: fileManager)
         }
     }
 
