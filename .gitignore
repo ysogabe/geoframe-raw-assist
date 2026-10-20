@@ -60,3 +60,6 @@ __pycache__/
 
 # Core Image PoC CLI (SwiftPM build output)
 /native/coreimage-cli/.build/
+
+# Core Image CLI の Tauri externalBin（scripts/build-coreimage-cli.sh が生成）
+/src-tauri/binaries/

@@ -17,6 +17,8 @@
 //! failure path here logs to stderr and leaves the window open rather than
 //! panicking.
 
+mod coreimage;
+
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -886,7 +888,12 @@ fn main() {
     let app = tauri::Builder::default()
         .manage(RawEngineState(Mutex::new(None)))
         .manage(Mutex::new(SetupState::new("ready", "")))
-        .invoke_handler(tauri::generate_handler![setup_status])
+        .invoke_handler(tauri::generate_handler![
+            setup_status,
+            // Core Image 試験現像（Issue #65）。GEOFRAME_COREIMAGE_EXPERIMENT=1 のときだけ有効。
+            coreimage::coreimage_experiment_enabled,
+            coreimage::develop_coreimage
+        ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;
         // the matching `dialog:allow-open` permission lives in

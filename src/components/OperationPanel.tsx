@@ -33,6 +33,8 @@ import type {
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
 import { BracketMerge } from "./BracketMerge";
+import { CoreImageExperiment } from "./CoreImageExperiment";
+import { useCoreImageExperiment } from "../lib/coreimage-api";
 import { ProgressiveImage } from "./ProgressiveImage";
 
 type OperationPanelProps = {
@@ -161,6 +163,8 @@ export function OperationPanel({
   onOpenViewer,
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
+  // Core Image 試験現像（Issue #65）。フラグ無効・ブラウザモードでは false で、DOM に何も出さない。
+  const coreImageEnabled = useCoreImageExperiment();
   const developResult = fullResult ?? previewResult;
   /**
    * 本合成の結果が **今選んでいるフレーム構成** のものか。
@@ -521,6 +525,11 @@ export function OperationPanel({
         }
         onOpenFullSize={() => onOpenViewer(viewerGalleryFor("after"))}
       />
+
+      {/* key で撮影IDごとに作り直し、カットを切り替えたら前の結果を残さない。 */}
+      {coreImageEnabled && (
+        <CoreImageExperiment key={captureId} captureId={captureId} rawpyUrl={developResult?.output_url} />
+      )}
     </section>
   );
 }

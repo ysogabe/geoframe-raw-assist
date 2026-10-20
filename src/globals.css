@@ -718,3 +718,15 @@ button.comparison-image:hover .developed-label { background: rgba(19,29,26,.92);
   .viewer-dialog { width: 96vw; height: 94vh; }
   .viewer-heading { margin-right: 0; }
 }
+
+/* Core Image 試験現像（Issue #65）。フラグ有効時だけ描画される。 */
+.coreimage-experiment { margin-top: 10px; border: 1px dashed #9cbeb2; border-radius: 10px; padding: 11px; background: #f7faf8; }
+.coreimage-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.coreimage-head > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.coreimage-head small { flex-basis: 100%; color: #77817d; font-size: 10px; }
+.coreimage-head .secondary-action { flex: none; border-radius: 8px; padding: 8px 10px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.coreimage-error { margin: 8px 0 0; color: #a33a2b; font-size: 11px; }
+.coreimage-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.coreimage-grid figure { min-width: 0; margin: 0; }
+.coreimage-grid figcaption { margin-top: 5px; font-size: 11px; }
+.coreimage-empty { display: grid; place-items: center; height: 100%; padding: 8px; color: #59645f; font-size: 10px; text-align: center; }
