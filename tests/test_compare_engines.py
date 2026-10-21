@@ -3,11 +3,13 @@
 実 RAW・Core Image CLI・/Volumes には依存しない。
 """
 
+import json
 import math
 import sys
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -1142,3 +1144,694 @@ class AdjustmentVariantTableTests(unittest.TestCase):
         for _v, post, kind in ce.ADJ_ORACLE_VARIANTS:
             if kind == "tone":
                 self.assertEqual(ce.oracle_adjustments(post)["sharpness"], 1.0)
+
+
+# =============================================================================
+# 診断モード --diagnosis（#92、設計書 coreimage-highlight-diagnosis.md §5〜§10）
+# =============================================================================
+
+
+def _bayer(h, w):
+    """RGGB の raw_colors（0=R 1=G 2=B 3=G、color_desc 'RGBG'）。"""
+    colors = np.zeros((h, w), np.uint8)
+    colors[0::2, 1::2] = 1
+    colors[1::2, 0::2] = 3
+    colors[1::2, 1::2] = 2
+    return colors
+
+
+class CfaSaturationTests(unittest.TestCase):
+    def test_quantization_step(self):
+        values = np.array([100, 9000, 9032, 9064, 16348, 16380], np.uint16)
+        self.assertEqual(ce.cfa_quantization_step(values, 16380), 32)
+        self.assertEqual(ce.cfa_quantization_step(np.array([10000, 10001, 10003], np.uint16), 16383), 1)
+        self.assertEqual(ce.cfa_quantization_step(np.array([1, 2], np.uint16), 16380), 1)  # 上半分に 2 値未満
+
+    def test_rates_cells_and_thresholds(self):
+        h, w = 8, 8
+        colors = _bayer(h, w)
+        vis = np.full((h, w), 4000, np.uint16)
+        vis[0, 1] = 16380          # セル (0,0) の G が飽和（T_libraw = 16348）
+        vis[3, 3] = 16348          # セル (1,1) の B がちょうど閾値
+        vis[4, 4] = 15400          # セル (2,2) の R は camera 閾値（15360 − 32）だけ超える
+        vis[8 - 2:, 8 - 2:] = 16380  # セル (3,3) は 4 画素とも飽和
+        vis[2, 2] = 9000; vis[2, 4] = 9032  # 上半分の値でステップ 32 を作る
+        out = ce.cfa_analyze_arrays(vis, colors, ce.cfa_color_letters(b"RGBG"), [512] * 4, 16380, [15360] * 4)
+        m = out["metrics"]
+        self.assertEqual(m["cfa_step"], 32)
+        self.assertEqual(m["cfa_t_libraw"], 16348)
+        self.assertAlmostEqual(m["cfa_sat_r"], 1 / 16)   # R 16 画素中セル (3,3) の 1
+        self.assertAlmostEqual(m["cfa_sat_g"], 3 / 32)   # G 32 画素中 (0,1) と (3,3) の 2
+        self.assertAlmostEqual(m["cfa_sat_b"], 2 / 16)
+        self.assertAlmostEqual(m["cfa_sat_cell_any"], 3 / 16)
+        self.assertAlmostEqual(m["cfa_sat_cell_all"], 1 / 16)
+        self.assertAlmostEqual(m["cfa_satc_r"], 2 / 16)  # camera 閾値では (2,2) の R も飽和
+        bits = out["map_libraw"]
+        self.assertEqual(bits.shape, (4, 4))
+        self.assertEqual(int(bits[0, 0]), ce.CFA_BIT["g"])
+        self.assertEqual(int(bits[1, 1]), ce.CFA_BIT["b"])
+        self.assertEqual(int(bits[2, 2]), 0)
+        self.assertEqual(int(out["map_camera"][2, 2]), ce.CFA_BIT["r"])
+        self.assertEqual(int(bits[3, 3]), 7)
+        self.assertEqual(out["thumb"].shape, (4, 4))
+        self.assertGreater(m["cfa_headroom_g"], 0.2)
+
+    def test_crop_drops_margins_and_keeps_even(self):
+        class Sizes:
+            crop_top_margin, crop_left_margin, crop_height, crop_width = 2, 3, 9, 11
+
+        out = ce.cfa_crop(np.arange(20 * 20).reshape(20, 20), Sizes)
+        self.assertEqual(out.shape, (8, 10))
+        self.assertEqual(int(out[0, 0]), 2 * 20 + 3)
+
+    def test_orient_array_matches_pil(self):
+        from PIL import Image
+
+        base = np.arange(3 * 5, dtype=np.uint8).reshape(3, 5)
+        methods = {2: Image.Transpose.FLIP_LEFT_RIGHT, 3: Image.Transpose.ROTATE_180, 4: Image.Transpose.FLIP_TOP_BOTTOM,
+                   5: Image.Transpose.TRANSPOSE, 6: Image.Transpose.ROTATE_270, 7: Image.Transpose.TRANSVERSE,
+                   8: Image.Transpose.ROTATE_90}
+        np.testing.assert_array_equal(ce.orient_array(base, 1), base)
+        np.testing.assert_array_equal(ce.orient_array(base, None), base)
+        for o, method in methods.items():
+            with self.subTest(orientation=o):
+                expected = np.asarray(Image.fromarray(base).transpose(method))
+                np.testing.assert_array_equal(ce.orient_array(base, o), expected)
+
+    def test_resize_cell_map_or_downscale_and_nearest_upscale(self):
+        bits = np.zeros((10, 15), np.uint8)
+        bits[4, 7] = ce.CFA_BIT["g"]
+        bits[9, 14] = ce.CFA_BIT["b"] | ce.CFA_BIT["r"]
+        small = ce.resize_cell_map(bits, (12, 8))  # 1.25 倍縮小（非整数）
+        self.assertEqual(small.shape, (8, 12))
+        self.assertGreaterEqual(int(((small & ce.CFA_BIT["g"]) > 0).sum()), 1)  # 単独のセルも OR で残る
+        self.assertEqual(int(small[-1, -1]), ce.CFA_BIT["b"] | ce.CFA_BIT["r"])
+        self.assertEqual(int(((small & ce.CFA_BIT["r"]) > 0).sum()), 1)
+        big = ce.resize_cell_map(bits, (30, 20))  # 2 倍拡大（full）
+        self.assertEqual(int(((big & ce.CFA_BIT["g"]) > 0).sum()), 4)
+        np.testing.assert_array_equal(ce.resize_cell_map(bits, (15, 10)), bits)
+
+
+class DiagnosisDumpAndColorTests(unittest.TestCase):
+    def test_load_dump_checks_meta(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            arr = np.random.default_rng(0).random((4, 6, 3)).astype("<f4") * 3
+            path = Path(tmp) / "x.f32"
+            arr.tofile(path)
+            meta = {"path": str(path), "width": 6, "height": 4, "channels": 3, "dtype": "float32", "byte_order": "little",
+                    "layout": "interleaved_rgb_row_major", "color_space": "linear_srgb", "bytes": 4 * 6 * 12}
+            np.testing.assert_array_equal(ce.load_dump(meta), arr)
+            for key, bad in (("dtype", "float16"), ("byte_order", "big"), ("layout", "planar"), ("width", 5), ("bytes", 1)):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    ce.load_dump({**meta, key: bad})
+
+    def test_srgb_encode_inverts_decode(self):
+        v = np.linspace(0, 1, 101, dtype=np.float32)
+        np.testing.assert_allclose(ce.srgb_encode(ce.srgb_to_linear(v)), v, atol=1e-5)
+
+    def test_p3_to_srgb(self):
+        np.testing.assert_allclose(ce.p3_to_srgb(np.array([[1.0, 1.0, 1.0]], np.float32)), [[1, 1, 1]], atol=1e-4)
+        np.testing.assert_allclose(ce.p3_to_srgb(np.array([[0.5, 0.5, 0.5]], np.float32)), [[0.5, 0.5, 0.5]], atol=1e-4)
+        red = ce.p3_to_srgb(np.array([[1.0, 0.0, 0.0]], np.float32))[0]
+        self.assertGreater(red[0], 1.0)   # P3 の純赤は sRGB の外（R が 1 を超える）
+        self.assertLess(red[1], 0.0)
+
+
+def _diag_scene(w=600, h=400, seed=1):
+    """空（明るい・一部白飛び）/ 雲の階調 / 中間調 / 暗い前景を持つ合成カメラ JPEG（uint8）。"""
+    rng = np.random.default_rng(seed)
+    img = np.zeros((h, w, 3), np.float32)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    sky = slice(0, int(h * 0.4))
+    img[sky] = np.stack([0.62 + 0.1 * xx[sky] / w, 0.80 + 0.08 * xx[sky] / w, 0.97 + 0 * xx[sky]], axis=2)
+    clouds = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 6)
+    clouds = (clouds - clouds.min()) / (clouds.max() - clouds.min())
+    img[sky] += (clouds[sky] * 0.35)[..., None]
+    img[: int(h * 0.12), : int(w * 0.3)] = 1.0           # 白飛びした太陽周り
+    mid = slice(int(h * 0.4), int(h * 0.7))
+    img[mid] = 0.45 + 0.05 * cv2.GaussianBlur(rng.standard_normal((h, w)).astype(np.float32), (0, 0), 2)[mid][..., None]
+    fg = slice(int(h * 0.7), h)
+    tex = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 1.5)
+    img[fg] = (0.05 + 0.12 * tex[fg])[..., None]
+    return (np.clip(img, 0, 1) * 255).round().astype(np.uint8)
+
+
+
+class DiagnosisRoiTests(unittest.TestCase):
+    def test_rois_found_and_disjoint(self):
+        cam = _diag_scene()
+        rois, info = ce.diagnosis_rois(cam, 60)
+        self.assertEqual(info["size"], 60)
+        for name in ce.DIAG_ROI_NAMES:
+            self.assertIsNotNone(rois[name], name)
+        boxes = [b for b in rois.values() if b]
+        for i, a in enumerate(boxes):
+            for b in boxes[i + 1:]:
+                self.assertFalse(ce._overlaps(a, [b]), (a, b))
+        self.assertLess(rois["sky_bright"][1], 400 * 0.4)            # 空の中
+        self.assertGreaterEqual(rois["fg_dark"][1], int(400 * 0.7) - 30)  # 前景
+        mid_y = (rois["midtone"][1] + rois["midtone"][3]) / 2
+        self.assertTrue(400 * 0.4 <= mid_y <= 400 * 0.7)
+
+    def test_rois_missing_when_no_bright_or_clip(self):
+        dark = np.full((200, 300, 3), 40, np.uint8)
+        rois, _ = ce.diagnosis_rois(dark, 40)
+        self.assertIsNone(rois["sky_bright"])
+        self.assertIsNone(rois["clip_edge"])
+        self.assertIsNone(rois["cloud_grad"])
+
+    @staticmethod
+    def _cloud_scene(colored_rgb: tuple[int, int, int], gray_cloud: bool = True) -> np.ndarray:
+        """左半分に起伏の強い有彩色の明るい被写体、右半分に起伏の弱い灰色の雲（帯 0.6〜0.98 に入る明るさ）。"""
+        h, w = 240, 480
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = np.full((h, w, 3), 30, np.float32)  # 暗い背景（帯の外）
+        stripes = ((xx // 6) % 2).astype(np.float32)
+        base = np.array(colored_rgb, np.float32)
+        left = base[None, None, :] * (0.85 + 0.15 * stripes[..., None])  # 大きな起伏
+        img[:, : w // 2] = left[:, : w // 2]
+        if gray_cloud:
+            g = 200 + 8 * np.sin(xx / 15.0)  # 小さな起伏の灰色
+            img[:, w // 2:] = np.repeat(g[..., None], 3, axis=2)[:, w // 2:]
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def test_cloud_grad_prefers_low_saturation(self):
+        # 青い被写体（HSV S ≈ 0.4、L 0.65〜0.76 で帯に入る）は起伏が大きくても cloud_grad にしない
+        cam = self._cloud_scene((150, 200, 255))
+        rois, info = ce.diagnosis_rois(cam, 60)
+        self.assertTrue(info["cloud_grad_low_sat"])
+        self.assertGreaterEqual(rois["cloud_grad"][0], 240)
+        # 桃色の雲（HSV S ≈ 0.15、DSC04532 相当）は低彩度として残る
+        pink = self._cloud_scene((235, 215, 205), gray_cloud=False)
+        rois, info = ce.diagnosis_rois(pink, 60)
+        self.assertTrue(info["cloud_grad_low_sat"])
+        self.assertLess(rois["cloud_grad"][0], 240)
+
+    def test_cloud_grad_falls_back_to_band_without_low_sat(self):
+        # 帯に低彩度の箱が無ければ従来の帯で選ぶ（cloud_grad を欠測にしない）
+        cam = self._cloud_scene((150, 200, 255), gray_cloud=False)
+        rois, info = ce.diagnosis_rois(cam, 60)
+        self.assertFalse(info["cloud_grad_low_sat"])
+        self.assertIsNotNone(rois["cloud_grad"])
+        self.assertLess(rois["cloud_grad"][0], 240)
+
+    def test_align_rois_shift_and_sky_borrow(self):
+        cam = _diag_scene()
+        moved = np.roll(cam, (3, 5), axis=(0, 1))
+        rois, _ = ce.diagnosis_rois(cam, 60)
+        g0, g1 = cv2.cvtColor(cam, cv2.COLOR_RGB2GRAY), cv2.cvtColor(moved, cv2.COLOR_RGB2GRAY)
+        al = ce.align_rois(g0, g1, rois, 60)
+        mid = al["midtone"]
+        self.assertTrue(mid["ok"])
+        self.assertAlmostEqual(mid["dx"], 5, delta=0.6)
+        self.assertAlmostEqual(mid["dy"], 3, delta=0.6)
+        self.assertEqual(al["sky_bright"]["shift_source"], "midtone")
+        self.assertEqual(al["sky_bright"]["box"][0], rois["sky_bright"][0] + 5)
+        # 無関係な画像では位置合わせ失敗 → 欠測
+        noise = (np.random.default_rng(9).random(g0.shape) * 255).astype(np.uint8)
+        bad = ce.align_rois(g0, noise, rois, 60)
+        self.assertTrue(any(v["box"] is None and v["reason"] == "align_failed" for v in bad.values()))
+
+
+class DiagnosisMetricTests(unittest.TestCase):
+    def test_stage_rates_and_loss(self):
+        img = np.zeros((2, 2, 3), np.float32)
+        img[0, 0] = (1.2, 0.5, 0.5)
+        img[0, 1] = (1.5, 1.5, 1.5)
+        img[1, 0] = (1.0, 1.0, 1.0)
+        out = ce.stage_rates(img, "s1_gt1")
+        self.assertAlmostEqual(out["s1_gt1_r"], 0.5)
+        self.assertAlmostEqual(out["s1_gt1_any"], 0.5)
+        self.assertAlmostEqual(out["s1_gt1_all"], 0.25)
+        ge = ce.stage_rates(img, "s3_ge1", ce.WHITE16_LINEAR, strict=False)
+        self.assertAlmostEqual(ge["s3_ge1_all"], 0.5)
+        prev = np.array([[True, False], [False, False]])
+        cur = np.array([[True, True], [False, True]])
+        self.assertAlmostEqual(ce.stage_loss(prev, cur), 0.5)
+        with self.assertRaises(ValueError):
+            ce.stage_loss(prev, cur[:1])
+
+    def test_blue_only_clip(self):
+        w = np.zeros((2, 2, 3), bool)
+        w[0, 0, 2] = True
+        w[0, 1] = True
+        self.assertAlmostEqual(ce.blue_only_clip(w), 0.25)
+
+    def test_texture_levels_and_slope(self):
+        ramp = np.tile(np.linspace(0, 1, 64, dtype=np.float32), (32, 1))
+        self.assertEqual(ce.distinct_levels(ramp, None, 255), 64)
+        self.assertEqual(ce.distinct_levels(np.ones((8, 8), np.float32), None, 255), 1)
+        flat = np.full((32, 32), 0.9, np.float32)
+        self.assertAlmostEqual(ce.grad_texture(flat, flat > 0.8), 0.0, places=6)
+        self.assertTrue(math.isnan(ce.grad_texture(flat, flat > 2)))
+        noisy = flat + np.random.default_rng(0).normal(0, 0.02, flat.shape).astype(np.float32)
+        self.assertGreater(ce.grad_texture(noisy, noisy > 0.8), 0.005)
+        edge = np.tile(np.clip((np.arange(64) - 22) / 20.0, 0, 1).astype(np.float32), (40, 1))  # 22..42 で 0→1
+        angle = ce.dominant_gradient_angle(edge)
+        self.assertAlmostEqual(abs(math.cos(angle)), 1.0, places=3)
+        self.assertAlmostEqual(ce.rise_width_10_90(ce.projected_profile(edge, angle)), 16.0, delta=0.6)
+        self.assertTrue(math.isnan(ce.rise_width_10_90(np.full(10, 0.5))))
+
+    def test_pchip_and_interp(self):
+        f = ce.pchip_curve(ce.TONE_CURVE_BOOST1)
+        xs = np.array([p[0] for p in ce.TONE_CURVE_BOOST1])
+        np.testing.assert_allclose(f(xs), [p[1] for p in ce.TONE_CURVE_BOOST1], atol=1e-9)
+        dense = f(np.linspace(0, 2.7, 500))
+        self.assertTrue(np.all(np.diff(dense) >= -1e-9))  # 単調
+        self.assertAlmostEqual(float(f(np.array([2.7]))[0]), 1.145 + 0.145 * 0.7, places=3)
+        pts = [(0.30, 0.10), (0.20, 0.02), (0.25, 0.05)]
+        self.assertAlmostEqual(ce.interp_at(pts, 0.225), 0.035)
+        self.assertTrue(math.isnan(ce.interp_at(pts, 0.35)))  # 外挿しない
+        self.assertTrue(math.isnan(ce.interp_at([(0.2, 1.0), (float("nan"), 2.0)], 0.2)))
+
+    def test_sky_color(self):
+        rgb = np.zeros((10, 10, 3), np.float32)
+        rgb[...] = (0.5, 0.7, 0.95)
+        white = np.zeros_like(rgb, bool)
+        out = ce.sky_color(rgb, white)
+        self.assertTrue(200 < out["sky_hue"] < 300)  # 青
+        self.assertGreater(out["sky_chroma"], 10)
+        white[...] = True
+        self.assertTrue(math.isnan(ce.sky_color(rgb, white)["sky_hue"]))
+
+
+class DiagnosisAttributionTests(unittest.TestCase):
+    def test_attribute_pixels_order(self):
+        k = np.array([True, True, True, True, False])
+        sensor = np.array([True, False, False, False, True])
+        s2_over = np.array([True, True, False, False, True])
+        s3_white = np.array([True, True, True, False, True])
+        out = ce.attribute_pixels(k, sensor, s2_over, s3_white)
+        # s3_near_white が無ければ規則 4 は分けない（旧 unverifiable と同じ）
+        self.assertEqual(out, {"k": 4, "sensor": 1, "decoder_tone": 1, "quant8": 1, "jpeg_encode": 0, "unverifiable": 1})
+        bad = ce.attribute_pixels(k, None, s2_over, s3_white)
+        self.assertEqual(bad["unverifiable"], 4)
+        self.assertEqual(ce.attribute_pixels(k, sensor, s2_over, s3_white, valid=False)["unverifiable"], 4)
+        # dump が無い経路は S3 が分からないので JPEG 符号化とは言わない
+        near = np.ones(5, bool)
+        self.assertEqual(ce.attribute_pixels(k, sensor, s2_over, None, s3_near_white=near)["jpeg_encode"], 0)
+
+    def test_attribute_pixels_splits_jpeg_encode(self):
+        # K の 6 画素: sensor / tone / quant8 / jpeg_encode ×2 / unverifiable
+        k = np.array([True, True, True, True, True, True, False])
+        sensor = np.array([True, False, False, False, False, False, False])
+        s2_over = np.array([False, True, False, False, False, False, False])
+        s3_white = np.array([False, False, True, False, False, False, False])
+        near = np.array([False, False, True, True, True, False, False])
+        out = ce.attribute_pixels(k, sensor, s2_over, s3_white, s3_near_white=near)
+        self.assertEqual(out, {"k": 6, "sensor": 1, "decoder_tone": 1, "quant8": 1, "jpeg_encode": 2, "unverifiable": 1})
+        # 規則の順序: quant8 は jpeg_encode より先（S3 が 8bit 白なら near でも quant8）
+        self.assertEqual(sum(out[c] for c in ce.ATTR_CATEGORIES), out["k"])
+
+    def test_attribute_pixels_k_from_s3_has_no_rule4(self):
+        # K を S3 の 8bit 白から取ると、sensor / tone 以外は全部 quant8（jpeg_encode / unverifiable は構造上 0）
+        rng = np.random.default_rng(3)
+        s3_white = rng.random(200) > 0.5
+        sensor, s2_over = rng.random(200) > 0.8, rng.random(200) > 0.6
+        out = ce.attribute_pixels(s3_white, sensor, s2_over, s3_white, s3_near_white=np.ones(200, bool))
+        self.assertEqual(out["jpeg_encode"] + out["unverifiable"], 0)
+        self.assertEqual(out["sensor"] + out["decoder_tone"] + out["quant8"], out["k"])
+
+    def test_classify_attribution(self):
+        def c(**kw):
+            return {"k": sum(kw.values()), **{n: kw.get(n, 0) for n in ce.ATTR_CATEGORIES}}
+
+        self.assertEqual(ce.classify_attribution(c(sensor=5), 1000), "no_clip")
+        self.assertEqual(ce.classify_attribution(c(decoder_tone=80, sensor=20), 1000), "decoder_tone")
+        self.assertEqual(ce.classify_attribution(c(decoder_tone=60, sensor=40), 1000), "mixed")
+        self.assertEqual(ce.classify_attribution(c(decoder_tone=40, sensor=25, quant8=20, unverifiable=15), 1000), "mixed")
+        self.assertEqual(ce.classify_attribution(None, 1000), "unverifiable")
+        self.assertEqual(ce.classify_attribution(c(jpeg_encode=80, decoder_tone=20), 1000), "jpeg_encode")
+
+    def test_classify_scene(self):
+        counts = {"sky_bright": {"k": 10, "sensor": 0, "decoder_tone": 10, "quant8": 0, "jpeg_encode": 0, "unverifiable": 0}}
+        scene = ce.classify_scene_diagnosis
+        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "no_clip"}, {}, [], 1.0, 0.0), "no_clip")
+        self.assertEqual(scene({"sky_bright": "sensor", "cloud_grad": "sensor"}, {}, [], 1.0, 0.5), "sensor")
+        self.assertEqual(scene({"sky_bright": "decoder_tone", "cloud_grad": "decoder_tone"}, counts, [0.3, 0.6], 1.0, 0.0), "decoder_tone")
+        # 階調が戻らない decoder_tone は mixed へ落ちる（S1 に階調がある）
+        self.assertEqual(scene({"sky_bright": "decoder_tone", "cloud_grad": "decoder_tone"}, counts, [0.2, 0.3], 0.9, 0.0), "mixed")
+        # S1 にも階調が無く S0 も飽和していない → 検証不能（API 境界）
+        self.assertEqual(scene({"sky_bright": "decoder_tone", "cloud_grad": "decoder_tone"}, counts, [0.2, 0.3], 0.2, 0.0), "unverifiable")
+        gam = {"cloud_grad": {"k": 10, "sensor": 1, "decoder_tone": 2, "quant8": 7, "jpeg_encode": 0, "unverifiable": 0}}
+        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "quant8"}, gam, [], 1.0, 0.0), "quant8")
+        # jpeg_encode と unverifiable は合算して旧 unverifiable として比べる（単独では quant8 より少なくても）
+        split = {"cloud_grad": {"k": 10, "sensor": 0, "decoder_tone": 0, "quant8": 4, "jpeg_encode": 3, "unverifiable": 3}}
+        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "mixed"}, split, [], 1.0, 0.0), "unverifiable")
+        self.assertEqual(scene({"sky_bright": "sensor", "cloud_grad": "mixed"}, counts, [0.9], 1.0, 0.3), "mixed")
+
+    def test_candidate_checks_and_best(self):
+        cam = {"sky_bright_clip8_any": 0.10}
+        good = {"mid_p50_diff": 0.01, "sky_bright_clip8_any": 0.05, "grad_texture_ratio": 0.8, "fg_p01_diff": 0.0,
+                "magenta_rate": 0.0, "band_pixels": 10}
+        out = ce.candidate_checks(good, cam)
+        self.assertTrue(out["c_pass_auto"])
+        self.assertIsNone(out["c_pass_visual"])
+        dark = {**good, "mid_p50_diff": -0.05}
+        self.assertFalse(ce.candidate_checks(dark, cam)["c_pass_auto"])
+        self.assertIsNone(ce.candidate_checks({**good, "grad_texture_ratio": None}, cam)["c_pass_auto"])
+        self.assertTrue(ce.candidate_checks({**good, "magenta_rate": float("nan"), "band_pixels": 0}, cam)["c_pass_magenta"])
+        rows = {"c1_ev-07_lift": {**good, "sky_bright_clip8_any": 0.04}, "c3_lin_curve": {**good, "sky_bright_clip8_any": 0.02},
+                "c2_ev-07_hsa": {**good, "mid_p50_diff": -0.2, "sky_bright_clip8_any": 0.0}}
+        self.assertEqual(ce.choose_c_best(rows), {"best": "c3_lin_curve", "within_tol": True})
+        out_tol = {"c1_ev-07_lift": {"mid_p50_diff": -0.05}, "c3_lin_curve": {"mid_p50_diff": -0.2}}
+        self.assertEqual(ce.choose_c_best(out_tol), {"best": "c1_ev-07_lift", "within_tol": False})
+        self.assertEqual(ce.choose_c_best({}), {"best": None, "within_tol": False})
+
+
+class DiagnosisContractTests(unittest.TestCase):
+    def test_default_request_unchanged(self):
+        req = ce.coreimage_request(Path("/x/a.ARW"), Path("/x/o.jpg"), "preview", True, max_edge=2400)
+        self.assertEqual(set(req), {"input", "output", "mode", "decoder_version", "settings", "max_edge"})
+        self.assertEqual(req["settings"], {"profile": "neutral", "lens_correction": True})
+        req2 = ce.coreimage_request(Path("/x/a.ARW"), Path("/x/o.jpg"), "preview", False, extra_settings={"gamut_mapping": False},
+                                    diagnostics={"skip_write": True})
+        self.assertIs(req2["settings"]["gamut_mapping"], False)
+        self.assertEqual(req2["diagnostics"], {"skip_write": True})
+
+    def test_all_specs_satisfy_contract(self):
+        specs = ce.diagnosis_specs()
+        self.assertEqual(len(specs), 25)  # §6.2 の 26 から、preview では別リクエストにしない c_best を除いた数
+        for variant, spec in specs.items():
+            with self.subTest(variant=variant):
+                dump = Path(f"/tmp/w/{variant}.f32") if spec["dump"] else None
+                kwargs = ce.diagnosis_request_kwargs(spec, dump)
+                req = ce.coreimage_request(Path("/src/DSC00001.ARW"), Path(f"/tmp/w/{variant}.jpg"), "preview", spec["lens"],
+                                           max_edge=2400, **kwargs)
+                self.assertEqual(ce.validate_diagnostics_request(req), [])
+                if spec["dump"]:
+                    self.assertFalse(spec["lens"])
+                    self.assertTrue(req["diagnostics"]["skip_write"])
+                    self.assertEqual(req["diagnostics"]["dump_float"]["path"], str(dump))
+                if spec["adjustments"] is not None:
+                    self.assertNotIn("exposure_ev", req["settings"])
+                if variant in ("d_base", "d_lens_off") or variant.startswith(("d_boost", "d_ev", "d_edr")):
+                    self.assertNotIn("diagnostics", req)  # 通常モードの経路（§4.1 不変条件 1）
+        self.assertEqual(specs["d_s1_linear"]["overrides"], {"boost_amount": 0.0})
+        self.assertIs(specs["d_s1_linear"]["extra_settings"]["gamut_mapping"], False)
+        # T3（2026-10-21）: C1 の brightness は 1.0 固定（ガンマ空間の乗算で白側が戻るため。レポート §4）。
+        for name in ce.C1_SPECS:
+            self.assertEqual(specs[name]["adjustments"]["brightness"], 1.0)
+            self.assertLess(specs[name]["adjustments"]["exposure"], 0.0)
+        # C3 の CIToneCurve は sRGB ガンマ座標の制御点で、x・y とも単調増加（レポート §4）。
+        pts = [ce.C3_TONE_CURVE[f"inputPoint{i}"] for i in range(5)]
+        self.assertEqual(pts[0], [0.0, 0.0])
+        self.assertEqual(pts[4], [1.0, 1.0])
+        self.assertTrue(all(a[0] < b[0] and a[1] < b[1] for a, b in zip(pts, pts[1:])))
+        full = ce.diagnosis_mode_specs("full", "c3_lin_curve")
+        self.assertIn("d_lens_off", full)
+        self.assertEqual(full["c_best"]["diagnostics"], specs["c3_lin_curve"]["diagnostics"])
+        self.assertNotIn("c_best", ce.diagnosis_mode_specs("full", None))
+
+    def test_validator_rejects(self):
+        base = {"input": "/a.ARW", "output": "/o.jpg", "mode": "preview", "decoder_version": "9",
+                "settings": {"profile": "apple_default", "lens_correction": True}}
+        cases = {
+            "unknown_top": {**base, "foo": 1},
+            "gamut_str": {**base, "settings": {**base["settings"], "gamut_mapping": "no"}},
+            "baseline_range": {**base, "settings": {**base["settings"], "baseline_exposure": 9}},
+            "diag_key": {**base, "diagnostics": {"roi": [0, 0, 1, 1]}},
+            "dump_rel": {**base, "diagnostics": {"dump_float": {"path": "x.f32"}}},
+            "dump_ext": {**base, "diagnostics": {"dump_float": {"path": "/x.bin"}}},
+            "dump_eq_out": {**base, "output": "/o.f32", "diagnostics": {"dump_float": {"path": "/o.f32"}}},
+            "lsf_value": {**base, "diagnostics": {"linear_space_filter": {"kind": "scale", "value": 0}}},
+            "lsf_identity_value": {**base, "diagnostics": {"linear_space_filter": {"kind": "identity", "value": 1}}},
+            "pf_name": {**base, "diagnostics": {"post_filters": [{"name": "CIGaussianBlur", "inputRadius": 2}]}},
+            "pf_param": {**base, "diagnostics": {"post_filters": [{"name": "CIExposureAdjust", "inputEV": 1, "x": 2}]}},
+            "pf_range": {**base, "diagnostics": {"post_filters": [{"name": "CIHighlightShadowAdjust", "inputHighlightAmount": 2}]}},
+            "curve_x": {**base, "diagnostics": {"post_filters": [{"name": "CIToneCurve", "inputPoint0": [0, 0], "inputPoint1": [1.5, 1]}]}},
+            "curve_mono": {**base, "diagnostics": {"post_filters": [{"name": "CIToneCurve", "inputPoint0": [0.5, 0], "inputPoint1": [0.2, 1]}]}},
+            "pf_too_many": {**base, "diagnostics": {"post_filters": [{"name": "CIExposureAdjust", "inputEV": 0}] * 17}},
+            "adj_with_ev": {**base, "settings": {**base["settings"], "exposure_ev": -1}, "adjustments": dict(ce.ADJ_IDENTITY)},
+        }
+        for name, req in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(ce.validate_diagnostics_request(req), name)
+        ok = {**base, "diagnostics": {"stats": True, "linear_space_filter": {"kind": "identity"},
+                                      "post_filters": [{"name": "CIColorClamp", "inputMinComponents": [0, 0, 0, 0],
+                                                        "inputMaxComponents": [1, 1, 1, 1]}]}}
+        self.assertEqual(ce.validate_diagnostics_request(ok), [])
+
+    def test_cli_problem(self):
+        caps = {"diagnostics": {"supported": True, "post_filters": list(ce.POST_FILTER_ALLOWLIST)}}
+        self.assertIsNone(ce.diagnosis_cli_problem({"cli_version": "0.4.0"}, caps))
+        self.assertIn("0.4.0", ce.diagnosis_cli_problem({"cli_version": "0.3.0"}, caps))
+        self.assertIn("diagnostics.supported", ce.diagnosis_cli_problem({"cli_version": "0.4.1"}, {}))
+        self.assertIn("取得できません", ce.diagnosis_cli_problem({"error": "x"}, caps))
+
+    def test_response_summary(self):
+        payload = {"applied": {"gamut_mapping_enabled": False}, "diagnostics": {
+            "cli_diagnostics_version": 1, "written": False, "stats_color_space": "linear_srgb", "stats_source": "render_input",
+            "stats": {"width": 4, "height": 2, "r": {"p50": 0.1, "max": 2.7, "frac_gt_1": 0.3}, "any_gt_1": 0.38, "all_gt_1": 0.25},
+            "readback": {"gamut_mapping_enabled": False, "baseline_exposure": 0.4, "extent": [0, 0, 4, 2]},
+            "dump_float": {"path": "/x.f32"}}}
+        out = ce.diagnostics_response_summary(payload)
+        self.assertIs(out["ci_gamut"], False)
+        self.assertEqual(out["ci_stats_any_gt_1"], 0.38)
+        self.assertEqual(out["ci_stats_r_max"], 2.7)
+        self.assertIsNone(out["ci_stats_g_max"])
+        self.assertEqual(out["ci_readback_extent"], "[0, 0, 4, 2]")
+        self.assertFalse(ce.diagnostics_response_summary({"applied": {}})["ci_diag_present"])
+
+
+def _linear_scene(cam8, headroom=1.6):
+    return ce.srgb_to_linear(cam8.astype(np.float32) / 255.0) * headroom
+
+
+class DiagnosisMeasureTests(unittest.TestCase):
+    """ファイル I/O 無しの 1 カット分のフロー（帰属 → ROI 分類 → シーン判定 → 内挿 → c_best）。"""
+
+    def test_measure_flow_on_synthetic_stages(self):
+        cam8 = _diag_scene()
+        h, w = cam8.shape[:2]
+        s1 = _linear_scene(cam8)
+        curve = ce.pchip_curve(ce.TONE_CURVE_BOOST1)
+        s2 = curve(s1.astype(np.float64)).astype(np.float32)
+        s3 = np.clip(s2, 0, 1)
+        out8 = (ce.srgb_encode(s3) * 255).round().astype(np.uint8)
+
+        def as_img(rgb8):
+            return rgb8.astype(np.float32) / 255.0
+
+        images = {"camera": as_img(cam8), "d_base": as_img(out8), "d_lens_off": as_img(out8)}
+        for name, ev in ce.DIAG_EV_SWEEP[1:]:
+            images[name] = as_img((ce.srgb_encode(np.clip(curve(s1 * 2 ** ev), 0, 1)) * 255).round().astype(np.uint8))
+        images["c1_ev-07_lift"] = images["d_ev-07"]
+        white = {k: (v * 255).round().astype(np.uint8) >= 255 for k, v in images.items()}
+        levels = {k: 255 for k in images}
+        # センサー飽和: 白飛び矩形（左上）の左半分だけ
+        sensor = np.zeros((h // 2, w // 2), np.uint8)
+        sensor[: int(h * 0.12) // 2, : int(w * 0.15) // 2] = ce.CFA_BIT["g"]
+        cfa = {"metrics": {"cfa_sat_g": 0.01}, "map_libraw": ce.resize_cell_map(sensor, (w, h)),
+               "map_camera": ce.resize_cell_map(sensor, (w, h)), "thumb": ce.luma_of(s1 / 1.6)}
+        dumps = {"d_s1_linear": s1, "d_s2_tone": s2, "d_s3_default": s3}
+        rois, _ = ce.diagnosis_rois(cam8, 60)
+        rows, summary = ce.diagnosis_measure(images, white, levels, dumps, cfa, rois, 60,
+                                             cli_any_gt_1={"d_s1_linear": float((s1 > 1).any(axis=2).mean())})
+        st = rows["stages"]
+        self.assertEqual(st["k_source"], "s3_dump")  # K は S3 dump の 8bit 白（§6.4）
+        self.assertEqual(st["attr_full_jpeg_encode"] + st["attr_full_unverifiable"], 0.0)
+        self.assertIn("attr_full_k_jpeg8_frac", st)
+        jfr = [st[f"attr_full_jpeg8_{c}"] for c in ce.ATTR_CATEGORIES]  # 参考: JPEG の K の内訳も合計 1
+        self.assertAlmostEqual(sum(jfr), 1.0, places=6)
+        self.assertTrue(st["cfa_align_ok"])
+        self.assertAlmostEqual(st["s1_cli_any_gt_1_diff"], 0.0, places=6)
+        self.assertGreater(st["s1_gt1_any"], 0.05)
+        self.assertAlmostEqual(st["stage_loss_s2s3"], 0.0, places=6)
+        self.assertLess(st["curve_check_dl_p99_midtone"], 1e-4)  # 同じ曲線で作ったので大域的
+        self.assertTrue(st["curve_global"])
+        for roi in ("sky_bright", "full"):
+            fr = [st[f"attr_{roi}_{c}"] for c in ce.ATTR_CATEGORIES]
+            self.assertAlmostEqual(sum(fr), 1.0, places=6)
+        self.assertGreater(st["attr_full_sensor"], 0.0)
+        self.assertGreater(st["attr_full_decoder_tone"], 0.0)
+        self.assertIn(st["scene_class"], {"no_clip", "sensor", "decoder_tone", "quant8", "unverifiable", "mixed"})
+        self.assertIn(summary["roi_class"]["sky_bright"], {"sensor", "decoder_tone", "mixed"})
+        self.assertAlmostEqual(rows["camera"]["mid_p50_diff"], 0.0)
+        interp = rows["d_interp_camera_p50"]
+        self.assertTrue(interp["interpolated"])
+        self.assertIn("c_pass_auto", rows["c1_ev-07_lift"])
+        self.assertEqual(st["c_best"], "c1_ev-07_lift")
+        self.assertIn("cfa", rows)
+
+    def test_measure_without_dumps_is_unverifiable(self):
+        cam8 = _diag_scene()
+        img = cam8.astype(np.float32) / 255.0
+        images = {"camera": img, "d_lens_off": img, "d_base": img}
+        white = {k: cam8 >= 255 for k in images}
+        rois, _ = ce.diagnosis_rois(cam8, 60)
+        rows, summary = ce.diagnosis_measure(images, white, {k: 255 for k in images}, {}, None, rois, 60)
+        self.assertEqual(rows["stages"]["attr_full_unverifiable"], 1.0)
+        self.assertFalse(summary["stages_ok"])
+        # dump が無ければ K は d_lens_off の 8bit JPEG から取る
+        self.assertEqual(rows["stages"]["k_source"], "jpeg8")
+        self.assertAlmostEqual(rows["stages"]["attr_full_k_frac"], rows["stages"]["attr_full_k_jpeg8_frac"])
+
+
+MOCK_CLI = r'''#!{python}
+"""テスト用の偽 CLI 0.4.0（設計書 §4 の応答形だけ真似る）。入力 ARW と同名の JPG を読んで段階を合成する。"""
+import json, os, sys
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
+
+XS = [0.0, 0.05, 0.18, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
+YS = [0.0, 0.0744, 0.3875, 0.805, 0.9573, 1.0, 1.029, 1.0725, 1.145]
+
+def lin(v):
+    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
+
+def enc(v):
+    v = np.clip(v, 0, 1)
+    return np.where(v <= 0.0031308, v * 12.92, 1.055 * v ** (1 / 2.4) - 0.055)
+
+def curve(v):
+    out = np.interp(v, XS, YS)
+    return np.where(v > 2.0, 1.145 + 0.145 * (v - 2.0), out)
+
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print(json.dumps({"cli_version": "0.4.0"})); sys.exit(0)
+if args[:1] == ["--capabilities"]:
+    print(json.dumps({"adjustments": {"supported": True}, "diagnostics": {"supported": True, "post_filters": ["CIHighlightShadowAdjust", "CIToneCurve", "CIExposureAdjust", "CIColorClamp"]}})); sys.exit(0)
+req = json.load(sys.stdin)
+with Image.open(os.path.splitext(req["input"])[0] + ".JPG") as im:
+    rgb = np.asarray(ImageOps.exif_transpose(im).convert("RGB"), dtype=np.float32) / 255.0
+if req["mode"] == "preview":
+    h, w = rgb.shape[:2]
+    s = req.get("max_edge", 2400) / max(h, w)
+    if s < 1:
+        rgb = cv2.resize(rgb, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
+st = req["settings"]
+adj = req.get("adjustments") or {}
+diag = req.get("diagnostics")
+x = lin(rgb) * 1.6 * 2.0 ** (st.get("exposure_ev", adj.get("exposure", 0.0)))
+boost = st.get("boost_amount", 1.0)
+x = (1 - boost) * x + boost * curve(x)
+for f in (diag or {}).get("post_filters", []):
+    if f["name"] == "CIExposureAdjust":
+        x = x * 2.0 ** f["inputEV"]
+if st.get("gamut_mapping", True):
+    x = np.clip(x, 0, 1)
+if adj:
+    x = np.clip(x, 0, 1) * adj.get("brightness", 1.0)
+x = x.astype(np.float32)
+h, w = x.shape[:2]
+resp = {"ok": True, "output": req["output"], "width": w, "height": h, "elapsed_ms": {"total": 5, "decode": 2, "render_encode": 3},
+        "applied": {"gamut_mapping_enabled": st.get("gamut_mapping", True), "baseline_exposure": 0.4, "boost_amount": boost,
+                    "lens_correction_enabled": st.get("lens_correction")}}
+written = not (diag or {}).get("skip_write", False)
+if written:
+    if req.get("format") == "tiff16":
+        cv2.imwrite(req["output"], cv2.cvtColor((enc(x) * 65535).round().astype(np.uint16), cv2.COLOR_RGB2BGR))
+    else:
+        Image.fromarray((enc(x) * 255).round().astype(np.uint8)).save(req["output"], "JPEG", quality=95)
+if diag is not None:
+    block = {"cli_diagnostics_version": 1, "written": written, "stats_color_space": "linear_srgb", "stats_source": "render_input",
+             "stats": {"width": w, "height": h, "any_gt_1": float((x > 1).any(axis=2).mean()), "all_gt_1": float((x > 1).all(axis=2).mean())},
+             "readback": {"gamut_mapping_enabled": st.get("gamut_mapping", True), "baseline_exposure": 0.4, "extent": [0, 0, w, h]}}
+    for i, c in enumerate("rgb"):
+        block["stats"][c] = {"mean": float(x[..., i].mean()), "p50": float(np.median(x[..., i])), "max": float(x[..., i].max()),
+                             "frac_gt_1": float((x[..., i] > 1).mean())}
+    if "dump_float" in diag:
+        path = diag["dump_float"]["path"]
+        x.astype("<f4").tofile(path)
+        block["dump_float"] = {"path": path, "width": w, "height": h, "channels": 3, "dtype": "float32", "byte_order": "little",
+                               "layout": "interleaved_rgb_row_major", "color_space": "linear_srgb", "bytes": w * h * 12}
+    resp["diagnostics"] = block
+print(json.dumps(resp))
+'''
+
+
+class DiagnosisMockCliIntegrationTests(unittest.TestCase):
+    """CLI をモック（応答 JSON と .f32 ダンプを偽装）して --diagnosis を 1 カット preview + full まで通す。"""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        from PIL import Image
+
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.src = root / "src"
+        self.src.mkdir()
+        Image.fromarray(_diag_scene(1200, 800)).save(self.src / "DSC00001.JPG", "JPEG", quality=95)
+        (self.src / "DSC00001.ARW").write_bytes(b"not a raw file")
+        self.cli = root / "mock-cli"
+        self.cli.write_text(MOCK_CLI.replace("{python}", sys.executable), encoding="utf-8")
+        os.chmod(self.cli, 0o755)
+        self.out = root / "out"
+        self.out.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_cfa(self, cid, orientation):
+        from PIL import Image
+
+        with Image.open(self.src / f"{cid}.JPG") as im:
+            cam = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+        h, w = cam.shape[:2]
+        small = cv2.resize(cam, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+        bits = np.zeros((h // 2, w // 2), np.uint8)
+        bits[: int(h * 0.12) // 2, : int(w * 0.15) // 2] = ce.CFA_BIT["g"]
+        return {"metrics": {"cfa_sat_g": float((bits > 0).mean()), "cfa_step": 32}, "map_libraw": bits, "map_camera": bits,
+                "thumb": ce.luma_of(ce.srgb_to_linear(small))}
+
+    def _ctx(self):
+        return ce.RunContext(source_root=self.src, out=self.out, cli=self.cli, max_edge=600)
+
+    def test_diagnosis_flow_preview_and_full(self):
+        import csv
+
+        ctx = self._ctx()
+        features = {"DSC00001": {"capture_id": "DSC00001", "iso": 100, "orientation": 1, "lens_model": "TEST"}}
+        selection = [{"capture_id": "DSC00001", "category": "backlit"}]
+        ce.run_diagnosis(ctx, selection, features, ["DSC00001"], with_rawpy=False, cfa_loader=self._fake_cfa)
+        with (self.out / "diagnosis_metrics.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        errors = [r for r in rows if r.get("error")]
+        self.assertEqual(errors, [], errors[:3])
+        by = {(r["mode"], r["variant"]): r for r in rows}
+        for variant in ("camera", "d_base", "d_s1_linear", "d_tiff_p3", "c3_lin_curve", "c_best", "stages", "cfa",
+                        "d_interp_camera_p50"):
+            self.assertIn(("preview", variant), by)
+        for variant in ("d_base", "d_lens_off", "c_best", "stages"):
+            self.assertIn(("full", variant), by)
+        stages = by[("preview", "stages")]
+        self.assertEqual(stages["width"], "600")
+        self.assertEqual(stages["cfa_align_ok"], "True")
+        self.assertLess(abs(float(stages["s1_cli_any_gt_1_diff"])), 1e-6)  # dump の読み方（byte order / layout）が CLI 統計と一致
+        self.assertGreater(float(stages["s1_gt1_any"]), 0.0)
+        self.assertIn(stages["scene_class"], {"no_clip", "sensor", "decoder_tone", "quant8", "unverifiable", "mixed"})
+        self.assertEqual(by[("preview", "d_s1_linear")]["ci_gamut"], "False")
+        self.assertEqual(by[("full", "c_best")]["c_best_of"], stages["c_best"])
+        self.assertEqual(by[("full", "stages")]["width"], "1200")
+        summary = json.loads((self.out / "diagnosis_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["errors"], [])
+        self.assertEqual({b["mode"] for b in summary["by_capture"]}, {"preview", "full"})
+        rois = json.loads((self.out / "rois.json").read_text(encoding="utf-8"))
+        self.assertIn("preview", rois["DSC00001"])
+        self.assertIn("シーン判定", (self.out / "diagnosis_tables.md").read_text(encoding="utf-8"))
+        self.assertEqual(list((self.out / "dumps").rglob("*.f32")), [])  # 指標の後に削除
+        self.assertTrue((self.out / "sheets" / "DSC00001_preview_rois.jpg").is_file())
+        text = (self.out / "diagnosis_summary.json").read_text(encoding="utf-8").lower()
+        self.assertNotIn("gps", text)
+
+    def test_keep_dumps(self):
+        ctx = self._ctx()
+        features = {"DSC00001": {"capture_id": "DSC00001", "orientation": 1}}
+        ce.run_diagnosis(ctx, [{"capture_id": "DSC00001", "category": "other"}], features, [], with_rawpy=False,
+                         cfa_loader=self._fake_cfa, keep_dumps=True)
+        self.assertEqual(len(list((self.out / "dumps").rglob("*.f32"))), 3)
+
+    def test_main_dry_run_writes_plan(self):
+        ce.main(["--source-root", str(self.src), "--captures", "DSC00001", "--diagnosis", "--dry-run",
+                 "--out", str(self.out), "--cli", str(self.cli), "--full", "--full-ids", "DSC00001"])
+        plan = json.loads((self.out / "diagnosis_plan.json").read_text(encoding="utf-8"))
+        self.assertTrue(plan["cli_ready"])
+        self.assertEqual(plan["contract_problems"], [])
+        self.assertEqual(plan["count"], 25 + 12)  # preview 25 + full 12（c_best は preview の結果で決まるので計画に出ない）
