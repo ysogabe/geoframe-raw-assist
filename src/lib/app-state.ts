@@ -156,10 +156,24 @@ const DEFAULT_PRESET: PresetName = "neutral_recovery";
 export const MERGE_MIN_FRAMES = 2;
 export const MERGE_MAX_FRAMES = 9;
 
+/** プリセット一覧の出どころ。"none" は未取得。 */
+export type PresetsSource = "none" | "health" | "rust";
+
 export type State = {
   screen: Screen;
   engineStatus: EngineStatus;
   health: HealthResponse | null;
+  /**
+   * プリセット一覧（#98）。health から切り離して持つ。Python エンジンが止まっていても
+   * Tauri では Rust の get_presets から埋まり、プリセット選択 UI が表示できる。
+   * UI は `health.presets` を直接読まず、必ずここを読むこと。
+   */
+  presets: PresetInfo[];
+  /**
+   * `presets` の出どころ。"rust"（Tauri の get_presets）が "health"（/api/health の presets）より優先する。
+   * 到着順に依存させないため、health が後から届いても rust の一覧は上書きしない。
+   */
+  presetsSource: PresetsSource;
   analysisState: AnalysisState;
   analysisProgress: AnalysisProgress | null;
   analysis: Analysis | null;
@@ -240,6 +254,8 @@ export const initialState: State = {
   screen: "suggestions",
   engineStatus: "checking",
   health: null,
+  presets: [],
+  presetsSource: "none",
   analysisState: "unknown",
   analysisProgress: null,
   analysis: null,
@@ -285,6 +301,11 @@ export const initialState: State = {
 export type Action =
   | { type: "health/ok"; health: HealthResponse }
   | { type: "health/fail" }
+  /**
+   * プリセット一覧の到着（#98）。Tauri 起動時の get_presets は source: "rust"。
+   * ブラウザモード・get_presets 失敗時は health/ok が health.presets を source: "health" で取り込む。
+   */
+  | { type: "presets/loaded"; presets: PresetInfo[]; source: Exclude<PresetsSource, "none"> }
   | { type: "analysis/status"; response: AnalysisResponse }
   | { type: "analysis/requested" }
   | { type: "analysis/error"; message: string }
@@ -351,8 +372,8 @@ export type Action =
   | { type: "notice/set"; message: string; tone?: "info" | "error" }
   | { type: "notice/clear" };
 
-function presetFor(health: HealthResponse | null, name: PresetName): PresetInfo | null {
-  return health?.presets.find((preset) => preset.name === name) ?? null;
+function presetFor(presets: PresetInfo[], name: PresetName): PresetInfo | null {
+  return presets.find((preset) => preset.name === name) ?? null;
 }
 
 /**
@@ -377,11 +398,38 @@ function presetForReasons(group: GroupInfo | undefined): PresetName {
 }
 
 /** 初期プリセットを決める。存在しない名前なら既定にフォールバックする。 */
-function suggestPreset(health: HealthResponse | null, group: GroupInfo | undefined): PresetName {
+function suggestPreset(presets: PresetInfo[], group: GroupInfo | undefined): PresetName {
   const wanted = presetForReasons(group);
-  if (!health) return wanted;
-  if (presetFor(health, wanted)) return wanted;
-  return presetFor(health, DEFAULT_PRESET) ? DEFAULT_PRESET : (health.presets[0]?.name ?? DEFAULT_PRESET);
+  // 一覧が未着なら推薦どおりの名前を仮置きし、届いた時点で applyPresets が検証し直す。
+  if (presets.length === 0) return wanted;
+  if (presetFor(presets, wanted)) return wanted;
+  return presetFor(presets, DEFAULT_PRESET) ? DEFAULT_PRESET : (presets[0]?.name ?? DEFAULT_PRESET);
+}
+
+const PRESETS_SOURCE_RANK: Record<PresetsSource, number> = { none: 0, health: 1, rust: 2 };
+
+/**
+ * プリセット一覧を取り込む（#98）。health/ok と presets/loaded の共通処理。
+ *
+ * - 出どころの優先度が今より低いもの（rust 取得済みのところへ届いた health）は無視する。
+ *   これで get_presets と health のどちらが先に届いても、最終的に rust の一覧が残る。
+ * - 空の一覧は無視する（既に持っている一覧を空で潰さない）。
+ * - 選択中のプリセットが新しい一覧にもあれば、presetName も overrides も触らない。
+ *   無いときだけ推薦し直し、別プリセット向けの候補を捨てる（従来の health/ok と同じ）。
+ */
+function applyPresets(state: State, presets: PresetInfo[], source: Exclude<PresetsSource, "none">): State {
+  if (presets.length === 0) return state;
+  if (PRESETS_SOURCE_RANK[source] < PRESETS_SOURCE_RANK[state.presetsSource]) return state;
+  const group = state.analysis?.groups.find((item) => item.id === state.selectedGroupId);
+  const presetName = presetFor(presets, state.presetName) ? state.presetName : suggestPreset(presets, group);
+  return {
+    ...state,
+    presets,
+    presetsSource: source,
+    presetName,
+    // プリセットが変わったら別プリセット向けの候補は捨てる（生成中の busy/captureId は触らない）。
+    ...(presetName === state.presetName ? {} : clearedCandidateResult()),
+  };
 }
 
 /** capture_id → その写真が属するグループID。再解析後の結び直しに使う索引。 */
@@ -442,23 +490,20 @@ function reconcileAccepted(
 
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
-    case "health/ok": {
-      const group = state.analysis?.groups.find((item) => item.id === state.selectedGroupId);
-      const presetName = presetFor(action.health, state.presetName)
-        ? state.presetName
-        : suggestPreset(action.health, group);
-      return {
-        ...state,
-        health: action.health,
-        engineStatus: "ready",
-        presetName,
-        // プリセットが変わったら別プリセット向けの候補は捨てる（生成中の busy/captureId は触らない）。
-        ...(presetName === state.presetName ? {} : clearedCandidateResult()),
-      };
-    }
+    case "health/ok":
+      // health の presets はフォールバック扱い（rust の一覧を既に持っていれば applyPresets が無視する）。
+      return applyPresets(
+        { ...state, health: action.health, engineStatus: "ready" },
+        action.health.presets ?? [],
+        "health",
+      );
 
     case "health/fail":
+      // プリセット一覧は health と独立なので残す（#98）。
       return { ...state, engineStatus: "offline" };
+
+    case "presets/loaded":
+      return applyPresets(state, action.presets, action.source);
 
     case "analysis/status": {
       const response = action.response;
@@ -533,6 +578,8 @@ export function reducer(state: State, action: Action): State {
         ...initialState,
         health: state.health,
         engineStatus: state.engineStatus,
+        presets: state.presets,
+        presetsSource: state.presetsSource,
         presetName: state.presetName,
         sourceFolder: action.info,
         // **initialState の 0 に戻さない**。ここで進めた値が「今のフォルダ」の目印であり、
@@ -560,7 +607,7 @@ export function reducer(state: State, action: Action): State {
         ...state,
         screen: "operation",
         selectedGroupId: action.groupId,
-        presetName: suggestPreset(state.health, group),
+        presetName: suggestPreset(state.presets, group),
         overrides: {},
         // 別グループ・別プリセットの候補を持ち越さない。生成中（busy）の応答は
         // captureId を残して受け取るが、表示・適用時に capture_id / preset を照合する。
@@ -1131,7 +1178,7 @@ export function currentDevelopmentCandidates(state: State, captureId: CaptureId 
 }
 
 export function activePreset(state: State): PresetInfo | null {
-  return presetFor(state.health, state.presetName);
+  return presetFor(state.presets, state.presetName);
 }
 
 /**

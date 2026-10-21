@@ -128,8 +128,6 @@ export default function Home() {
 
     const checkHealth = (attempt: number) => {
       getHealth()
-        // プリセットは Tauri なら Rust（get_presets）を優先し、失敗・ブラウザモードでは health の値を使う（#80）。
-        .then(async (payload) => ({ ...payload, presets: await getPresets(payload.presets) }))
         .then((payload) => {
           if (!cancelled) dispatch({ type: "health/ok", health: payload });
         })
@@ -150,6 +148,20 @@ export default function Home() {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
   }, [setupStage]);
+
+  // ---- プリセット一覧（#98）。health と独立に、起動時に 1 回だけ取得する ----------------
+  // Tauri では Rust の get_presets から取るので、Python エンジンが止まっていてもプリセットを選べる。
+  // getPresets([]) はブラウザモード・取得失敗・空のとき [] を返すので、そのときは何も出さず、
+  // health/ok が health.presets を取り込む（reducer 側で rust を優先するので到着順は問わない）。
+  useEffect(() => {
+    let cancelled = false;
+    void getPresets([]).then((presets) => {
+      if (!cancelled && presets.length > 0) dispatch({ type: "presets/loaded", presets, source: "rust" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ---- プレビュー現像のエンジン（#72）。起動時に 1 回だけ問い合わせて覚えておく --------
   // ブラウザモードでは previewEngine() が invoke せずに "rawpy" を返す。
@@ -844,7 +856,7 @@ export default function Home() {
               onViewCapture={(groupId, id) => dispatch({ type: "view/capture", groupId, captureId: id })}
               engineStatus={state.engineStatus}
               engineVersion={engineVersion}
-              health={health}
+              presets={state.presets}
               presetName={state.presetName}
               adjustments={adjustments}
               changedKeys={changedKeys}
