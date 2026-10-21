@@ -440,6 +440,28 @@ for i in {1..30}; do req ${inputs[$i]} b-$i; done >| $OUT/batch.jsonl
 /usr/bin/time -l $B --batch < $OUT/batch.jsonl > $OUT/batch.out           # バッチ（RSS もここで取る）
 ```
 
+- 追記（Issue #102）: 上の 640px の 1 件 1.4 秒の大半（約 0.9 秒）は、SMB 上（`/Volumes/Backup` は smbfs）の ARW を毎回パスから
+  読んでいたことによる。同じファイルをローカルに置くかメモリから渡すと 1 件約 0.5 秒。段階別の内訳・draft mode・埋め込み
+  プレビュー・デコード結果の使い回しの比較は `docs/coreimage-small-render-performance.md`。
+
+### 計測フック（`GEOFRAME_CI_TIMING`、Issue #102）
+
+環境変数 `GEOFRAME_CI_TIMING=1` を付けて起動すると、1 件ごとに stderr へ段階別の時間（ms）を 1 行書く。stdout の応答 JSON と
+出力画像は変わらない（opt-in。未設定・`1` 以外では何も書かない）。
+
+```text
+geoframe-ci-develop: timing create=62.6 configure=14.3 graph=0.8 render=393.5 encode_write=4.0 other=0.1 total=475.3
+```
+
+| 項目 | 内容 |
+|---|---|
+| `create` | `CIRAWFilter(imageURL:)`（ファイルを開いてメタデータを読む） |
+| `configure` | decoderVersion〜adjustments のデコード段・個別上書き・白点ガード |
+| `graph` | `outputImage` の取得と後段チェーンのグラフ組み立て（画素は計算しない） |
+| `render` | CIContext のレンダ。RAW の展開・デモザイク・NR・レンズ補正・後段カーネル・読み出しはすべてここ（遅延評価のため分けられない）。`skip_write` では -1 |
+| `encode_write` | エンコード・一時ファイル書き込み・rename。`skip_write` では -1 |
+| `other` | 上記以外（単発呼び出しでの CIContext の生成、診断モードの統計など）。各項目を 0.1 ms に丸めてから差を取るので −0.1 になることがある |
+
 ## 出力
 
 | format | 画素 | 色空間 / ICC | メタデータ |
