@@ -75,6 +75,9 @@ public struct SuccessResponse: Encodable {
     public var adjustments_applied: AdjustmentsApplied? = nil
     /// `diagnostics` 指定時だけ値を持つ（CLI 0.4.0、Issue #92 設計書 §4.4）。nil のときはキー自体を出さない。
     public var diagnostics: DiagnosticsReport? = nil
+    /// `--batch` のときだけ値を持つ（CLI 0.5.0、Issue #82）。受け付けた順の番号（1 始まり）。
+    /// 単発呼び出しでは nil のままで、キー自体を出さない。
+    public var sequence: Int? = nil
 }
 
 /// `adjustments` をどう解釈したか（応答のトップレベル `adjustments_applied`。設計書 §4.2）。
@@ -146,9 +149,12 @@ public struct ErrorBody: Encodable {
 public struct FailureResponse: Encodable {
     public let ok = false
     public let error: ErrorBody
+    /// `--batch` のときだけ値を持つ（`SuccessResponse.sequence` と同じ）。単発では出さない。
+    public var sequence: Int? = nil
 
-    public init(_ error: DevelopError) {
+    public init(_ error: DevelopError, sequence: Int? = nil) {
         self.error = ErrorBody(code: error.code, message: error.message)
+        self.sequence = sequence
     }
 }
 
@@ -196,8 +202,20 @@ func millis(_ start: DispatchTime, _ end: DispatchTime) -> Double {
     return (ns / 1_000_000 * 10).rounded() / 10
 }
 
+/// 現像に使う CIContext（作業空間 extended linear sRGB・half float、中間結果はキャッシュしない）。
+/// 単発呼び出しでは 1 件ごとに作り、`--batch` ではプロセスで 1 つを使い回す。
+public func makeRenderContext() -> CIContext {
+    CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .workingFormat: CIFormat.RGBAh,
+        .cacheIntermediates: false,
+    ])
+}
+
 /// 現像 1 件。preview / full は同じ処理で、差は scaleFactor だけ。
-public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
+/// `context` を渡すとそれでレンダする（`--batch` の使い回し）。nil なら 1 件用に作る。
+/// CIRAWFilter は毎回作る（使い回さない理由は README「バッチモード」）。
+public func develop(_ request: DevelopRequest, context sharedContext: CIContext? = nil) throws -> SuccessResponse {
     try PathValidator.validate(request)
     let t0 = DispatchTime.now()
 
@@ -320,11 +338,7 @@ public func develop(_ request: DevelopRequest) throws -> SuccessResponse {
     let t1 = DispatchTime.now()
 
     let (colorSpace, colorSpaceName) = OutputColor.space(for: request.format, colorSpace: request.outputColorSpace)
-    let context = CIContext(options: [
-        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
-        .workingFormat: CIFormat.RGBAh,
-        .cacheIntermediates: false,
-    ])
+    let context = sharedContext ?? makeRenderContext()
     let outputWidth: Int
     let outputHeight: Int
     let written: Bool

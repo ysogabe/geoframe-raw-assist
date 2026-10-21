@@ -603,6 +603,306 @@ fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
 }
 
 // ---------------------------------------------------------------------------
+// バッチセッション（CLI `--batch`、Issue #82）
+// ---------------------------------------------------------------------------
+
+/// CLI を `--batch` で常駐させ、JSON Lines で複数のリクエストを流すセッション。
+///
+/// 今は呼び出し側が無い（PSO・ブラケット合成で使う予定）ので、未使用の警告だけを抑えている。
+#[cfg_attr(not(test), allow(dead_code))]
+mod batch {
+    use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::Path;
+    use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+
+    use super::{is_cli_error_response, CoreImageError};
+
+    /// stderr の末尾として保持する行数（エラーメッセージに添える）。
+    const STDERR_TAIL_LINES: usize = 20;
+    /// Drop で stdin を閉じてから自然終了を待つ時間。過ぎたら kill する。
+    const DROP_GRACE: Duration = Duration::from_millis(500);
+    /// 応答の前に子が終わったとき、stderr の末尾を読み切るまで待つ上限。
+    const STDERR_SETTLE: Duration = Duration::from_millis(500);
+
+    /// `program --batch` を起動して保持する。
+    ///
+    /// - 1 リクエスト = 1 行（改行を含まないコンパクトな JSON）を書き、応答 1 行を待つ。
+    ///   待ち時間は **1 リクエストごと**に `timeout`。過ぎたら子プロセスを kill し、
+    ///   セッションは使えなくなる（以後のリクエストは `SIDECAR_SESSION_CLOSED`）。
+    /// - 応答の `sequence`（CLI が受け付けた順の番号、1 始まり）が送った件数と一致することを確かめる。
+    ///   食い違い・JSON でない応答・`sequence` 欠落・子の終了は、対応が取れなくなったとみなして
+    ///   kill し、使えない状態にする。
+    /// - CLI の失敗応答（`{"ok":false,...}`）はその 1 件の `Err` として返し、セッションは使い続けられる。
+    /// - stdout / stderr はそれぞれ専用スレッドで読む（stderr は CLI が 1 件ごとにログを書くので、
+    ///   読まないとパイプが詰まって子が止まる）。stderr は末尾だけ保持する。
+    /// - 終了は `finish`（stdin を閉じて wait）。呼ばずに drop しても、stdin を閉じて短く待ち、
+    ///   終わらなければ kill して回収する。
+    pub(super) struct BatchSession {
+        child: Option<Child>,
+        stdin: Option<ChildStdin>,
+        responses: Receiver<String>,
+        stderr_tail: Arc<Mutex<VecDeque<String>>>,
+        /// stderr を EOF まで読み終えたか（子の終了後、末尾を取りこぼさないよう待つため）。
+        stderr_done: Arc<AtomicBool>,
+        sent: u64,
+        timeout: Duration,
+        usable: bool,
+    }
+
+    impl BatchSession {
+        /// `program --batch` を起動する。`timeout` は 1 リクエストごとの待ち時間（`finish` の待ちにも使う）。
+        pub(super) fn start(program: &Path, timeout: Duration) -> Result<Self, CoreImageError> {
+            let mut child = Command::new(program)
+                .arg("--batch")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| {
+                    CoreImageError::new(
+                        "SIDECAR_SPAWN_FAILED",
+                        format!("{} を起動できません: {error}", program.display()),
+                    )
+                })?;
+            let stdin = child.stdin.take();
+            let (sender, responses) = mpsc::channel();
+            if let Some(stdout) = child.stdout.take() {
+                thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        let Ok(line) = line else { break };
+                        if sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+            let stderr_done = Arc::new(AtomicBool::new(false));
+            if let Some(stderr) = child.stderr.take() {
+                let tail = Arc::clone(&stderr_tail);
+                let done = Arc::clone(&stderr_done);
+                thread::spawn(move || {
+                    for line in BufReader::new(stderr).lines() {
+                        let Ok(line) = line else { break };
+                        let mut tail = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if tail.len() == STDERR_TAIL_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                    done.store(true, Ordering::SeqCst);
+                });
+            } else {
+                stderr_done.store(true, Ordering::SeqCst);
+            }
+            Ok(Self {
+                child: Some(child),
+                stdin,
+                responses,
+                stderr_tail,
+                stderr_done,
+                sent: 0,
+                timeout,
+                usable: true,
+            })
+        }
+
+        /// まだリクエストを流せるか（タイムアウト・対応の食い違い・子の終了の後は false）。
+        pub(super) fn is_usable(&self) -> bool {
+            self.usable
+        }
+
+        /// これまでに送ったリクエストの件数（= 最後に期待した `sequence`）。
+        pub(super) fn sent(&self) -> u64 {
+            self.sent
+        }
+
+        /// 子プロセスの pid（テストで後片付けを確かめる用）。
+        pub(super) fn pid(&self) -> Option<u32> {
+            self.child.as_ref().map(Child::id)
+        }
+
+        /// 1 件を送り、応答を待つ。成功応答（`ok: true`）は JSON のまま返す。
+        pub(super) fn request(&mut self, request: &Value) -> Result<Value, CoreImageError> {
+            if !self.usable {
+                return Err(CoreImageError::new(
+                    "SIDECAR_SESSION_CLOSED",
+                    "Core Image CLI のバッチセッションは既に使えません",
+                ));
+            }
+            // serde_json の既定の出力は 1 行（文字列中の改行はエスケープされる）。
+            let mut line = serde_json::to_vec(request).map_err(|error| {
+                CoreImageError::new(
+                    "SIDECAR_IO_FAILED",
+                    format!("リクエストを JSON にできません: {error}"),
+                )
+            })?;
+            line.push(b'\n');
+            let expected = self.sent + 1;
+            let written = match self.stdin.as_mut() {
+                Some(stdin) => stdin.write_all(&line).and_then(|()| stdin.flush()),
+                None => Err(std::io::Error::other("stdin is closed")),
+            };
+            if let Err(error) = written {
+                return Err(self.abort(
+                    "SIDECAR_IO_FAILED",
+                    format!("CLI へのリクエスト送信に失敗しました: {error}"),
+                ));
+            }
+            self.sent = expected;
+
+            let response_line = match self.responses.recv_timeout(self.timeout) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(self.abort(
+                        "SIDECAR_TIMEOUT",
+                        format!(
+                            "Core Image CLI が {} 秒以内に応答しなかったため中断しました",
+                            self.timeout.as_secs_f32()
+                        ),
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let message = format!(
+                        "Core Image CLI が応答の前に終了しました: {}",
+                        self.stderr_summary()
+                    );
+                    return Err(self.abort("SIDECAR_BAD_RESPONSE", message));
+                }
+            };
+            let response = match serde_json::from_str::<Value>(&response_line) {
+                Ok(value) => value,
+                Err(_) => {
+                    let message = format!(
+                        "Core Image CLI の応答を読めません: {}",
+                        self.stderr_summary()
+                    );
+                    return Err(self.abort("SIDECAR_BAD_RESPONSE", message));
+                }
+            };
+            let sequence = response.get("sequence").and_then(Value::as_u64);
+            if sequence != Some(expected) {
+                return Err(self.abort(
+                    "SIDECAR_BAD_RESPONSE",
+                    format!(
+                        "Core Image CLI の応答の sequence が食い違いました（期待 {expected}、実際 {}）",
+                        sequence.map_or_else(|| "なし".to_string(), |n| n.to_string())
+                    ),
+                ));
+            }
+            if response.get("ok") == Some(&Value::Bool(true)) {
+                return Ok(response);
+            }
+            if is_cli_error_response(&response) {
+                let error = &response["error"];
+                return Err(CoreImageError::new(
+                    error["code"].as_str().unwrap_or_default(),
+                    error["message"].as_str().unwrap_or_default(),
+                ));
+            }
+            Err(CoreImageError::new(
+                "SIDECAR_BAD_RESPONSE",
+                "Core Image CLI の応答が成功でも失敗の形でもありません",
+            ))
+        }
+
+        /// stdin を閉じ（EOF）、`timeout` 以内の終了を待つ。過ぎたら kill して `SIDECAR_TIMEOUT`。
+        pub(super) fn finish(mut self) -> Result<ExitStatus, CoreImageError> {
+            self.usable = false;
+            drop(self.stdin.take());
+            let Some(mut child) = self.child.take() else {
+                return Err(CoreImageError::new(
+                    "SIDECAR_SESSION_CLOSED",
+                    "Core Image CLI のバッチセッションは既に終了しています",
+                ));
+            };
+            let deadline = Instant::now() + self.timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) if Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(CoreImageError::new(
+                            "SIDECAR_TIMEOUT",
+                            format!(
+                                "Core Image CLI が stdin を閉じてから {} 秒以内に終わらなかったため中断しました",
+                                self.timeout.as_secs_f32()
+                            ),
+                        ));
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(CoreImageError::new(
+                            "SIDECAR_IO_FAILED",
+                            format!("CLI の終了待ちに失敗しました: {error}"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        /// 子プロセスを kill して回収し、使えない状態にしてエラーを返す。
+        fn abort(&mut self, code: &str, message: String) -> CoreImageError {
+            self.usable = false;
+            drop(self.stdin.take());
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            CoreImageError::new(code, message)
+        }
+
+        fn stderr_summary(&self) -> String {
+            // 子の終了直後は stderr スレッドがまだ読み終えていないことがあるので、EOF まで少しだけ待つ。
+            let deadline = Instant::now() + STDERR_SETTLE;
+            while !self.stderr_done.load(Ordering::SeqCst) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let tail = self
+                .stderr_tail
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            tail.iter()
+                .rev()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" / ")
+        }
+    }
+
+    impl Drop for BatchSession {
+        fn drop(&mut self) {
+            drop(self.stdin.take());
+            let Some(mut child) = self.child.take() else {
+                return;
+            };
+            let deadline = Instant::now() + DROP_GRACE;
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                    Err(_) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI バージョン（キャッシュキーの一部）
 // ---------------------------------------------------------------------------
 
@@ -1849,6 +2149,188 @@ exit 1"#,
         .unwrap_err();
         assert_eq!(error.code, "SIDECAR_TIMEOUT");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // バッチセッション（Issue #82）
+    // -----------------------------------------------------------------------
+
+    use super::batch::BatchSession;
+
+    /// `--batch` の偽 CLI。1 行読むごとに番号を数え、行の中身で振る舞いを変える。
+    /// 応答の後に stderr へ 1 行ログを書く（本物の CLI と同じく stderr も流れる）。
+    fn batch_mock(dir: &Path) -> PathBuf {
+        script_sidecar(
+            dir,
+            r#"[ "$1" = "--batch" ] || exit 9
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  case "$line" in
+    *fail*) printf '{"error":{"code":"INPUT_NOT_FOUND","message":"missing"},"ok":false,"sequence":%d}\n' "$n" ;;
+    *hang*) exec sleep 30 ;;
+    *skew*) printf '{"ok":true,"sequence":%d}\n' "$((n+5))" ;;
+    *noseq*) printf '{"ok":true}\n' ;;
+    *garbage*) echo 'not json' ;;
+    *die*) echo "dying at $n" >&2; exit 3 ;;
+    *) printf '{"ok":true,"sequence":%d}\n' "$n" ;;
+  esac
+  echo "handled $n" >&2
+done
+exit 0"#,
+        )
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn batch_session_starts_runs_requests_and_finishes() {
+        let dir = TempDir::new("batch-ok");
+        let mut session =
+            BatchSession::start(&batch_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        assert!(session.is_usable());
+        for expected in 1..=3u64 {
+            let response = session.request(&json!({"cmd": "ok"})).unwrap();
+            assert_eq!(response["sequence"], json!(expected));
+        }
+        assert_eq!(session.sent(), 3);
+        let started = Instant::now();
+        let status = session.finish().unwrap();
+        assert!(status.success());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn batch_session_cli_error_keeps_session_usable() {
+        let dir = TempDir::new("batch-cli-error");
+        let mut session =
+            BatchSession::start(&batch_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        session.request(&json!({"cmd": "ok"})).unwrap();
+        let error = session.request(&json!({"cmd": "fail"})).unwrap_err();
+        assert_eq!(error.code, "INPUT_NOT_FOUND");
+        assert_eq!(error.message, "missing");
+        assert!(session.is_usable());
+        let response = session.request(&json!({"cmd": "ok"})).unwrap();
+        assert_eq!(response["sequence"], json!(3));
+        assert!(session.finish().unwrap().success());
+    }
+
+    #[test]
+    fn batch_session_timeout_kills_child_and_closes_session() {
+        let dir = TempDir::new("batch-timeout");
+        let mut session =
+            BatchSession::start(&batch_mock(dir.path()), Duration::from_millis(300)).unwrap();
+        session.request(&json!({"cmd": "ok"})).unwrap();
+        let pid = session.pid().unwrap();
+        let started = Instant::now();
+        let error = session.request(&json!({"cmd": "hang"})).unwrap_err();
+        assert_eq!(error.code, "SIDECAR_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!session.is_usable());
+        assert!(
+            !process_alive(pid),
+            "タイムアウトした子プロセスは kill・回収済み"
+        );
+        let error = session.request(&json!({"cmd": "ok"})).unwrap_err();
+        assert_eq!(error.code, "SIDECAR_SESSION_CLOSED");
+        assert_eq!(session.finish().unwrap_err().code, "SIDECAR_SESSION_CLOSED");
+    }
+
+    #[test]
+    fn batch_session_rejects_mismatched_or_unreadable_responses() {
+        let dir = TempDir::new("batch-mismatch");
+        let program = batch_mock(dir.path());
+        for cmd in ["skew", "noseq", "garbage", "die"] {
+            let mut session = BatchSession::start(&program, Duration::from_secs(10)).unwrap();
+            session.request(&json!({"cmd": "ok"})).unwrap();
+            let pid = session.pid().unwrap();
+            let error = session.request(&json!({ "cmd": cmd })).unwrap_err();
+            assert_eq!(error.code, "SIDECAR_BAD_RESPONSE", "{cmd}");
+            assert!(!session.is_usable(), "{cmd}");
+            assert!(!process_alive(pid), "{cmd}");
+            if cmd == "die" {
+                assert!(error.message.contains("dying at 2"), "{}", error.message);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_session_drop_reaps_child_that_ignores_eof() {
+        let dir = TempDir::new("batch-drop");
+        // stdin を読まずに居座る（EOF では終わらない）。Drop の猶予の後に kill される。
+        let program = script_sidecar(dir.path(), "exec sleep 30");
+        let session = BatchSession::start(&program, Duration::from_secs(10)).unwrap();
+        let pid = session.pid().unwrap();
+        assert!(process_alive(pid));
+        let started = Instant::now();
+        drop(session);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!process_alive(pid));
+    }
+
+    #[test]
+    fn batch_session_drop_closes_stdin_for_graceful_exit() {
+        let dir = TempDir::new("batch-drop-eof");
+        let mut session =
+            BatchSession::start(&batch_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        session.request(&json!({"cmd": "ok"})).unwrap();
+        let pid = session.pid().unwrap();
+        drop(session);
+        assert!(!process_alive(pid));
+    }
+
+    #[test]
+    fn batch_session_finish_times_out_when_child_ignores_eof() {
+        let dir = TempDir::new("batch-finish-timeout");
+        let program = script_sidecar(dir.path(), "exec sleep 30");
+        let session = BatchSession::start(&program, Duration::from_millis(300)).unwrap();
+        let pid = session.pid().unwrap();
+        let started = Instant::now();
+        let error = session.finish().unwrap_err();
+        assert_eq!(error.code, "SIDECAR_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!process_alive(pid));
+    }
+
+    #[test]
+    fn batch_session_spawn_failure() {
+        let error = BatchSession::start(
+            Path::new("/nonexistent/geoframe-ci-develop"),
+            Duration::from_secs(1),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "SIDECAR_SPAWN_FAILED");
+    }
+
+    /// 本物の CLI（externalBin）と `--batch` の契約が合っているか。ARW は使わない（無ければ skip）。
+    #[test]
+    fn batch_session_with_built_sidecar() {
+        let Some(sidecar) = built_sidecar() else {
+            eprintln!("skip: src-tauri/binaries/geoframe-ci-develop-* がありません");
+            return;
+        };
+        let mut session = BatchSession::start(&sidecar, Duration::from_secs(30)).unwrap();
+        let error = session.request(&json!({})).unwrap_err();
+        assert_eq!(error.code, "INVALID_REQUEST");
+        let error = session
+            .request(&json!({
+                "input": "/nonexistent/geoframe-batch-test/DSC00001.ARW",
+                "output": "/nonexistent/geoframe-batch-test/out.jpg",
+                "mode": "preview"
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, "INPUT_NOT_FOUND");
+        assert!(session.is_usable());
+        assert_eq!(session.sent(), 2);
+        assert!(session.finish().unwrap().success());
     }
 
     #[test]
