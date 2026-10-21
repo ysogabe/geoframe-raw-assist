@@ -13,7 +13,9 @@
 //! プリセット表と `resolve_adjustments(preset, overrides)` は `crate::presets` にあり、
 //! 既定値へのマージ後に必ずここの `normalize_adjustments` を通す（規則はここ 1 か所）。
 //! 値域の一致はフィクスチャ `tests/fixtures/presets.json` で Python・フロントと突き合わせる
-//! （`presets.rs` のテスト）。
+//! （`presets.rs` のテスト。Python は #81 で分けた legacy フィクスチャと構造だけを突き合わせる）。
+//! `highlight_recovery` はここでは他のキーと同じく値域へクランプするだけ。exposure / shadow_lift への
+//! 写像と加算は CLI 0.6.0 が行う（#81、`docs/design/coreimage-preset-retune.md` §2.3）。
 //! Tauri コマンドの署名は変えない。正規化規則（クランプ・float 化）を変えたら
 //! `coreimage::CACHE_KEY_SCHEMA` を上げること。
 

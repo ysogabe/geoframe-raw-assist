@@ -109,6 +109,26 @@ describe("toDevelopedResult", () => {
     expect(result.lens_correction.lens).toBeUndefined();
   });
 
+  it("CLI 0.6.0 の highlight_recovery の実効値を highlight_recovery_effect に写す（#81）", () => {
+    const effect = {
+      value: 90,
+      exposure_delta: -1.0,
+      shadow_lift_delta: 55,
+      effective_exposure: -1.0,
+      effective_shadow_lift: 55,
+      shadow_lift_clamped: false,
+    };
+    const result = toDevelopedResult(ciResult({ adjustments_applied: { highlight_recovery: effect, ignored: [] } }), PRESET);
+    expect(result.highlight_recovery_effect).toEqual(effect);
+  });
+
+  it("highlight_recovery が無い・壊れていれば highlight_recovery_effect は付けない", () => {
+    expect(toDevelopedResult(ciResult(), PRESET)).not.toHaveProperty("highlight_recovery_effect");
+    expect(toDevelopedResult(ciResult({ adjustments_applied: null }), PRESET)).not.toHaveProperty("highlight_recovery_effect");
+    const broken = ciResult({ adjustments_applied: { highlight_recovery: { value: "90" } } });
+    expect(toDevelopedResult(broken, PRESET)).not.toHaveProperty("highlight_recovery_effect");
+  });
+
   it("キャッシュヒットは cached、計測値が無ければ 0 秒", () => {
     const result = toDevelopedResult(ciResult({ cache_hit: true, elapsed_ms: null }), PRESET);
     expect(result.cached).toBe(true);

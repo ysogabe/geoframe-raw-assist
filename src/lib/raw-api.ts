@@ -114,8 +114,8 @@ export async function getHealth(): Promise<HealthResponse> {
  *
  * - Tauri 実行時は `invoke("get_presets")` を優先する（Python エンジンを経由しない）。
  * - ブラウザモード（isTauri() === false）では invoke を呼ばず、`/api/health` の `presets`（= fallback）を返す。
- * - Tauri 側の取得に失敗した・空だったときも fallback に戻る（移行期間中は両方が同じ値を持つ。
- *   一致は src-tauri/tests/fixtures/presets.json のテストで担保）。
+ * - Tauri 側の取得に失敗した・空だったときも fallback に戻る。#81 から数値は意図して違う（Rust = Core Image 向け、
+ *   Python = rawpy 向けの旧値）。名前・並び・キー構成の一致は tests/test_presets_fixture.py が 2 本のフィクスチャで担保。
  */
 export async function getPresets(fallback: PresetInfo[]): Promise<PresetInfo[]> {
   if (!isTauri()) return fallback;

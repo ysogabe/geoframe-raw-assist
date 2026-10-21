@@ -957,7 +957,7 @@ def worker_rawpy(args: argparse.Namespace) -> None:
             kwargs["adjustments"] = overrides  # 既定プリセットへの上書き（engine.resolve_adjustments が検証・クランプ）
         if preview:
             kwargs["max_edge"] = args.max_edge  # 明示しないと preview は 1600px に落ちる
-        result = engine.develop_raw(capture_id, engine.DEFAULT_PRESET, **kwargs)
+        result = engine.develop_raw(capture_id, args.worker_preset or engine.DEFAULT_PRESET, **kwargs)
     recipe = json.loads((out_dir / result["recipe_filename"]).read_text(encoding="utf-8"))
     print(json.dumps({
         "ok": True,
@@ -1022,11 +1022,17 @@ def run_rawpy(
     nosharp: bool = False,
     adjustments: dict[str, Any] | None = None,
     variant: str | None = None,
+    preset: str | None = None,
 ) -> dict[str, Any]:
-    """rawpy ワーカーを 1 回呼ぶ。``adjustments`` は既定プリセットへの上書き（``--worker-adjustments``）。"""
+    """rawpy ワーカーを 1 回呼ぶ。``adjustments`` は既定プリセットへの上書き（``--worker-adjustments``）。
+
+    ``preset`` は rawpy（Python ``local_raw/presets.py``）のプリセット名（既定 DEFAULT_PRESET。--presets の legacy 参考）。
+    """
     # nosharp は params_hash が変わらず同名ファイルになるので、出力ディレクトリを分ける。
     # adjustments 指定時もバリアントごとに分ける（レシピ JSON を取り違えないため）。
-    if adjustments is not None:
+    if preset is not None:
+        out_dir = ctx.out / "rawpy_preset" / preset / mode
+    elif adjustments is not None:
         out_dir = ctx.out / "rawpy_adj" / (variant or "adjusted") / mode
     else:
         out_dir = ctx.out / ("rawpy_nosharp" if nosharp else "rawpy") / mode
@@ -1042,6 +1048,8 @@ def run_rawpy(
         cmd.append("--worker-nosharp")
     if adjustments is not None:
         cmd += ["--worker-adjustments", json.dumps(adjustments, ensure_ascii=False, sort_keys=True)]
+    if preset is not None:
+        cmd += ["--worker-preset", preset]
     res = run_timed(cmd)
     payload = res["payload"] or {}
     row: dict[str, Any] = {
@@ -1220,6 +1228,7 @@ def adjustments_applied_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "ci_wb_k0": wb.get("k0"),
         "ci_wb_mired_shift": wb.get("mired_shift"),
         "ci_wb_mired_per_unit": wb.get("mired_per_unit"),
+        **highlight_recovery_summary(payload),
     }
 
 
@@ -2914,14 +2923,17 @@ def oracle_adjustments(post: dict[str, Any] | str, preset: dict[str, Any] | None
 
     ``post == "preset"`` のときは ``preset``（既定プリセットの解決済み値）の後段キーを使う。
     exposure / wb_temp / noise_reduction は identity のまま（デコード段を恒等に保つ）。
+    ``highlight_recovery`` は常に 0（CLI 0.6.0 から exposure / shadow_lift に写像されてデコード段にも効き、
+    Python の ``post_chain_oracle`` と合わなくなるため。#81 設計書 §9 T3）。
     """
     source = preset if post == "preset" else post
     if not isinstance(source, dict):
         raise ValueError("preset のオラクルには既定プリセットの値が必要です")
     out = dict(ADJ_IDENTITY)
-    for key in ("shadow_lift", "brightness", "contrast", "saturation", "sharpness", "highlight_recovery"):
+    for key in ("shadow_lift", "brightness", "contrast", "saturation", "sharpness"):
         if key in source:
             out[key] = float(source[key])
+    out["highlight_recovery"] = 0.0
     return out
 
 
@@ -3316,10 +3328,10 @@ def adjustment_checks(
             expect = variant == "nr_off_sh0"
             checks.append(_check(f"white_dot_{variant}_guard", guards or "(none)",
                                  ADJ_WHITE_DOT_GUARD if expect else "発動しない", fired == expect))
-    # highlight_recovery は無効（ignored に載る）
+    # highlight_recovery は CLI 0.6.0（#81）から写像で効く → ignored は空（0.5.0 までは ["highlight_recovery"]）
     ignored = ci.get("identity", {}).get("ci_adj_ignored")
     if isinstance(ignored, str):
-        checks.append(_check("highlight_recovery_ignored", ignored, "highlight_recovery", "highlight_recovery" in ignored.split(";")))
+        checks.append(_check("adjustments_ignored_empty", ignored or "(none)", "(none)", ignored == ""))
     return checks
 
 
@@ -3327,7 +3339,7 @@ def adjustments_plan(ctx: "RunContext", capture_ids: list[str]) -> list[dict[str
     """--adjustments で投げるリクエスト / ワーカー呼び出しの一覧（純粋。CLI は呼ばない）。--dry-run で書き出す。"""
     from local_raw import presets
 
-    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
     plan: list[dict[str, Any]] = []
     for cid in capture_ids:
         arw = source_file(ctx.source_root, cid, "ARW")
@@ -3360,7 +3372,8 @@ def develop_adjustment_variants(ctx: RunContext, capture_id: str, workers: int =
 
     from local_raw import presets
 
-    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    # オラクル or_preset は CI 値（presets.json）の既定プリセット（#81 設計書 §6）。
+    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
     ci_kw = {"decoder_version": "9", "profile": "apple_default"}
     jobs: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -3482,7 +3495,7 @@ def adjustments_capture(
     worst: tuple[float, str, np.ndarray, np.ndarray] | None = None
     from local_raw import presets
 
-    preset = presets.resolve_adjustments(presets.DEFAULT_PRESET, None)
+    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
     for variant, post, kind in ADJ_ORACLE_VARIANTS:
         run = runs.get(f"or:{variant}", {})
         orow: dict[str, Any] = {**base, "variant": variant, "kind": kind, "gates": kind == "tone",
@@ -3661,7 +3674,7 @@ def run_adjustments(ctx: RunContext, selection: list[dict[str, Any]], features_b
         "identity": ADJ_IDENTITY,
         "sweep_variants": [{"variant": v, "param": p, "value": val, "adjustments": adjustments_for(v)} for v, p, val, _ in ADJ_SWEEP_VARIANTS],
         "white_dot_variants": ADJ_WHITE_DOT_VARIANTS,
-        "oracle_variants": [{"variant": v, "kind": k, "adjustments": oracle_adjustments(p, presets.resolve_adjustments(presets.DEFAULT_PRESET, None))}
+        "oracle_variants": [{"variant": v, "kind": k, "adjustments": oracle_adjustments(p, ci_preset_adjustments(presets.DEFAULT_PRESET))}
                             for v, p, k in ADJ_ORACLE_VARIANTS],
         "ci_settings": {"decoder_version": "9", "profile": "apple_default", "lens_correction": True, "max_edge": ctx.max_edge},
         "thresholds": {
@@ -5557,6 +5570,604 @@ def run_diagnosis(
     ctx.say(f"[diagnosis] 完了: {ctx.out}（エラー {len(errors)} 件）")
 
 
+# =============================================================================
+# プリセット再調整の評価モード --presets（Issue #81、設計書 docs/design/coreimage-preset-retune.md §7・§8）
+# =============================================================================
+
+#: highlight_recovery を写像で効かせる CLI の最小版（設計書 §2.3。0.6.0 で ignored が空になる）。
+PRESETS_MIN_CLI = (0, 6, 0)
+#: Core Image 向けのプリセット表（正は Rust `src-tauri/src/presets.rs`。設計書 §6）。
+CI_PRESETS_JSON = PROJECT_ROOT / "src-tauri" / "tests" / "fixtures" / "presets.json"
+#: hr → (ΔEV, Δlift) の節点（CLI `HighlightRecoveryMapping.nodes` の写し。応答の実効値との突き合わせ用）。
+HR_NODES: tuple[tuple[float, float, float], ...] = ((0.0, 0.0, 0.0), (60.0, -0.7, 40.0), (90.0, -1.0, 55.0), (100.0, -1.1, 60.0))
+#: #92 の 10 カット（空が主役。--diagnosis と同じ ID）。§7.4 の 1〜5 はこの集合で数える。
+PRESET_SKY_IDS = ("DSC04473", "DSC04607", "DSC04532", "DSC04705", "DSC04579",
+                  "DSC04604", "DSC04754", "DSC04432", "DSC04746", "DSC04462")
+#: シーン別の代表カット（§7.3）。夜景 3 カットは別フォルダ（--source-root を分けて 2 回回す）。
+PRESET_SCENE_IDS = ("DSC04670", "DSC04651", "DSC04872", "DSC04430", "DSC04453", "DSC07415", "DSC07407", "DSC07402")
+#: 原寸で回すカット（救済系 3 プリセット × 3 カット。§7.3）。
+PRESET_FULL_IDS = ("DSC04473", "DSC04607", "DSC04705")
+#: 救済系（hr > 0 を持つ）プリセット。§7.4 の 1〜5 の対象。
+RESCUE_PRESETS = ("highlight_rescue", "backlit_rescue", "sunset_glow")
+#: シートに並べる追加の候補（オーナー判断 2026-10-22・設計書 §8）: variant -> (元のプリセット, 上書き, ラベル)。
+#: シートのラベルは ASCII だけにする（Pillow の既定フォントは日本語を描けない）。
+PRESET_EXTRA_CANDIDATES: dict[str, tuple[str, dict[str, Any], str]] = {
+    "neutral_recovery_hr30": ("neutral_recovery", {"highlight_recovery": 30.0}, "plan C: hr 30"),
+    "landscape_clear_hr30": ("landscape_clear", {"highlight_recovery": 30.0}, "plan C: hr 30"),
+    "landscape_clear_weak": ("landscape_clear", {"contrast": 1.06, "saturation": 1.05, "sharpness": 1.08}, "weak c1.06 s1.05 sh1.08"),
+    "sunset_glow_hr70": ("sunset_glow", {"highlight_recovery": 70.0}, "hr 70"),
+    "highlight_rescue_hr100": ("highlight_rescue", {"highlight_recovery": 100.0}, "hr 100 (-1.1EV, +60)"),
+}
+#: §7.3 の「宣言する差」（d_base 比）: プリセット -> [(指標, 符号)]。符号 0 は「≈ 0（絶対値が小さい）」。
+PRESET_DIRECTIONS: dict[str, tuple[tuple[str, int], ...]] = {
+    "sunset_glow": (("rb_ln_neutral", 1), ("mean_saturation", 1), ("clip8_any", -1)),
+    "indoor_warm": (("mean_luma", 1), ("rb_ln_neutral", 1)),
+    "vivid_travel": (("mean_saturation", 1), ("std_luma", 1)),
+    "landscape_clear": (("mean_saturation", 1), ("std_luma", 1)),
+    "monochrome_street": (("mean_saturation", 0),),
+    "portrait_soft": (("std_luma", -1), ("edge_width_px", 1)),
+    "nightscape": (("dark_mean_luma", 1),),
+    "shadow_rescue": (("dark_mean_luma", 1),),
+    "highlight_rescue": (("clip8_any", -1),),
+    "backlit_rescue": (("clip8_any", -1),),
+}
+#: monochrome_street の「彩度 ≈ 0」の許容（mean_saturation、0..1）。
+PRESET_MONO_SAT_MAX = 0.01
+#: §7.4 の 1: P_hr0 の白飛びがこれ未満のカットは「hr の寄与」を n/a にする。
+PRESET_CLIP_MIN = 0.01
+#: §7.4 の 2・3・5 の割合（9/10・9/10・8/10）。
+PRESET_MID_FRACTION = 0.9
+PRESET_FG_FRACTION = 0.9
+PRESET_DBASE_FRACTION = 0.8
+#: §7.4 の 7: 実効 lift ≥ 40 のプリセット × ISO ≥ 1600 のカットで flat_noise(P) / flat_noise(d_base) ≤ 1.5（【推測】
+#: ADJ_SHARP16_NOISE_MAX の流用）。
+PRESET_NOISE_LIFT_MIN = 40.0
+PRESET_NOISE_ISO_MIN = 1600
+PRESET_NOISE_RATIO_MAX = ADJ_SHARP16_NOISE_MAX
+#: §2.2 の等価性: (hr, exposure, shadow_lift)。{0, 0, hr} と {exposure, shadow_lift, 0} の tiff16 が一致すること。
+PRESET_EQUIVALENCE = ((60.0, -0.7, 40.0), (90.0, -1.0, 55.0))
+#: §8 のオーナーに見せる組: (組, [(ID, プリセット)], 見るポイント)。
+PRESET_OWNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
+    ("救済系", tuple((cid, p) for cid in ("DSC04473", "DSC04607", "DSC04705") for p in ("highlight_rescue", "backlit_rescue")),
+     "空の階調が戻るか、前景が沈まないか、境界の偽色（原寸シートも）"),
+    ("夕景・薄明", (("DSC04532", "sunset_glow"),), "桃色の雲の階調と暖色の方向・強さ（hr 60 と 70）"),
+    ("既定", tuple((cid, "neutral_recovery") for cid in ("DSC04705", "DSC04473", "DSC04670")),
+     "案 B / C の選択（hr 0 と 30）。CI 既定とどれだけ違うか"),
+    ("風景", tuple((cid, "landscape_clear") for cid in ("DSC04670", "DSC04872")),
+     "コントラスト・彩度・シャープが強すぎないか（白い粒・硬さ）。弱め候補と比べる"),
+    ("室内・高 ISO", tuple((cid, p) for cid in ("DSC04430", "DSC04432") for p in ("indoor_warm", "shadow_rescue", "nightscape")),
+     "lift のノイズ、窓の白"),
+    ("夜景", tuple((cid, p) for cid in ("DSC07415", "DSC07407") for p in ("nightscape", "shadow_rescue")),
+     "星の残り、空のノイズ、NR full"),
+)
+PRESET_TABLE_KEYS = (
+    "clip8_any", "sky_bright_clip8_any", "cloud_grad_clip8_any", "mid_p50", "fg_p01", "p01_luma", "p50_luma",
+    "p99_luma", "mean_luma", "std_luma", "mean_saturation", "rb_ln_neutral", "dark_mean_luma", "flat_noise",
+    "magenta_rate", "edge_width_px", "de76_vs_base", "ci_hr_effective_exposure", "ci_hr_effective_shadow_lift",
+)
+
+
+def load_ci_presets(path: Path = CI_PRESETS_JSON) -> list[dict[str, Any]]:
+    """Core Image 向けのプリセット表（``presets.json`` の ``presets``。並びはそのまま）。"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    presets = data.get("presets")
+    if not isinstance(presets, list) or not presets:
+        raise ValueError(f"{path} に presets がありません")
+    return presets
+
+
+def ci_preset_adjustments(name: str, presets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """CI のプリセット 1 件の Adjustments（9 キー全量のコピー）。"""
+    for preset in presets if presets is not None else load_ci_presets():
+        if preset.get("name") == name:
+            return dict(preset["adjustments"])
+    raise KeyError(f"presets.json に無いプリセットです: {name}")
+
+
+def hr_delta(hr: float) -> tuple[float, float]:
+    """hr → (ΔEV, Δlift)（CLI と同じ区分線形。節点では表の値をそのまま返す）。"""
+    if not hr > HR_NODES[0][0]:
+        return HR_NODES[0][1], HR_NODES[0][2]
+    for (h0, e0, l0), (h1, e1, l1) in zip(HR_NODES, HR_NODES[1:]):
+        if hr == h1:
+            return e1, l1
+        if hr < h1:
+            t = (hr - h0) / (h1 - h0)
+            return e0 + (e1 - e0) * t, l0 + (l1 - l0) * t
+    return HR_NODES[-1][1], HR_NODES[-1][2]
+
+
+def effective_exposure_lift(adjustments: dict[str, Any]) -> tuple[float, float]:
+    """プリセット値 + hr の寄与（加算、lift は [0, 100] にクランプ）。設計書 §3。"""
+    d_ev, d_lift = hr_delta(float(adjustments.get("highlight_recovery", 0.0)))
+    lift = min(100.0, max(0.0, float(adjustments.get("shadow_lift", 0.0)) + d_lift))
+    return float(adjustments.get("exposure", 0.0)) + d_ev, lift
+
+
+def preset_variant_specs(presets: list[dict[str, Any]], mode: str = "preview") -> dict[str, dict[str, Any]]:
+    """--presets のバリアント（純粋）: variant -> {"preset", "adjustments"(None = d_base), "label", "kind"}。
+
+    preview: d_base、全プリセット、hr > 0 のプリセットの ``<preset>_hr0``、``PRESET_EXTRA_CANDIDATES``。
+    full: d_base と救済系 3 プリセット・その hr0 だけ（§7.3）。
+    """
+    specs: dict[str, dict[str, Any]] = {"d_base": {"preset": None, "adjustments": None, "label": "d_base (CI default)", "kind": "base"}}
+    for preset in presets:
+        name = preset["name"]
+        if mode == "full" and name not in RESCUE_PRESETS:
+            continue
+        adj = dict(preset["adjustments"])
+        ev, lift = effective_exposure_lift(adj)
+        specs[name] = {"preset": name, "adjustments": adj, "label": f"{name} (eff {ev:+.2f}EV, lift {lift:g})", "kind": "preset"}
+        if float(adj.get("highlight_recovery", 0.0)) > 0:
+            specs[f"{name}_hr0"] = {"preset": name, "adjustments": {**adj, "highlight_recovery": 0.0},
+                                    "label": f"{name} hr 0", "kind": "hr0"}
+    if mode == "preview":
+        names = {p["name"] for p in presets}
+        for variant, (base, override, label) in PRESET_EXTRA_CANDIDATES.items():
+            if base not in names:
+                continue
+            adj = {**ci_preset_adjustments(base, presets), **override}
+            specs[variant] = {"preset": base, "adjustments": adj, "label": f"{base} {label}", "kind": "candidate"}
+    return specs
+
+
+def equivalence_requests() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """§2.2 の等価性の組: (名前, hr 側の Adjustments, 直接指定側の Adjustments)。"""
+    out = []
+    for hr, ev, lift in PRESET_EQUIVALENCE:
+        out.append((f"hr{int(hr)}", {**ADJ_IDENTITY, "highlight_recovery": hr},
+                    {**ADJ_IDENTITY, "exposure": ev, "shadow_lift": lift}))
+    return out
+
+
+def presets_cli_problem(version: Any, capabilities: Any) -> str | None:
+    """--presets を回せない理由（回せれば None）。CLI 0.6.0 以上で adjustments.ignored が空であること。"""
+    problem = adjustments_cli_problem(version, capabilities)
+    if problem:
+        return problem
+    parsed = parse_cli_version(version.get("cli_version"))
+    need = ".".join(str(v) for v in PRESETS_MIN_CLI)
+    if parsed is None or parsed < PRESETS_MIN_CLI:
+        return f"Core Image CLI {version.get('cli_version')} は highlight_recovery の写像に未対応です（{need} 以上が必要）"
+    ignored = (capabilities.get("adjustments") or {}).get("ignored")
+    if ignored:
+        return f"--capabilities の adjustments.ignored が空ではありません: {ignored}"
+    return None
+
+
+def highlight_recovery_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """CLI 0.6.0 応答の ``adjustments_applied.highlight_recovery`` を平らな列にする（純粋）。"""
+    adj = payload.get("adjustments_applied")
+    hr = adj.get("highlight_recovery") if isinstance(adj, dict) else None
+    if not isinstance(hr, dict):
+        return {}
+    return {
+        "ci_hr_value": hr.get("value"),
+        "ci_hr_exposure_delta": hr.get("exposure_delta"),
+        "ci_hr_shadow_lift_delta": hr.get("shadow_lift_delta"),
+        "ci_hr_effective_exposure": hr.get("effective_exposure"),
+        "ci_hr_effective_shadow_lift": hr.get("effective_shadow_lift"),
+        "ci_hr_shadow_lift_clamped": hr.get("shadow_lift_clamped"),
+    }
+
+
+def _roi_value(row: dict[str, Any], roi_key: str, fallback_key: str) -> tuple[float, str]:
+    """ROI の値が取れなければ全画面の値（§7.4 の 2・3）。どちらを使ったかも返す。"""
+    value = _num(row.get(roi_key))
+    if math.isfinite(value):
+        return value, "roi"
+    return _num(row.get(fallback_key)), "full_frame"
+
+
+def preset_capture_checks(
+    capture_id: str,
+    mode: str,
+    metrics: dict[str, dict[str, Any]],
+    iso: Any,
+    presets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """1 カット分の §7.4 の自動判定（1〜7）。集計（9/10 など）は ``preset_check_summary``（純粋）。"""
+    checks: list[dict[str, Any]] = []
+    base = metrics.get("d_base", {})
+    sky = capture_id in PRESET_SKY_IDS
+
+    def add(cond: int, name: str, preset: str, value: Any, threshold: str, passed: bool | None, **extra: Any) -> None:
+        checks.append({"capture_id": capture_id, "mode": mode, "condition": cond, "check": name, "preset": preset,
+                       "sky_cut": sky, "value": value, "threshold": threshold, "pass": passed, **extra})
+
+    for name in RESCUE_PRESETS:
+        p, p0 = metrics.get(name), metrics.get(f"{name}_hr0")
+        if not p or not p0:
+            continue
+        c, c0 = _num(p.get("clip8_any")), _num(p0.get("clip8_any"))
+        applicable = math.isfinite(c0) and c0 >= PRESET_CLIP_MIN
+        add(1, "hr_clip8_lt_hr0", name, c - c0 if math.isfinite(c) and math.isfinite(c0) else float("nan"),
+            f"clip8(P) < clip8(P_hr0)（P_hr0 ≥ {PRESET_CLIP_MIN} のとき）", (c < c0) if applicable and math.isfinite(c) else None,
+            clip8=c, clip8_hr0=c0)
+        m, src = _roi_value(p, "mid_p50", "p50_luma")
+        m0, _ = _roi_value(p0, "mid_p50", "p50_luma")
+        diff = m - m0
+        add(2, "hr_mid_p50_vs_hr0", name, diff, f"|Δ| ≤ {MID_P50_TOL}", abs(diff) <= MID_P50_TOL if math.isfinite(diff) else None,
+            source=src)
+        f, fsrc = _roi_value(p, "fg_p01", "p01_luma")
+        f0, _ = _roi_value(p0, "fg_p01", "p01_luma")
+        fd = f - f0
+        add(3, "hr_fg_p01_vs_hr0", name, fd, f"≥ {FG_P01_DROP_MAX}", fd >= FG_P01_DROP_MAX if math.isfinite(fd) else None,
+            source=fsrc)
+        mg = _num(p.get("magenta_rate"))
+        add(4, "magenta_rate", name, mg, f"≤ {MAGENTA_RATE_MAX}（preview。原寸は記録のみ）",
+            (mg <= MAGENTA_RATE_MAX) if (mode == "preview" and math.isfinite(mg)) else None)
+        cb = _num(base.get("clip8_any"))
+        mb, _ = _roi_value(base, "mid_p50", "p50_luma")
+        md = m - mb
+        ok = (c < cb and abs(md) <= MID_P50_TOL) if all(math.isfinite(v) for v in (c, cb, md)) else None
+        add(5, "dbase_clip8_and_mid", name, md, f"clip8 < d_base かつ |mid_p50 − d_base| ≤ {MID_P50_TOL}", ok,
+            clip8=c, clip8_base=cb)
+    # 6: 個性の方向（d_base 比）
+    for name, decl in PRESET_DIRECTIONS.items():
+        p = metrics.get(name)
+        if not p:
+            continue
+        for key, sign in decl:
+            v, vb = _num(p.get(key)), _num(base.get(key))
+            if sign == 0:
+                add(6, f"direction_{key}_zero", name, v, f"≤ {PRESET_MONO_SAT_MAX}", v <= PRESET_MONO_SAT_MAX if math.isfinite(v) else None)
+                continue
+            delta = v - vb
+            add(6, f"direction_{key}", name, delta, "+" if sign > 0 else "−",
+                direction_match(float(sign), delta) if math.isfinite(delta) else None)
+    # 7: ノイズ（実効 lift ≥ 40 × ISO ≥ 1600）
+    iso_v = _num(iso)
+    for preset in presets:
+        name = preset["name"]
+        p = metrics.get(name)
+        if not p:
+            continue
+        _, lift = effective_exposure_lift(preset["adjustments"])
+        if lift < PRESET_NOISE_LIFT_MIN:
+            continue
+        ratio = _num(p.get("flat_noise")) / _num(base.get("flat_noise")) if _num(base.get("flat_noise")) > 0 else float("nan")
+        applicable = math.isfinite(iso_v) and iso_v >= PRESET_NOISE_ISO_MIN
+        add(7, "noise_vs_dbase", name, ratio, f"≤ {PRESET_NOISE_RATIO_MAX}（ISO ≥ {PRESET_NOISE_ISO_MIN}）",
+            (ratio <= PRESET_NOISE_RATIO_MAX) if applicable and math.isfinite(ratio) else None, effective_lift=lift, iso=iso)
+    return checks
+
+
+def preset_check_summary(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """§7.4 の合否（純粋）。1〜5 は空の 10 カット（preview）で数え、2・3 は 9/10、5 は 8/10、1・4 は該当すべて。
+    6・7 は全カットの該当すべて。サンプルが 0 件の条件は pass=None（未実施）。"""
+    rules = {1: ("all", True), 2: (PRESET_MID_FRACTION, True), 3: (PRESET_FG_FRACTION, True), 4: ("all", True),
+             5: (PRESET_DBASE_FRACTION, True), 6: ("all", False), 7: ("all", False)}
+    out: list[dict[str, Any]] = []
+    keys = sorted({(c["condition"], c["preset"]) for c in checks})
+    for cond, preset in keys:
+        need, sky_only = rules[cond]
+        rows = [c for c in checks if c["condition"] == cond and c["preset"] == preset and c["mode"] == "preview"
+                and (c["sky_cut"] or not sky_only)]
+        decided = [c for c in rows if c["pass"] is not None]
+        passed = sum(1 for c in decided if c["pass"])
+        if not decided:
+            verdict = None
+        elif need == "all":
+            verdict = passed == len(decided)
+        else:
+            verdict = passed >= math.ceil(float(need) * len(decided) - 1e-9)
+        out.append({"condition": cond, "preset": preset, "rule": "all" if need == "all" else f"≥ {need:.0%}",
+                    "scope": "sky 10" if sky_only else "all", "pass_n": passed, "decided_n": len(decided),
+                    "n_a": len(rows) - len(decided), "pass": verdict,
+                    "failed": sorted({f"{c['capture_id']}:{c['check']}" for c in decided if not c["pass"]})})
+    return out
+
+
+def equivalence_compare(a01: np.ndarray, b01: np.ndarray, applied_a: dict[str, Any], applied_b: dict[str, Any]) -> dict[str, Any]:
+    """§2.2: 2 枚の tiff16 と applied の一致（純粋）。"""
+    same_shape = a01.shape == b01.shape
+    diff = float(np.abs(a01 - b01).max()) if same_shape else float("nan")
+    applied_equal = json.dumps(applied_a, sort_keys=True) == json.dumps(applied_b, sort_keys=True)
+    return {"max_abs_diff": diff, "applied_equal": applied_equal, "pass": bool(same_shape and diff == 0.0 and applied_equal)}
+
+
+def preset_variant_metrics(
+    rgb8: np.ndarray,
+    camera: dict[str, Any],
+    align: dict[str, dict[str, Any]],
+    base8: np.ndarray | None,
+) -> dict[str, Any]:
+    """1 バリアントの指標（§7.3）。camera はカメラ JPEG 由来の基準（マスク・ROI・エッジ）。"""
+    rgb01 = rgb8.astype(np.float32) / 255.0
+    row: dict[str, Any] = {}
+    full = image_metrics(rgb8)
+    row.update({k: full[k] for k in ("p01_luma", "p50_luma", "p99_luma", "clip_high_any", "flat_noise", "mean_saturation")})
+    row.update(image_variant_metrics(rgb01, rgb8 >= 255, 255, align, camera["ref"]))
+    row.update(adjustment_image_metrics(rgb8, camera["neutral"], camera["dark"]))
+    row["flat_noise"] = full["flat_noise"]
+    gray = cv2.cvtColor(rgb8, cv2.COLOR_RGB2GRAY)
+    row.update(edge_width_vs_camera(camera["edge"], camera["gray"], gray))
+    if base8 is not None and base8.shape == rgb8.shape:
+        row["de76_vs_base"] = delta_e76(rgb8, base8)
+    return row
+
+
+def presets_sheet_columns(preset: str, available: Iterable[str]) -> list[str]:
+    """シートの列（§8）: d_base | 新プリセット | 同 hr 0 | 追加候補 | 旧 rawpy（純粋）。"""
+    have = set(available)
+    cols = ["d_base", preset, f"{preset}_hr0"]
+    cols += [v for v, (base, _o, _l) in PRESET_EXTRA_CANDIDATES.items() if base == preset]
+    cols.append(f"rawpy_{preset}")
+    return [c for c in cols if c in have]
+
+
+def presets_sheets(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    images: dict[str, np.ndarray],
+    rois: dict[str, tuple[int, int, int, int] | None],
+    align: dict[str, dict[str, Any]],
+    metrics: dict[str, dict[str, Any]],
+    labels: dict[str, str],
+) -> list[str]:
+    """プリセットごとのシート ``sheets/<ID>_<preset>[_full].jpg``。EXIF・位置情報は付けない。書いたパスを返す。"""
+    written: list[str] = []
+    base = images.get("d_base")
+    if base is None:
+        return written
+    th, tw = base.shape[:2]
+    overview = fit_size(tw, th, 400)
+    gray = cv2.cvtColor(base, cv2.COLOR_RGB2GRAY)
+    detail = detail_box(gray, max(64, int(round(ROI_FRACTION * max(tw, th)))))
+    crop_box = (align.get("cloud_grad") or {}).get("box") or (align.get("midtone") or {}).get("box") or detail
+    crop_name = "cloud_grad" if (align.get("cloud_grad") or {}).get("box") else ("midtone" if (align.get("midtone") or {}).get("box") else "detail")
+    fg_box = (align.get("fg_dark") or {}).get("box")
+    presets = [v for v in metrics if v not in ("d_base",) and not v.startswith("rawpy_")
+               and not v.endswith("_hr0") and v not in PRESET_EXTRA_CANDIDATES]
+    suffix = "" if mode == "preview" else "_full"
+    for preset in presets:
+        columns = presets_sheet_columns(preset, images)
+        if preset not in columns:
+            continue
+        rows = []
+        panels = []
+        for v in columns:
+            m = metrics.get(v, {})
+            note = " *other base" if v.startswith("rawpy_") else ""
+            text = (f"{labels.get(v, v)}{note}\nclip {_num(m.get('clip8_any')) * 100:.2f}%  mid {_num(m.get('mid_p50')):.3f}  "
+                    f"fg_p1 {_num(m.get('fg_p01')):.3f}")
+            panels.append((text, resize_to(images[v], overview)))
+        rows.append(labeled_row(panels, f"{capture_id} {mode} {preset}"))
+        for roi_name, box in ((crop_name, crop_box), ("fg_dark", fg_box)):
+            if box is None:
+                continue
+            crops = []
+            for v in columns:
+                img = images[v]
+                vbox = box
+                if v.startswith("rawpy_"):
+                    # rawpy は幾何が違う（レンズ補正の実装差）ので、d_base → rawpy の平行移動で箱をずらす。
+                    key = roi_name if roi_name in DIAG_ROI_NAMES else "midtone"
+                    a = align_rois(cv2.cvtColor(base, cv2.COLOR_RGB2GRAY), cv2.cvtColor(img, cv2.COLOR_RGB2GRAY),
+                                   {key: box}, box[2] - box[0])
+                    vbox = (a.get(key) or {}).get("box") or box
+                crops.append((v, _crop(img, vbox)))
+            rows.append(labeled_row(crops, f"{roi_name} 1:1"))
+        width = max(r.shape[1] for r in rows)
+        padded = [np.pad(r, ((0, 8), (0, width - r.shape[1]), (0, 0)), constant_values=24) for r in rows]
+        path = ctx.out / "sheets" / f"{capture_id}_{preset}{suffix}.jpg"
+        save_plain_jpeg(np.concatenate(padded, axis=0), path, quality=92)
+        written.append(str(path))
+    return written
+
+
+def presets_capture(
+    ctx: RunContext,
+    capture_id: str,
+    mode: str,
+    features: dict[str, Any],
+    presets: list[dict[str, Any]],
+    *,
+    with_rawpy: bool = True,
+    workers: int = 4,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """1 カット・1 mode: 現像 → 指標 → §7.4 の判定 → シート。(metric_rows, check_rows, sheet_paths)。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    specs = preset_variant_specs(presets, mode)
+    ci_kw = {"decoder_version": "9", "profile": "apple_default"}
+    engine_rows: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        jobs = {v: pool.submit(run_coreimage, ctx, capture_id, mode, True, variant=f"ps_{v}", adjustments=s["adjustments"], **ci_kw)
+                for v, s in specs.items()}
+        if with_rawpy and mode == "preview":
+            for preset in presets:
+                jobs[f"rawpy_{preset['name']}"] = pool.submit(run_rawpy, ctx, capture_id, mode, preset=preset["name"])
+        engine_rows = {v: f.result() for v, f in jobs.items()}
+    labels = {v: s["label"] for v, s in specs.items()}
+    labels.update({f"rawpy_{p['name']}": f"rawpy {p['name']} legacy" for p in presets})
+    camera_full = read_rgb_upright(source_file(ctx.source_root, capture_id, "JPG"))
+    ch, cw = camera_full.shape[:2]
+    target = fit_size(cw, ch, ctx.max_edge) if mode == "preview" else (cw, ch)
+    cam8 = resize_to(camera_full, target)
+    images: dict[str, np.ndarray] = {}
+    for v, row in engine_rows.items():
+        if row.get("error"):
+            continue
+        try:
+            rgb8, row["fit"] = fit_to_target(read_rgb_upright(Path(row["output"])), target)
+            images[v] = rgb8
+        except Exception as error:  # noqa: BLE001 — 1 バリアントの読み込み失敗は欠測にする
+            row["error"] = f"load failed: {type(error).__name__}: {error}"
+    roi_size = max(8, int(round(ROI_FRACTION * max(target))))
+    rois, _info = diagnosis_rois(cam8, roi_size)
+    cam_gray = cv2.cvtColor(cam8, cv2.COLOR_RGB2GRAY)
+    camera = {"ref": camera_reference(cam8, rois), "neutral": neutral_tile_mask(cam8), "dark": dark_pixel_mask(cam8),
+              "edge": edge_reference(cam_gray), "gray": cam_gray}
+    base8 = images.get("d_base")
+    # CI のバリアントは d_base と同じ幾何（lens ON・同じ scale）なので位置合わせは 1 回だけ取る。rawpy は別に取る。
+    ci_align = align_rois(cam_gray, cv2.cvtColor(base8, cv2.COLOR_RGB2GRAY), rois, roi_size) if base8 is not None else identity_alignment(rois)
+    metrics: dict[str, dict[str, Any]] = {}
+    for v, rgb8 in images.items():
+        align = ci_align if not v.startswith("rawpy_") else align_rois(cam_gray, cv2.cvtColor(rgb8, cv2.COLOR_RGB2GRAY), rois, roi_size)
+        metrics[v] = preset_variant_metrics(rgb8, camera, align, base8 if not v.startswith("rawpy_") else None)
+    checks = preset_capture_checks(capture_id, mode, metrics, features.get("iso"), presets)
+    sheets = presets_sheets(ctx, capture_id, mode, images, rois, ci_align, metrics, labels)
+    base_info = {"capture_id": capture_id, "mode": mode, "iso": features.get("iso"), "sky_cut": capture_id in PRESET_SKY_IDS,
+                 "width": target[0], "height": target[1]}
+    rows = []
+    for v in [*specs, *(k for k in engine_rows if k.startswith("rawpy_"))]:
+        if v not in engine_rows:
+            continue
+        spec = specs.get(v, {})
+        adj = spec.get("adjustments") or {}
+        row = {**base_info, "variant": v, "preset": spec.get("preset") or (v[len("rawpy_"):] if v.startswith("rawpy_") else None),
+               "kind": spec.get("kind") or "rawpy_legacy", "engine": "rawpy" if v.startswith("rawpy_") else "coreimage",
+               **{f"adj_{k}": adj.get(k) for k in ("exposure", "shadow_lift", "highlight_recovery") if adj},
+               **engine_rows[v], **metrics.get(v, {})}
+        if v in engine_rows and v not in metrics and not row.get("error"):
+            row["error"] = "no image"
+        rows.append(row)
+    return rows, checks, sheets
+
+
+def presets_equivalence(ctx: RunContext, capture_id: str) -> list[dict[str, Any]]:
+    """§7.4 の 9（§2.2）: 1 カットで {0, 0, hr} と {ev, lift, 0} の tiff16 sRGB と applied が一致するか。"""
+    ci_kw = {"decoder_version": "9", "profile": "apple_default", "output_format": "tiff16", "output_color_space": "srgb"}
+    rows = []
+    for name, via_hr, direct in equivalence_requests():
+        a = run_coreimage(ctx, capture_id, "preview", True, variant=f"eq_{name}_hr", adjustments=via_hr, **ci_kw)
+        b = run_coreimage(ctx, capture_id, "preview", True, variant=f"eq_{name}_direct", adjustments=direct, **ci_kw)
+        row: dict[str, Any] = {"capture_id": capture_id, "pair": name, "via_hr": via_hr, "direct": direct}
+        if a.get("error") or b.get("error"):
+            row.update({"error": a.get("error") or b.get("error"), "pass": False})
+        else:
+            pa, pb = _read_response(a), _read_response(b)
+            row.update(equivalence_compare(read_tiff16_rgb(Path(a["output"])), read_tiff16_rgb(Path(b["output"])),
+                                           pa.get("applied") or {}, pb.get("applied") or {}))
+            row["post_shadow_lift"] = [(pa.get("adjustments_applied") or {}).get("post", {}).get("shadow_lift"),
+                                       (pb.get("adjustments_applied") or {}).get("post", {}).get("shadow_lift")]
+        rows.append(row)
+    return rows
+
+
+def presets_index_md(out: Path, sheets: list[str], check_summary_rows: list[dict[str, Any]], equivalence: list[dict[str, Any]]) -> str:
+    """index.md: オーナーに見せる組（§8）とシートのパス、自動判定の要約。"""
+    have = {Path(p).name: p for p in sheets}
+    lines = ["# --presets（#81）見るシート", "", f"出力: `{out}`", "",
+             "列: d_base（CI 既定）| 新プリセット（CI）| 同 hr 0（hr > 0 のとき）| 追加候補 | 旧 rawpy プリセット（参考）。"
+             "`*other base` は rawpy の明るさの基準が違う（auto_bright、カメラ比 −0.13）ことを示す。"
+             "行: 全景（長辺 400px）/ cloud_grad・midtone・detail のいずれかの等倍 / fg_dark の等倍。", "",
+             "| 組 | シート | 見るポイント |", "|---|---|---|"]
+    for group, pairs, point in PRESET_OWNER_GROUPS:
+        paths = []
+        for cid, preset in pairs:
+            for name in (f"{cid}_{preset}.jpg", f"{cid}_{preset}_full.jpg"):
+                if name in have:
+                    paths.append(f"`sheets/{name}`")
+        lines.append(f"| {group} | {'<br>'.join(paths) if paths else '（該当カットなし）'} | {point} |")
+    lines += ["", "## §7.4 の自動判定", "", "| # | preset | 範囲 | 規則 | 合格 / 判定 | n/a | 結果 | 不合格 |", "|---|---|---|---|---|---|---|---|"]
+    for c in check_summary_rows:
+        verdict = "—（未判定）" if c["pass"] is None else ("合格" if c["pass"] else "不合格")
+        lines.append(f"| {c['condition']} | {c['preset']} | {c['scope']} | {c['rule']} | {c['pass_n']} / {c['decided_n']} | {c['n_a']} | {verdict} | {', '.join(c['failed'])} |")
+    lines += ["", "## §2.2 の等価性（条件 9）", "", "| カット | 組 | max abs diff | applied 一致 | 結果 |", "|---|---|---|---|---|"]
+    for e in equivalence:
+        lines.append(f"| {e['capture_id']} | {e['pair']} | {e.get('max_abs_diff')} | {e.get('applied_equal')} | {'合格' if e.get('pass') else '不合格'} |")
+    return "\n".join(lines) + "\n"
+
+
+def presets_plan(ctx: RunContext, capture_ids: list[str], full_ids: list[str]) -> list[dict[str, Any]]:
+    """--presets で投げる CI リクエストの一覧（純粋。CLI は呼ばない）。--dry-run で書き出して契約を検査する。"""
+    presets = load_ci_presets()
+    plan: list[dict[str, Any]] = []
+    jobs = [(cid, "preview") for cid in capture_ids] + [(cid, "full") for cid in full_ids]
+    for cid, mode in jobs:
+        arw = source_file(ctx.source_root, cid, "ARW")
+        for variant, spec in preset_variant_specs(presets, mode).items():
+            out = coreimage_output_path(ctx, cid, mode, True, variant=f"ps_{variant}")
+            request = coreimage_request(arw, out, mode, True, decoder_version="9", profile="apple_default",
+                                        max_edge=ctx.max_edge, adjustments=spec["adjustments"])
+            plan.append({"capture_id": cid, "mode": mode, "variant": variant, "request": request,
+                         "problems": validate_adjustments_request(request) if spec["adjustments"] is not None else []})
+    return plan
+
+
+def presets_dry_run(ctx: RunContext, capture_ids: list[str], full_ids: list[str]) -> None:
+    plan = presets_plan(ctx, capture_ids, full_ids)
+    (ctx.out / "presets_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    problems = [p for p in plan if p["problems"]]
+    ctx.say(f"[presets] dry-run: {len(plan)} リクエスト、契約違反 {len(problems)} 件 → {ctx.out / 'presets_plan.json'}")
+
+
+def run_presets(
+    ctx: RunContext,
+    selection: list[dict[str, Any]],
+    features_by_id: dict[str, dict[str, Any]],
+    full_ids: list[str],
+    *,
+    with_rawpy: bool = True,
+    environment: dict[str, Any] | None = None,
+) -> None:
+    """--presets 本体（設計書 §7.3〜§8）: preview を全カット、full を指定カットで回し、判定とシートを出す。"""
+    presets = load_ci_presets()
+    started = time.monotonic()
+    rows: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    sheets: list[str] = []
+    jobs = [(r["capture_id"], "preview") for r in selection] + [(cid, "full") for cid in full_ids]
+    for index, (cid, mode) in enumerate(jobs, 1):
+        ctx.say(f"[presets] ({index}/{len(jobs)}) {cid} {mode}")
+        try:
+            r, c, s = presets_capture(ctx, cid, mode, features_by_id[cid], presets, with_rawpy=with_rawpy)
+            rows += r
+            checks += c
+            sheets += s
+            for row in r:
+                if row.get("error"):
+                    ctx.say(f"  ERROR {row['variant']}: {str(row['error'])[:300]}")
+        except Exception as error:  # noqa: BLE001 — 1 カットの失敗で全体を止めない
+            rows.append({"capture_id": cid, "mode": mode, "variant": "harness", "error": f"{type(error).__name__}: {error}"})
+            ctx.say(f"  ERROR {type(error).__name__}: {error}")
+        write_rows_csv(ctx.out / "metrics.csv", rows, ("capture_id", "mode", "variant"))
+        if checks:
+            write_rows_csv(ctx.out / "checks.csv", checks, ("capture_id", "mode", "condition", "preset", "check", "pass"))
+    equivalence = presets_equivalence(ctx, selection[0]["capture_id"]) if selection else []
+    summary_checks = preset_check_summary(checks)
+    errors = [{k: r.get(k) for k in ("capture_id", "mode", "variant", "error")} for r in rows if r.get("error")]
+    errors += [{"capture_id": e["capture_id"], "variant": f"eq_{e['pair']}", "error": e["error"]} for e in equivalence if e.get("error")]
+    by_variant = summarize_sharpness([r for r in rows if r.get("mode") == "preview"], PRESET_TABLE_KEYS, ("variant",))
+    by_variant_sky = summarize_sharpness([r for r in rows if r.get("mode") == "preview" and r.get("sky_cut")], PRESET_TABLE_KEYS, ("variant",))
+    payload = {
+        "out": str(ctx.out),
+        "environment": environment or {},
+        "presets_json": str(CI_PRESETS_JSON.relative_to(PROJECT_ROOT)),
+        "presets": presets,
+        "hr_nodes": [list(n) for n in HR_NODES],
+        "variants": {v: {k: s[k] for k in ("preset", "adjustments", "label", "kind")} for v, s in preset_variant_specs(presets).items()},
+        "captures": [{"capture_id": cid, "sky_cut": cid in PRESET_SKY_IDS, **{k: features_by_id[cid].get(k) for k in (
+            "iso", "exposure_time", "f_number", "focal_length", "lens_model", "orientation")}} for cid in features_by_id],
+        "full_ids": full_ids,
+        "thresholds": {
+            "mid_p50_tol": MID_P50_TOL, "fg_p01_drop_max": FG_P01_DROP_MAX, "magenta_rate_max": MAGENTA_RATE_MAX,
+            "clip_min": PRESET_CLIP_MIN, "mid_fraction": PRESET_MID_FRACTION, "fg_fraction": PRESET_FG_FRACTION,
+            "dbase_fraction": PRESET_DBASE_FRACTION, "noise_lift_min": PRESET_NOISE_LIFT_MIN,
+            "noise_iso_min": PRESET_NOISE_ISO_MIN, "noise_ratio_max": PRESET_NOISE_RATIO_MAX, "mono_sat_max": PRESET_MONO_SAT_MAX,
+        },
+        "directions": {k: [list(x) for x in v] for k, v in PRESET_DIRECTIONS.items()},
+        "elapsed_total_s": time.monotonic() - started,
+        "errors": errors,
+        "check_summary": summary_checks,
+        "equivalence": equivalence,
+        "sheets": sheets,
+    }
+    (ctx.out / "summary.json").write_text(json.dumps(_jsonable(payload), ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    md = "## preview（全カット、バリアント別の中央値）\n\n" + table_md(by_variant, ("variant",), PRESET_TABLE_KEYS, digits=4)
+    md += "\n## preview（空の 10 カット）\n\n" + table_md(by_variant_sky, ("variant",), PRESET_TABLE_KEYS, digits=4)
+    (ctx.out / "tables.md").write_text(md, encoding="utf-8")
+    (ctx.out / "index.md").write_text(presets_index_md(ctx.out, sheets, summary_checks, equivalence), encoding="utf-8")
+    (ctx.out / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    n_fail = sum(1 for c in summary_checks if c["pass"] is False)
+    ctx.say(f"[presets] 完了: {ctx.out}（エラー {len(errors)} 件、不合格の条件 {n_fail} 件、シート {len(sheets)} 枚）")
+
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="rawpy と Core Image CLI を同じ ARW 群で比較します。")
     parser.add_argument("--source-root", type=Path, required=True)
@@ -5594,6 +6205,12 @@ def main(argv: list[str] | None = None) -> None:
         "--diagnosis", action="store_true",
         help="Core Image の白飛びの段階別診断（#92）: CFA 飽和・段階読み出し・ROI 帰属・タスク C 候補。CLI 0.4.0 以上が必要",
     )
+    parser.add_argument(
+        "--presets", action="store_true",
+        help="プリセット再調整の評価（#81）: CI 値（src-tauri/tests/fixtures/presets.json）の 11 プリセット・hr 0 比・"
+             "d_base 比・§2.2 の等価性・シート。CLI 0.6.0 以上が必要",
+    )
+    parser.add_argument("--presets-no-rawpy", action="store_true", help="--presets で rawpy の legacy プリセット（参考列）を省く")
     parser.add_argument("--keep-dumps", action="store_true", help="--diagnosis の float ダンプ（.f32）を指標の計算後も残す")
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -5611,6 +6228,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--worker-out", help=argparse.SUPPRESS)
     parser.add_argument("--worker-nosharp", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-adjustments", help=argparse.SUPPRESS)  # 既定プリセットへの上書き（JSON オブジェクト）
+    parser.add_argument("--worker-preset", help=argparse.SUPPRESS)  # rawpy のプリセット名（--presets の legacy 参考）
     args = parser.parse_args(argv)
 
     if args.worker_noop:
@@ -5697,6 +6315,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.diagnosis and args.dry_run:
         diagnosis_dry_run(ctx, [r["capture_id"] for r in selection], diagnosis_full_ids)
         return
+    presets_full_ids: list[str] = []
+    if args.presets:
+        presets_full_ids = [validate_capture_id(c) for c in (args.full_ids or [])] if args.full else []
+        if args.full and not args.full_ids:
+            presets_full_ids = [cid for cid in PRESET_FULL_IDS if cid in features_by_id]
+        unknown = sorted(set(presets_full_ids) - set(features_by_id))
+        if unknown:
+            raise SystemExit(f"--full-ids は選定済みのカットから指定してください: {', '.join(unknown)}")
+    if args.presets and args.dry_run:
+        presets_dry_run(ctx, [r["capture_id"] for r in selection], presets_full_ids)
+        return
     if args.dry_run:
         return
 
@@ -5708,6 +6337,15 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"--adjustments を実行できません: {problem}")
         run_adjustments(ctx, selection, features_by_id)
         if not (args.sharpness or args.night or args.highlight or args.bracket):
+            return
+    if args.presets:
+        version, capabilities = cli_probe(ctx.cli, "--version"), cli_probe(ctx.cli, "--capabilities")
+        problem = presets_cli_problem(version, capabilities)
+        if problem:
+            raise SystemExit(f"--presets を実行できません: {problem}")
+        env = environment_info(ctx, None)
+        run_presets(ctx, selection, features_by_id, presets_full_ids, with_rawpy=not args.presets_no_rawpy, environment=env)
+        if not (args.diagnosis or args.sharpness or args.night or args.highlight or args.bracket):
             return
     if args.diagnosis:
         version, capabilities = cli_probe(ctx.cli, "--version"), cli_probe(ctx.cli, "--capabilities")

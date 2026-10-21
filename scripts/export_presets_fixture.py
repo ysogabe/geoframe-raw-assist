@@ -1,14 +1,17 @@
-"""プリセット定義の一致フィクスチャ `src-tauri/tests/fixtures/presets.json` を書き出す（Issue #80）。
+"""rawpy（Python）のプリセット表の写し `tests/fixtures/presets_legacy_rawpy.json` を書き出す（Issue #80 / #81）。
 
-プリセット表と Adjustments の値域は、移行期間中 Python（`local_raw/presets.py`）と
-Rust（`src-tauri/src/presets.rs` / `adjustments.rs`）の両方にある。定義の正は Rust 側だが、
-両者がずれないようにこのフィクスチャを介して 3 か所をテストで突き合わせる。
+#81 でフィクスチャを 2 本に分けた（設計書 docs/design/coreimage-preset-retune.md §6）:
 
-- Python: `tests/test_presets_fixture.py`（`preset_infos()` / `ADJUSTMENT_RANGES` と一致するか）
-- Rust:   `presets.rs` の `#[cfg(test)]`（`preset_infos()` / `ADJUSTMENT_RANGES` と一致するか）
-- TS:     `src/lib/format.test.ts`（`SLIDER_SPECS` の min/max と一致するか）
+- `src-tauri/tests/fixtures/presets.json` … Core Image 向けの値（正は Rust `src-tauri/src/presets.rs`）。
+  Rust のテストが一致を検証し、フロント `src/lib/format.test.ts` が値域を読む。再生成は Rust 側
+  （`UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`）。
+- `tests/fixtures/presets_legacy_rawpy.json` … **このスクリプトが書く**。rawpy の本現像・書き出しが使う
+  `local_raw/presets.py` の値（移行完了 #90 まで旧値のまま）。
 
-再生成（プリセットの値を意図して変えたとき。Python と Rust の両方を同じ値に直してから実行する）:
+数値は意図して違う。名前・ラベル・説明・並び・キー構成・値域・NR の選択肢の一致は
+`tests/test_presets_fixture.py` が 2 本を突き合わせて守る（契約 docs/API_CONTRACT.md §5 の凍結）。
+
+再生成（presets.py の値を意図して変えたとき）:
 
     .venv/bin/python scripts/export_presets_fixture.py --write
 
@@ -25,7 +28,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FIXTURE_PATH = REPO_ROOT / "src-tauri" / "tests" / "fixtures" / "presets.json"
+FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "presets_legacy_rawpy.json"
+#: Core Image 向けの値（正は Rust）。構造の突き合わせにだけ使う（このスクリプトは書かない）。
+CI_FIXTURE_PATH = REPO_ROOT / "src-tauri" / "tests" / "fixtures" / "presets.json"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -65,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     current = FIXTURE_PATH.read_text(encoding="utf-8") if FIXTURE_PATH.is_file() else ""
     if current != text:
-        print(f"{FIXTURE_PATH.relative_to(REPO_ROOT)} が presets.py と一致しません（--write で再生成）", file=sys.stderr)
+        print(f"{FIXTURE_PATH.relative_to(REPO_ROOT)} が local_raw/presets.py と一致しません（--write で再生成）", file=sys.stderr)
         return 1
     print("ok")
     return 0

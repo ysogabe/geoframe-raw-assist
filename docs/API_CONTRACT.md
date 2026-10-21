@@ -519,7 +519,7 @@ Adjustments = {
   exposure: number,           // EV -2.0..+2.0 → rawpy bright = 2**ev（exp_shift は1.0）
   wb_temp: number,            // -100..100。camera_whitebalance の R/B ゲインをスケールし user_wb へ
   shadow_lift: number,        // 0..100。8bit LUTと同じ式をfloat32 (0..1)へ連続適用（JPEG化前）
-  highlight_recovery: number, // 0..100 → Clip / Blend / ReconstructDefault の3段階
+  highlight_recovery: number, // 0..100。rawpy: Clip / Blend / ReconstructDefault の3段階。Core Image（CLI 0.6.0、#81）: exposure / shadow_lift へ写像して加算
   brightness: number,         // 0.7..1.4  (float32 RGB配列を倍率適用)
   contrast: number,           // 0.8..1.4
   saturation: number,         // 0.0..1.5  (0 = モノクロ)
@@ -538,6 +538,10 @@ Adjustments = {
   （t=0 のときは従来どおり `use_camera_wb=True`）
 - `highlight_recovery` → rawpy の `HighlightMode` へ離散マッピングする。`hr<=0` は `Clip`、
   `0<hr<75` は `Blend`、`hr>=75` は `ReconstructDefault`（75境界を含む）。
+  Core Image（プレビュー、CLI 0.6.0、#81）では区分線形の写像 `0 → (0EV, 0)`・`60 → (−0.7EV, +40)`・
+  `90 → (−1.0EV, +55)`・`100 → (−1.1EV, +60)` を `exposure` / `shadow_lift` に**加算**する（lift は 100 で頭打ち）。
+  `{exposure 0, shadow_lift 0, hr 60}` と `{−0.7, 40, hr 0}` は同じ画。詳細は `native/coreimage-cli/README.md`・
+  [`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §2・§3。
 - `shadow_lift` → 本番経路では256エントリLUTを使わず、8bit LUTと同じ式を float32 (0..1) へ
   連続適用する（JPEG化前）。
 - `brightness` → float32 RGB配列へ `image *= brightness` の倍率適用（最終クリップは後段）。
@@ -681,11 +685,39 @@ outputs/
 > `src-tauri/src/presets.rs`、値域（§2）と検証・正規化は `src-tauri/src/adjustments.rs` が持つ。
 > デスクトップアプリの UI は Tauri コマンド `get_presets`（戻り値は `PresetInfo[]`）から一覧を取り、
 > ブラウザモードと取得失敗時だけ `GET /api/health` の `presets` を使う。
-> Python の表（`local_raw/presets.py` の `PRESETS` / `ADJUSTMENT_RANGES`）は**移行完了まで同じ値を保つ**。
-> 一致はフィクスチャ `src-tauri/tests/fixtures/presets.json` で担保する（Python の
-> `tests/test_presets_fixture.py`、Rust の `presets.rs` のテスト、フロントの `src/lib/format.test.ts`
-> が同じファイルと突き合わせる。片方だけ変えるとどれかが落ちる）。値を変えるときは Python と Rust の
-> 両方を直してから `.venv/bin/python scripts/export_presets_fixture.py --write` で再生成する。
+
+> **#81（2026-10-22）で数値を Core Image 向けに再調整し、Python と分けた。**
+> - **Rust（Core Image プレビュー）** … 下の「CI 値」。`apple_default`・decoder 9・レンズ補正 ON の既定（`d_base`）を基準に、
+>   非救済の 8 プリセットは `highlight_recovery` 0（= CI 既定 + 後段の個性）、hr > 0 は救済系 3 プリセットだけ。
+>   フィクスチャ `src-tauri/tests/fixtures/presets.json`（Rust のテストが一致を検証。再生成は
+>   `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`）。
+> - **Python（rawpy の本現像・書き出し、ブラウザモード）** … 下の「legacy 値」のまま（rawpy 取りやめ #90 まで）。
+>   フィクスチャ `tests/fixtures/presets_legacy_rawpy.json`（`.venv/bin/python scripts/export_presets_fixture.py --write`）。
+> - 数値は意図して違う。name / label / description / 並び / キー構成 / 値域 / NR の選択肢の一致は
+>   `tests/test_presets_fixture.py` が 2 本を突き合わせて守る（キー構成と name の凍結は変えない）。
+> - プレビュー（CI・新値）と書き出し（rawpy・旧値）は見え方もプリセット値も違う。オーナー判断で受容（#90 で解消）。
+>   overrides は「触ったキーの絶対値」で両方の表に重なるので、基準値が違うキー（例 `highlight_rescue` の `shadow_lift`
+>   CI 0 / rawpy 15）では同じスライダー操作でプレビューと書き出しの動く向きが逆になりうる。
+> - CI 値は設計書 [`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §7.2 の初期案。ハーネスでの
+>   計測と目視（§7.3〜§8）は未完（[`coreimage-preset-retune-report.md`](coreimage-preset-retune-report.md)）。
+
+**CI 値（Rust、Core Image プレビュー）。** 右端は `highlight_recovery` を写像して加算した実効値。
+
+| name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction | 実効 (EV, lift) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `neutral_recovery` | 階調回復 | 0.0 | 0 | 15 | 0 | 1.0 | 1.03 | 1.02 | 1.04 | light | (0, 15) |
+| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 0 | 1.0 | 1.10 | 1.08 | 1.15 | light | (0, 10) |
+| `nightscape` | 夜景ノイズ低減 | 0.0 | -3 | 15 | 0 | 1.0 | 1.04 | 1.0 | 1.02 | full | (0, 15) |
+| `sunset_glow` | 夕景・マジックアワー | 0.0 | 12 | 8 | 60 | 1.0 | 1.05 | 1.07 | 1.03 | light | (−0.7, 48) |
+| `indoor_warm` | 室内・料理 | 0.1 | 5 | 18 | 0 | 1.0 | 1.02 | 1.03 | 1.02 | light | (+0.1, 18) |
+| `portrait_soft` | 人物・柔らか | 0.0 | 3 | 12 | 0 | 1.0 | 0.98 | 1.0 | 0.96 | light | (0, 12) |
+| `monochrome_street` | モノクロ | 0.0 | 0 | 10 | 0 | 1.0 | 1.08 | 0.0 | 1.04 | light | (0, 10) |
+| `highlight_rescue` | 白飛び救済 | 0.0 | 0 | 0 | 90 | 1.0 | 1.0 | 1.0 | 1.02 | light | (−1.0, 55) |
+| `shadow_rescue` | 黒つぶれ救済 | 0.0 | 0 | 45 | 0 | 1.0 | 1.0 | 1.0 | 1.01 | full | (0, 45) |
+| `backlit_rescue` | 逆光 | 0.0 | 0 | 30 | 60 | 1.0 | 1.0 | 1.02 | 1.02 | light | (−0.7, 70) |
+| `vivid_travel` | ビビッド | 0.0 | 0 | 10 | 0 | 1.0 | 1.07 | 1.10 | 1.05 | light | (0, 10) |
+
+**legacy 値（Python、rawpy）。** #81 以前の表のまま。
 
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction |
 |---|---|---|---|---|---|---|---|---|---|---|

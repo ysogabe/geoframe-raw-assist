@@ -107,6 +107,23 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 - 撮影 ID・手順・閾値は [比較レポート §16](coreimage-engine-comparison.md)（昼 6 + 星空 3 カットで全チェック合格が基準。閾値は `scripts/compare_engines.py` の `ADJ_*`）。
 - 後段オラクル（tiff16 sRGB、ΔE76 中央値・チャンネル差 p99）、方向・単調、NR full の星の残存率・空の高周波、白点（`impulse_vs_full` ≤ 10）、処理時間が見える。
 - 不合格は、写像の定数（`MIRED_PER_UNIT`、NR の `fullLuminanceCap` など）の較正か、指標の見直しかを §16.3 の分類（目安が非現実的 / 定数の較正 / 実装のバグ / rawpy 側の基準差）で判断する。
+- CLI 0.6.0（#81）からは `adjustments_ignored_empty`（`ignored` が空）がチェックに入る。オラクル `or_preset` は CI 値（`src-tauri/tests/fixtures/presets.json`）の既定プリセットを hr 0 で使う。
+
+### 3.5 プリセットと `highlight_recovery` の写像の確認（CLI 0.6.0 以降。数十分）
+
+`highlight_recovery` の写像の節点（hr 60 / 90）は macOS 27.0.1 の `apple_default` で計測した C1' に結び付いている。OS が `apple_default` のトーンを変えると、
+写像の効き（白飛びの減り・中間調）とプリセットの見え方がずれうる。3.1 で `applied` に差があった場合に `--presets` モードを回す。
+
+```sh
+.venv/bin/python scripts/compare_engines.py --source-root <ARW のフォルダ> \
+  --captures DSC04473 DSC04607 DSC04532 DSC04705 DSC04579 DSC04604 DSC04754 DSC04432 DSC04746 DSC04462 \
+             DSC04670 DSC04651 DSC04872 DSC04430 DSC04453 \
+  --presets --full --out work/regression/$(sw_vers -productVersion)/presets
+# 夜景 3 カットは別フォルダ: --captures DSC07415 DSC07407 DSC07402 --presets
+```
+
+- 見るもの: `index.md` の §2.2 の等価性（条件 9。tiff16 の max abs diff 0 と `applied` の一致）と、救済系 3 プリセットの条件 1〜5（hr 0 比で白飛びが減り、中間調 ±0.03）。
+- 手順・閾値・合否の定義は [再調整の設計書](design/coreimage-preset-retune.md) §7.4、結果の記録は [再調整レポート](coreimage-preset-retune-report.md)。
 
 ## 4. 記録
 

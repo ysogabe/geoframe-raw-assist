@@ -40,7 +40,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.5.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.6.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
@@ -52,12 +52,13 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.5.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"adjustments":{"ignored":[],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.6.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
 `supported_decoder_versions` が埋まる（渡さなければキー自体が出ない）。
 `diagnostics` は下記「診断モード」（0.4.0）の対応状況と `post_filters` の許可リスト。
+`adjustments.ignored` は 0.5.0 まで `["highlight_recovery"]`、0.6.0（#81）から `[]`（フィールドは残す）。
 
 ## アプリからの使い方（Issue #65 PR2、#72/#73 で既定に）
 
@@ -193,10 +194,26 @@ draft mode は常に OFF。
 | `exposure` | `CIRAWFilter.exposure`（EV、1:1） | デコード |
 | `wb_temp` (v) | `K0` = 読み戻した撮影時 WB の色温度。`mired = 1e6/K0 − v × 0.85`、`K = clamp(1e6/mired, 2000, 50000)` → `neutralTemperature`。tint は触らない。v = 0 は書かない。係数 0.85 はハーネスで確認済み（rawpy の ±60 と同じ大きさ。比較レポート §16）。`K0` が有限でない・2000..50000 の外なら写像を飛ばし `adjustments_applied.guards` に `"wb_k0_out_of_range"` を記録する | デコード |
 | `shadow_lift` (v) | `x + (v/100)·2.0·x·(1−x)²` → [0,1] クリップ（rawpy `_apply_shadow_lift_array`） | 後段 |
-| `highlight_recovery` | **受理するが効かせない**（no-op、`adjustments_applied.ignored`。代替は #81） | — |
+| `highlight_recovery` (hr) | 0.6.0（#81）から有効。区分線形の写像 `hr → (ΔEV, Δlift)` を `exposure` と `shadow_lift` に**加算**する（下記「highlight_recovery の写像」）。デコード段・後段はこの実効値で動く | デコード + 後段 |
 | `brightness` / `contrast` / `saturation` | `x·b` → `(x−0.5)·c+0.5` → Rec.709 輝度 Y 基準 `Y + (x−Y)·s`（rawpy `_apply_tone_array`。途中はクリップしない） | 後段 |
 | `sharpness` (s) | s < 1: `sharpnessAmount = 既定 × s`。s = 1: 既定のまま。s > 1: 既定のまま + 後段の輝度 USM（増分だけ: `gain = min(1.2, baseGain × (s−1) × 1.5) × ISO 減衰`）。σ・baseGain・コアリング・ISO 減衰は rawpy `_capture_sharpen_params` の定数をそのまま移植（長辺は出力 extent の長辺、ISO は EXIF。不明ならコアリング 0.5/255・減衰なし） | デコード + 後段 |
 | `noise_reduction` | off: 輝度・色 NR とも 0。light: apple_default の既定のまま。full: `輝度 = max(既定, min(0.5, max(既定 + 0.3, 0.3)))`（既定が 0.5 を超える高 ISO では既定のまま）、`色 = max(既定, 0.3)`（上限 0.5 はハーネスの輝度 NR 掃引で確定。比較レポート §16） | デコード |
+
+#### highlight_recovery の写像（CLI 0.6.0、Issue #81）
+
+設計は [`docs/design/coreimage-preset-retune.md`](../../docs/design/coreimage-preset-retune.md) §2・§3。実装は `Adjustments.swift: HighlightRecoveryMapping`。
+
+| hr | ΔEV | Δlift | 根拠 |
+|---|---|---|---|
+| 0 | 0 | 0 | 恒等 |
+| 60 | −0.7 | 40 | #92 で承認した C1'（診断レポート §5.1） |
+| 90 | −1.0 | 55 | C1' 強め |
+| 100 | −1.1 | 60 | 60→90 の傾きで外挿（未計測） |
+
+- 節点間は線形補間。節点では表の値をそのまま返す（例 hr 30 → (−0.35, 20)、70 → (−0.8, 45)）。
+- 合成は加算: `exposure_eff = exposure + ΔEV`、`lift_eff = clamp(shadow_lift + Δlift, 0, 100)`。後段へは `lift_eff / 100` を [0, 1] に止めて渡す。
+- 等価性（契約）: `{exposure 0, shadow_lift 0, hr 60}` と `{exposure −0.7, shadow_lift 40, hr 0}` は同じ画（`applied.exposure`・`post.shadow_lift`・出力のバイト列が一致）。90 ↔ (−1.0, 55) も同じ。
+- 応答 `adjustments_applied.highlight_recovery` に `{value, exposure_delta, shadow_lift_delta, effective_exposure, effective_shadow_lift（0..100）, shadow_lift_clamped}` を記録する。
 
 #### noise_reduction の表（apple_default v9・macOS 27.0.1）
 
@@ -227,7 +244,7 @@ decoder 9 は「輝度 NR 0 ∧ sharpness 0 ∧ scaleFactor < 1」のときだ�
   `CIConvolution9Horizontal` / `Vertical` で掛ける。`CIGaussianBlur` は inputRadius ≈ σ で階段エッジの幅は合うが、
   σ 0.6〜0.8 では高周波の応答が離散ガウスと違い、乱数パッチで最大 10/255 ずれたため（単体テストで確認）。それより大きい σ は `CIGaussianBlur`。
 - 作業フォーマットは half float（RGBAh）。単体テストで numpy 式との差は tone 段 ≤ 1.5/255、USM 込み ≤ 3/255。
-- 恒等の adjustments（exposure 0、wb_temp 0、shadow_lift 0、brightness・contrast・saturation・sharpness 1、light）は filter に何も書かず、
+- 恒等の adjustments（exposure 0、wb_temp 0、shadow_lift 0、highlight_recovery 0、brightness・contrast・saturation・sharpness 1、light）は filter に何も書かず、
   後段もほぼ素通し（16bit sRGB TIFF で既定リクエストとの差 最大 0.23/255）。
 
 ### 診断モード（CLI 0.4.0、Issue #92）
@@ -338,13 +355,14 @@ stdout には JSON 1 行だけを書く（`--batch` では応答 1 件につき 
   - `post`: 後段に実際に使った値。`shadow_lift`（0..1）/ `brightness` / `contrast` / `saturation` /
     `usm: {sigma, gain, coring, long_edge, iso}`（`iso` は不明なら null）/
     `wb: {k0, mired_shift, mired_per_unit}`（`mired_shift` はクランプ後の実効値 `1e6/K − 1e6/K0`。wb_temp > 0 で負）/ `noise_reduction`
-  - `ignored`: 受理したが効かせなかったキー（`["highlight_recovery"]`）
+  - `highlight_recovery`: hr の写像と合成の結果（0.6.0。上記「highlight_recovery の写像」）
+  - `ignored`: 受理したが効かせなかったキー（0.6.0 から `[]`。0.5.0 までは `["highlight_recovery"]`）
   - `guards`: 発動したガード（例 `["white_dot_sharpness_floor"]`）
 
-  例（DSC07415・ISO 3200、`wb_temp` 20・`sharpness` 1.3・`shadow_lift` 15）:
+  例（DSC07415・ISO 3200、`wb_temp` 20・`sharpness` 1.3・`shadow_lift` 15・`highlight_recovery` 60）:
 
   ```json
-  "adjustments_applied":{"defaults":{"color_noise_reduction_amount":0,"luminance_noise_reduction_amount":0.24097165,"neutral_temperature":4353.8257,"neutral_tint":8.204875,"sharpness_amount":1},"guards":[],"ignored":["highlight_recovery"],"post":{"brightness":1,"contrast":1.03,"noise_reduction":"light","saturation":1.02,"shadow_lift":0.15,"usm":{"coring":0.00392156862745098,"gain":0.12150000000000002,"iso":3200,"long_edge":2400,"sigma":0.64},"wb":{"k0":4353.8257,"mired_per_unit":0.85,"mired_shift":-17}}}
+  "adjustments_applied":{"defaults":{"color_noise_reduction_amount":0,"luminance_noise_reduction_amount":0.24097165,"neutral_temperature":4353.8257,"neutral_tint":8.204875,"sharpness_amount":1},"guards":[],"highlight_recovery":{"effective_exposure":-0.7,"effective_shadow_lift":55,"exposure_delta":-0.7,"shadow_lift_clamped":false,"shadow_lift_delta":40,"value":60},"ignored":[],"post":{"brightness":1,"contrast":1.03,"noise_reduction":"light","saturation":1.02,"shadow_lift":0.55,"usm":{"coring":0.00392156862745098,"gain":0.12150000000000002,"iso":3200,"long_edge":2400,"sigma":0.64},"wb":{"k0":4353.8257,"mired_per_unit":0.85,"mired_shift":-17}}}
   ```
 - `diagnostics`: **`diagnostics` を指定したときだけ**出る（上記「診断モード」）。省略時はキー自体が無い。
 - `elapsed_ms.decode`: フィルタ生成〜`outputImage` 取得。Core Image は遅延評価なので、実際の

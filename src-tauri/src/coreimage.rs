@@ -138,7 +138,8 @@ pub struct CoreImagePreviewResult {
     pub adjustments: Value,
     /// CLI の `applied` そのまま。
     pub applied: Value,
-    /// CLI 0.3.0 のトップレベル `adjustments_applied`（defaults / post / ignored / guards）
+    /// CLI 0.3.0 のトップレベル `adjustments_applied`（defaults / post / ignored / guards。0.6.0 から
+    /// highlight_recovery の実効値 `highlight_recovery` が増え、`ignored` は空配列）
     /// そのまま。CLI が返さなければ（0.2.0 など）null。§4.3 の `applied` のコメントと §4.2 の
     /// 食い違いは §4.2 を正とし、このフィールドを足す（メイン決定 2026-10-20）。
     pub adjustments_applied: Value,
@@ -2853,7 +2854,7 @@ exit 0"#,
         let script = format!(
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  printf '%s\n' '{{"cli_version":"0.3.0","engine":"coreimage","macos_version":"27.0.1","ok":true}}'
+  printf '%s\n' '{{"cli_version":"0.6.0","engine":"coreimage","macos_version":"27.0.1","ok":true}}'
   exit 0
 fi
 echo run >> '{calls}'
@@ -2869,7 +2870,7 @@ out=$(printf '%s' "$req" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
     }
 
     const MOCK_OK: &str = r#"printf 'JPEGDATA' > "$out"
-printf '{"ok":true,"cli_version":"0.3.0","macos_version":"27.0.1","decoder_version":"9","mode":"preview","format":"jpeg","output":"%s","width":2400,"height":1600,"elapsed_ms":{"decode":1.0,"render_encode":2.0,"total":3.0},"applied":{"profile":"apple_default","lens_correction_enabled":true,"sharpness_amount":1},"adjustments_applied":{"defaults":{"sharpness_amount":1.0},"post":{"shadow_lift":0.15},"ignored":["highlight_recovery"],"guards":[]},"source":{"lens_model":"E 16mm F2.8","iso":3200,"camera_model":"ILCE-6400"},"request":%s}\n' "$out" "$req""#;
+printf '{"ok":true,"cli_version":"0.6.0","macos_version":"27.0.1","decoder_version":"9","mode":"preview","format":"jpeg","output":"%s","width":2400,"height":1600,"elapsed_ms":{"decode":1.0,"render_encode":2.0,"total":3.0},"applied":{"profile":"apple_default","lens_correction_enabled":true,"sharpness_amount":1},"adjustments_applied":{"defaults":{"sharpness_amount":1.0},"post":{"shadow_lift":0.55},"highlight_recovery":{"value":60.0,"exposure_delta":-0.7,"shadow_lift_delta":40.0,"effective_exposure":-0.7,"effective_shadow_lift":55.0,"shadow_lift_clamped":false},"ignored":[],"guards":[]},"source":{"lens_model":"E 16mm F2.8","iso":3200,"camera_model":"ILCE-6400"},"request":%s}\n' "$out" "$req""#;
 
     const MOCK_FAIL: &str = r#"printf '%s\n' '{"ok":false,"error":{"code":"RENDER_FAILED","message":"boom"}}'
 exit 1"#;
@@ -2943,14 +2944,16 @@ exit 1"#;
         assert_eq!(calls(bin.path()), 1);
         assert_eq!((first.width, first.height), (2400, 1600));
         assert_eq!(first.params_hash.len(), 16);
-        assert_eq!(first.cli_version, "0.3.0");
+        assert_eq!(first.cli_version, "0.6.0");
         assert_eq!(first.macos_version, "27.0.1");
         assert_eq!(first.decoder_version, "9");
         assert_eq!(first.adjustments, adjustments);
         assert_eq!(first.applied["profile"], json!("apple_default"));
+        // CLI 0.6.0（#81）: highlight_recovery は写像で効くので ignored は空、実効値がそのまま届く。
+        assert_eq!(first.adjustments_applied["ignored"], json!([]));
         assert_eq!(
-            first.adjustments_applied["ignored"],
-            json!(["highlight_recovery"])
+            first.adjustments_applied["highlight_recovery"]["effective_exposure"],
+            json!(-0.7)
         );
         assert_eq!(first.source["iso"], json!(3200));
         assert_eq!(first.elapsed_ms["total"], json!(3.0));
@@ -3247,10 +3250,11 @@ exit 1"#;
                 assert!(!with_adj.cache_hit);
                 assert_ne!(with_adj.params_hash, first.params_hash);
                 assert_eq!(with_adj.width.max(with_adj.height), 2400);
-                assert_eq!(
-                    with_adj.adjustments_applied["ignored"],
-                    json!(["highlight_recovery"])
-                );
+                // CLI 0.6.0（#81）から ignored は空配列（hr は exposure / shadow_lift へ写像して加算）。
+                assert_eq!(with_adj.adjustments_applied["ignored"], json!([]));
+                let hr = &with_adj.adjustments_applied["highlight_recovery"];
+                let expected_hr = adjustments["highlight_recovery"].as_f64().unwrap();
+                assert_eq!(hr["value"].as_f64(), Some(expected_hr));
                 assert!(with_adj.adjustments_applied["post"].is_object());
                 assert!(run(Some(&adjustments)).unwrap().cache_hit);
                 let mut changed = adjustments.clone();

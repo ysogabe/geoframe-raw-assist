@@ -59,7 +59,11 @@ export type Adjustments = {
   wb_temp: number;
   /** 0..100。256エントリLUT（下半分中心の持ち上げ） */
   shadow_lift: number;
-  /** 0..100 → exp_preserve_highlights 0.4..1.0、>=75 で HighlightMode.Reconstruct */
+  /**
+   * 0..100。rawpy: exp_preserve_highlights 0.4..1.0、>=75 で HighlightMode.Reconstruct（明るさは変えない）。
+   * Core Image（CLI 0.6.0、#81）: 区分線形の写像 0 → (0EV, 0)、60 → (−0.7EV, +40)、90 → (−1.0EV, +55)、
+   * 100 → (−1.1EV, +60) を exposure / shadow_lift に加算する（露出を下げて暗部を戻す）。
+   */
   highlight_recovery: number;
   /** 0.7..1.4 (ImageEnhance.Brightness) */
   brightness: number;
@@ -293,6 +297,21 @@ export type DevelopedResult = {
    * Tauri の Core Image プレビューでは "coreimage" が入る。
    */
   engine?: DevelopEngine;
+  /**
+   * Core Image で highlight_recovery を exposure / shadow_lift へ写像した結果（凍結後の任意フィールド追加、#81）。
+   * CLI 応答 `adjustments_applied.highlight_recovery` の写し。rawpy・CLI 0.5.0 以前では未設定。
+   */
+  highlight_recovery_effect?: HighlightRecoveryEffect;
+};
+
+/** highlight_recovery の写像と合成の結果（CLI 0.6.0、#81）。lift はスライダー単位（0..100）。 */
+export type HighlightRecoveryEffect = {
+  value: number;
+  exposure_delta: number;
+  shadow_lift_delta: number;
+  effective_exposure: number;
+  effective_shadow_lift: number;
+  shadow_lift_clamped: boolean;
 };
 
 /** 現像エンジン（凍結後の追加、#72）。 */

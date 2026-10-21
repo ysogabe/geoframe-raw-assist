@@ -1,8 +1,16 @@
 //! プリセット 11 種の定義表と Adjustments の解決（Issue #80）。
 //!
-//! 定義の正はこのモジュール。`local_raw/presets.py`（`PRESETS` / `preset_infos()`）は移行完了まで
-//! 同じ値を保ち、一致はフィクスチャ `tests/fixtures/presets.json` で担保する（下のテストと
-//! Python の `tests/test_presets_fixture.py`、フロントの `src/lib/format.test.ts` が同じファイルを読む）。
+//! 定義の正はこのモジュール（Core Image 向けの値）。数値は #81 で `apple_default`・decoder 9・
+//! レンズ補正 ON 向けに再調整した（設計書 `docs/design/coreimage-preset-retune.md` §4・§7.2）。
+//! `local_raw/presets.py` は rawpy（本現像・書き出し）向けの旧値のまま残す（移行完了 #90 まで。
+//! プレビューと書き出しの値の差はオーナー判断で受容、設計書 §11）。
+//!
+//! フィクスチャは 2 本（設計書 §6）:
+//! - `tests/fixtures/presets.json` … **この表の写し**（CI 値）。下のテストが `Value` で突き合わせ、
+//!   フロントの `src/lib/format.test.ts`（値域）とハーネス `scripts/compare_engines.py --presets` が読む。
+//!   再生成: `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`（src-tauri で）。
+//! - `tests/fixtures/presets_legacy_rawpy.json`（リポジトリ直下）… Python の旧値の写し。名前・並び・キー構成・
+//!   値域の一致は Python の `tests/test_presets_fixture.py` が 2 本を突き合わせて守る（数値は違ってよい）。
 //! 契約は `docs/API_CONTRACT.md` §2（型と値域）・§5（プリセット表）・§9（resolve の規則）。
 //! 設計の背景は `docs/design/coreimage-feature-migration.md` §3.1。
 //!
@@ -13,8 +21,11 @@
 //!   検証・正規化（`normalize_adjustments`。未知キー拒否・クランプ・float 化）。
 //!   `resolve_adjustments` は最後に必ず `normalize_adjustments` を通すので、規則は 1 か所にしかない。
 //!
-//! 数値は #80 では一切変えない（再調整は #81）。値を変えるときは Python 側も同じ値に直し、
-//! `scripts/export_presets_fixture.py --write` でフィクスチャを作り直すこと。
+//! `highlight_recovery`（hr）は CLI 0.6.0 で `exposure` / `shadow_lift` への区分線形の写像として**加算**される
+//! （設計書 §2・§3）。非救済の 8 プリセットは hr 0（= CI 既定 + 後段の個性）、hr > 0 は
+//! `highlight_rescue` / `backlit_rescue` / `sunset_glow` だけ（案 B、オーナー判断 2026-10-22）。
+//! 値は設計書 §7.2 の初期案で、ハーネスの計測（§7.3〜7.5）は未実施（サンプルのボリューム未マウント、
+//! `docs/coreimage-preset-retune-report.md`）。
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -41,14 +52,14 @@ struct PresetDef {
     noise_reduction: &'static str,
 }
 
-/// 契約 §5 の表と 1 対 1 対応（`presets.py: PRESETS` と同じ順・同じ値）。
+/// 契約 §5 の表と 1 対 1 対応（`presets.py: PRESETS` と同じ順。数値は #81 で CI 向けに再調整し、Python とは違う）。
 /// 数値はすべて f64 リテラルで書く（JSON で 15 と 15.0 を区別するため）。
 const PRESETS: [PresetDef; 11] = [
     PresetDef {
         name: "neutral_recovery",
         label: "階調回復",
         description: "自然な明暗差を保つ標準仕上げ",
-        numbers: [0.0, 0.0, 15.0, 60.0, 1.0, 1.03, 1.02, 1.04],
+        numbers: [0.0, 0.0, 15.0, 0.0, 1.0, 1.03, 1.02, 1.04],
         noise_reduction: "light",
     },
     PresetDef {
@@ -56,70 +67,73 @@ const PRESETS: [PresetDef; 11] = [
         label: "風景クリア",
         description: "遠景の輪郭と色をくっきりさせる",
         // カメラ内JPEGの輪郭感に合わせた軽い輝度シャープ。色差は増幅しない。
-        numbers: [0.0, 0.0, 10.0, 55.0, 1.0, 1.10, 1.08, 1.15],
+        numbers: [0.0, 0.0, 10.0, 0.0, 1.0, 1.10, 1.08, 1.15],
         noise_reduction: "light",
     },
     PresetDef {
         name: "nightscape",
         label: "夜景ノイズ低減",
         description: "高ISO夜景のノイズを抑え暗部を持ち上げる",
-        numbers: [0.0, -3.0, 15.0, 55.0, 1.0, 1.04, 1.0, 1.02],
+        numbers: [0.0, -3.0, 15.0, 0.0, 1.0, 1.04, 1.0, 1.02],
         noise_reduction: "full",
     },
     PresetDef {
         name: "sunset_glow",
         label: "夕景・マジックアワー",
         description: "夕焼けの暖色を強め空の階調を守る",
-        numbers: [-0.1, 12.0, 8.0, 70.0, 1.0, 1.05, 1.07, 1.03],
+        // 実効 (−0.7EV, lift 48) = C1' 標準 + 8。旧 −0.1EV は写像の ΔEV と二重になるので 0（設計書 §7.2）。
+        numbers: [0.0, 12.0, 8.0, 60.0, 1.0, 1.05, 1.07, 1.03],
         noise_reduction: "light",
     },
     PresetDef {
         name: "indoor_warm",
         label: "室内・料理",
         description: "室内照明の暖かさを残し料理を明るく見せる",
-        numbers: [0.1, 5.0, 18.0, 55.0, 1.0, 1.02, 1.03, 1.02],
+        numbers: [0.1, 5.0, 18.0, 0.0, 1.0, 1.02, 1.03, 1.02],
         noise_reduction: "light",
     },
     PresetDef {
         name: "portrait_soft",
         label: "人物・柔らか",
         description: "肌を滑らかに見せる柔らかいコントラスト",
-        numbers: [0.0, 3.0, 12.0, 60.0, 1.0, 0.98, 1.0, 0.96],
+        numbers: [0.0, 3.0, 12.0, 0.0, 1.0, 0.98, 1.0, 0.96],
         noise_reduction: "light",
     },
     PresetDef {
         name: "monochrome_street",
         label: "モノクロ",
         description: "彩度を落としコントラストで見せる白黒仕上げ",
-        numbers: [0.0, 0.0, 10.0, 60.0, 1.0, 1.08, 0.0, 1.04],
+        numbers: [0.0, 0.0, 10.0, 0.0, 1.0, 1.08, 0.0, 1.04],
         noise_reduction: "light",
     },
     PresetDef {
         name: "highlight_rescue",
         label: "白飛び救済",
         description: "飛びかけた空や光源の階調を最大限引き戻す",
-        numbers: [-0.3, 0.0, 15.0, 90.0, 1.0, 1.0, 1.0, 1.02],
+        // 実効 (−1.0EV, lift 55) = #92 で承認した C1' 強め。旧 −0.3 / 15 のままだと (−1.3, 70)（設計書 §11-4）。
+        numbers: [0.0, 0.0, 0.0, 90.0, 1.0, 1.0, 1.0, 1.02],
         noise_reduction: "light",
     },
     PresetDef {
         name: "shadow_rescue",
         label: "黒つぶれ救済",
         description: "つぶれた暗部を大きく持ち上げ、増えるノイズを抑える",
-        numbers: [0.0, 0.0, 45.0, 65.0, 1.0, 1.0, 1.0, 1.01],
+        numbers: [0.0, 0.0, 45.0, 0.0, 1.0, 1.0, 1.0, 1.01],
         noise_reduction: "full",
     },
     PresetDef {
         name: "backlit_rescue",
         label: "逆光",
         description: "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
-        numbers: [0.0, 0.0, 50.0, 80.0, 1.0, 1.0, 1.02, 1.02],
+        // 実効 (−0.7EV, lift 70) = C1' 標準 + 被写体向けの lift 30。旧 50 / hr 80 のままだと lift 100 で頭打ち。
+        numbers: [0.0, 0.0, 30.0, 60.0, 1.0, 1.0, 1.02, 1.02],
         noise_reduction: "light",
     },
     PresetDef {
         name: "vivid_travel",
         label: "ビビッド",
         description: "旅の記録向けに色を鮮やかに強調する",
-        numbers: [0.0, 0.0, 10.0, 55.0, 1.0, 1.07, 1.10, 1.05],
+        numbers: [0.0, 0.0, 10.0, 0.0, 1.0, 1.07, 1.10, 1.05],
         noise_reduction: "light",
     },
 ];
@@ -220,9 +234,53 @@ mod tests {
     use crate::adjustments::NOISE_REDUCTION_CHOICES;
     use serde_json::json;
 
-    /// Python の `preset_infos()` / `ADJUSTMENT_RANGES` から書き出したフィクスチャ。
-    /// 再生成: `.venv/bin/python scripts/export_presets_fixture.py --write`（リポジトリ直下で）。
+    /// この表（CI 値）の写し。再生成は下の `write_presets_fixture`（#[ignore]）。
     const FIXTURE: &str = include_str!("../tests/fixtures/presets.json");
+    const FIXTURE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/presets.json");
+
+    /// フィクスチャの中身（プリセット表・値域・NR 選択肢）。
+    fn fixture_payload() -> Value {
+        let ranges: Map<String, Value> = ADJUSTMENT_RANGES
+            .iter()
+            .map(|(key, minimum, maximum)| (key.to_string(), json!([minimum, maximum])))
+            .collect();
+        json!({
+            "presets": serde_json::to_value(preset_infos()).unwrap(),
+            "adjustment_ranges": Value::Object(ranges),
+            "noise_reduction_choices": json!(NOISE_REDUCTION_CHOICES),
+        })
+    }
+
+    /// `tests/fixtures/presets.json` を書き出す（値を意図して変えたときだけ）。
+    /// `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`
+    #[test]
+    #[ignore]
+    fn write_presets_fixture() {
+        if std::env::var("UPDATE_PRESETS_FIXTURE").as_deref() != Ok("1") {
+            eprintln!("UPDATE_PRESETS_FIXTURE=1 のときだけ書き出す");
+            return;
+        }
+        let text = serde_json::to_string_pretty(&fixture_payload()).unwrap() + "\n";
+        std::fs::write(FIXTURE_PATH, text).expect("presets.json を書けること");
+    }
+
+    #[test]
+    fn fixture_payload_round_trips() {
+        assert_eq!(fixture_payload(), fixture());
+    }
+
+    #[test]
+    fn highlight_recovery_only_on_rescue_presets() {
+        // 案 B（設計書 §4、オーナー判断 2026-10-22）: hr > 0 は救済系 3 プリセットだけ。
+        for info in preset_infos() {
+            let hr = info.adjustments["highlight_recovery"].as_f64().unwrap();
+            let rescue = matches!(
+                info.name,
+                "highlight_rescue" | "backlit_rescue" | "sunset_glow"
+            );
+            assert_eq!(hr > 0.0, rescue, "{} の hr = {hr}", info.name);
+        }
+    }
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("presets.json が読めること")
@@ -233,14 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn preset_infos_match_python_fixture_exactly() {
+    fn preset_infos_match_fixture_exactly() {
         // Value 同士の比較: 配列（プリセットの並び）は順序込み、数値は 15 と 15.0 を区別する。
         let rust = serde_json::to_value(preset_infos()).unwrap();
         assert_eq!(rust, fixture()["presets"]);
     }
 
     #[test]
-    fn adjustment_ranges_match_python_fixture_exactly() {
+    fn adjustment_ranges_match_fixture_exactly() {
         let ranges: Map<String, Value> = ADJUSTMENT_RANGES
             .iter()
             .map(|(key, minimum, maximum)| (key.to_string(), json!([minimum, maximum])))

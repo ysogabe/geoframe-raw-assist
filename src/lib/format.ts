@@ -3,6 +3,7 @@ import type {
   AnalysisStage,
   DevelopedResult,
   GroupKind,
+  HighlightRecoveryEffect,
   MergedResult,
   PhotoInfo,
   RawLevel,
@@ -140,7 +141,7 @@ export const SLIDER_SPECS: SliderSpec[] = [
   { key: "exposure", label: "露出", min: -2, max: 2, step: 0.1, digits: 1, hint: "EV" },
   { key: "wb_temp", label: "色温度", min: -100, max: 100, step: 1, digits: 0, hint: "青 ←→ 暖" },
   { key: "shadow_lift", label: "暗部の持ち上げ", min: 0, max: 100, step: 1, digits: 0, hint: "0〜100" },
-  { key: "highlight_recovery", label: "ハイライト回復", min: 0, max: 100, step: 1, digits: 0, hint: "0〜100" },
+  { key: "highlight_recovery", label: "ハイライト回復", min: 0, max: 100, step: 1, digits: 0, hint: "露出を下げて暗部を戻す" },
   { key: "brightness", label: "明るさ", min: 0.7, max: 1.4, step: 0.01, digits: 2, hint: "倍率" },
   { key: "contrast", label: "コントラスト", min: 0.8, max: 1.4, step: 0.01, digits: 2, hint: "倍率" },
   { key: "saturation", label: "彩度", min: 0, max: 1.5, step: 0.01, digits: 2, hint: "0 でモノクロ" },
@@ -164,6 +165,21 @@ export function formatAdjustmentValue(key: keyof Adjustments, adjustments: Adjus
   const spec = SLIDER_SPECS.find((item) => item.key === key);
   const value = adjustments[key];
   return spec ? value.toFixed(spec.digits) : String(value);
+}
+
+/**
+ * Core Image で highlight_recovery が実際にどう効いたか（#81）。hr 0 や情報が無いときは null（表示しない）。
+ * 例: 「ハイライト回復 90（露出 −1.0 EV / 暗部 +55 として適用。実効 露出 −1.0 EV / 暗部 55）」
+ */
+export function formatHighlightRecoveryEffect(effect: HighlightRecoveryEffect | undefined): string | null {
+  if (!effect || !(effect.value > 0)) return null;
+  const signed = (value: number, digits: number) => `${value < 0 ? "−" : "+"}${Math.abs(value).toFixed(digits)}`;
+  const ev = (value: number) => (Math.abs(value) < 0.005 ? "0.0" : signed(value, 1));
+  const lift = `${Math.round(effect.effective_shadow_lift)}${effect.shadow_lift_clamped ? "（上限）" : ""}`;
+  return (
+    `ハイライト回復 ${Math.round(effect.value)}（露出 ${ev(effect.exposure_delta)} EV / 暗部 ${signed(effect.shadow_lift_delta, 0)} として適用。` +
+    `実効 露出 ${ev(effect.effective_exposure)} EV / 暗部 ${lift}）`
+  );
 }
 
 /** 現像結果のレンズ補正バッジ用のテキスト。 */

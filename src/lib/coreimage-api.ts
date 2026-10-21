@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./setup";
-import type { Adjustments, CaptureId, DevelopedResult, DevelopEngine, PresetInfo } from "./types";
+import type { Adjustments, CaptureId, DevelopedResult, DevelopEngine, HighlightRecoveryEffect, PresetInfo } from "./types";
 
 /**
  * Core Image プレビュー現像（Issue #72 / #73）。Python エンジンを経由せず、Tauri(Rust) が
@@ -37,6 +37,8 @@ export type CoreImagePreviewResult = {
   applied: { lens_correction_enabled?: boolean; [key: string]: unknown };
   /** CLI の source（lens_model / iso / camera_model）。 */
   source: { lens_model?: string | null; iso?: number | null; camera_model?: string | null; [key: string]: unknown };
+  /** CLI の adjustments_applied そのまま（0.6.0 から highlight_recovery の実効値を含む）。古い CLI では null。 */
+  adjustments_applied?: { highlight_recovery?: unknown; [key: string]: unknown } | null;
 };
 
 /** Rust 側 `CoreImageError`。CLI の error.code / message もそのまま入る。 */
@@ -70,6 +72,22 @@ export async function developPreviewCoreImage(
  */
 export { resolveAdjustments } from "./app-state";
 
+/** `adjustments_applied.highlight_recovery` を読む。形が崩れていれば undefined（表示を出さないだけ）。 */
+export function readHighlightRecoveryEffect(value: unknown): HighlightRecoveryEffect | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  const keys = ["value", "exposure_delta", "shadow_lift_delta", "effective_exposure", "effective_shadow_lift"] as const;
+  if (!keys.every((key) => typeof v[key] === "number" && Number.isFinite(v[key]))) return undefined;
+  return {
+    value: v.value as number,
+    exposure_delta: v.exposure_delta as number,
+    shadow_lift_delta: v.shadow_lift_delta as number,
+    effective_exposure: v.effective_exposure as number,
+    effective_shadow_lift: v.effective_shadow_lift as number,
+    shadow_lift_clamped: v.shadow_lift_clamped === true,
+  };
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] || path;
@@ -83,6 +101,7 @@ export function toDevelopedResult(result: CoreImagePreviewResult, preset: Preset
   const lensApplied = result.applied?.lens_correction_enabled === true;
   const lens = result.source?.lens_model ?? undefined;
   const totalMs = result.elapsed_ms?.total ?? 0;
+  const highlightRecovery = readHighlightRecoveryEffect(result.adjustments_applied?.highlight_recovery);
   return {
     capture_id: result.capture_id,
     preset: preset.name,
@@ -105,6 +124,7 @@ export function toDevelopedResult(result: CoreImagePreviewResult, preset: Preset
     // asset プロトコル。ハッシュがファイル名に入るのでキャッシュバスターは不要。
     output_url: convertFileSrc(result.output_path),
     engine: "coreimage",
+    ...(highlightRecovery ? { highlight_recovery_effect: highlightRecovery } : {}),
   };
 }
 

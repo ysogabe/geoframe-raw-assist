@@ -295,7 +295,7 @@ return float4(clamp(s.rgb + d * gain, 0, 1), s.a);
 | `brightness` / `contrast` / `saturation` | そのまま `geoframe_tone` | 契約の値域 | `post.brightness` 等 |
 | `sharpness` (s) | s ≤ 1: `filter.sharpnessAmount = defaults.sharpnessAmount × s`、USM gain 0。s > 1: sharpnessAmount は既定のまま、USM: `sigma, baseGain, coring = captureSharpenParams(longEdge, iso)`（rawpy の定数を移植。長辺は `extent` の長辺）、`gain = min(1.2, baseGain × (s − 1) × 1.5) × isoMult`。ISO は `filter.properties` の EXIF（不明なら coring 0.5/255、減衰なし） | 0.8..1.6 | `sharpness_amount`、`post.usm.{sigma,gain,coring,long_edge,iso}` |
 | `noise_reduction` | off: `(0, 0)`。light: 既定のまま（null）。full: `lum = max(defaults.lum, min(0.5, max(defaults.lum + 0.3, 0.3)))`（既定が 0.5 を超えるときは既定のまま。full < light を防ぐ）、`color = max(defaults.color, 0.3)`（上限 0.5 は T5 で確定。比較レポート §16.4） | 0..1 | `luminance_noise_reduction_amount`、`color_noise_reduction_amount` |
-| `highlight_recovery` | 何もしない | — | `ignored: ["highlight_recovery"]` |
+| `highlight_recovery` | 何もしない（0.5.0 まで）。**#81（CLI 0.6.0）で `exposure` / `shadow_lift` への区分線形の写像に置き換え**（[設計書](coreimage-preset-retune.md) §2・§3） | — | 0.5.0: `ignored: ["highlight_recovery"]`、0.6.0: `ignored: []` + `adjustments_applied.highlight_recovery` |
 
 `noise_reduction` の ISO 帯別の表（`apple_default` v9、macOS 27.0.1 の既定値から。T5 で上限 0.5 に確定済み。CLI README にも同じ表がある）:
 
