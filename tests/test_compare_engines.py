@@ -1302,6 +1302,41 @@ class DiagnosisRoiTests(unittest.TestCase):
         self.assertIsNone(rois["clip_edge"])
         self.assertIsNone(rois["cloud_grad"])
 
+    @staticmethod
+    def _cloud_scene(colored_rgb: tuple[int, int, int], gray_cloud: bool = True) -> np.ndarray:
+        """左半分に起伏の強い有彩色の明るい被写体、右半分に起伏の弱い灰色の雲（帯 0.6〜0.98 に入る明るさ）。"""
+        h, w = 240, 480
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = np.full((h, w, 3), 30, np.float32)  # 暗い背景（帯の外）
+        stripes = ((xx // 6) % 2).astype(np.float32)
+        base = np.array(colored_rgb, np.float32)
+        left = base[None, None, :] * (0.85 + 0.15 * stripes[..., None])  # 大きな起伏
+        img[:, : w // 2] = left[:, : w // 2]
+        if gray_cloud:
+            g = 200 + 8 * np.sin(xx / 15.0)  # 小さな起伏の灰色
+            img[:, w // 2:] = np.repeat(g[..., None], 3, axis=2)[:, w // 2:]
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def test_cloud_grad_prefers_low_saturation(self):
+        # 青い被写体（HSV S ≈ 0.4、L 0.65〜0.76 で帯に入る）は起伏が大きくても cloud_grad にしない
+        cam = self._cloud_scene((150, 200, 255))
+        rois, info = ce.diagnosis_rois(cam, 60)
+        self.assertTrue(info["cloud_grad_low_sat"])
+        self.assertGreaterEqual(rois["cloud_grad"][0], 240)
+        # 桃色の雲（HSV S ≈ 0.15、DSC04532 相当）は低彩度として残る
+        pink = self._cloud_scene((235, 215, 205), gray_cloud=False)
+        rois, info = ce.diagnosis_rois(pink, 60)
+        self.assertTrue(info["cloud_grad_low_sat"])
+        self.assertLess(rois["cloud_grad"][0], 240)
+
+    def test_cloud_grad_falls_back_to_band_without_low_sat(self):
+        # 帯に低彩度の箱が無ければ従来の帯で選ぶ（cloud_grad を欠測にしない）
+        cam = self._cloud_scene((150, 200, 255), gray_cloud=False)
+        rois, info = ce.diagnosis_rois(cam, 60)
+        self.assertFalse(info["cloud_grad_low_sat"])
+        self.assertIsNotNone(rois["cloud_grad"])
+        self.assertLess(rois["cloud_grad"][0], 240)
+
     def test_align_rois_shift_and_sky_borrow(self):
         cam = _diag_scene()
         moved = np.roll(cam, (3, 5), axis=(0, 1))
@@ -1389,10 +1424,35 @@ class DiagnosisAttributionTests(unittest.TestCase):
         s2_over = np.array([True, True, False, False, True])
         s3_white = np.array([True, True, True, False, True])
         out = ce.attribute_pixels(k, sensor, s2_over, s3_white)
-        self.assertEqual(out, {"k": 4, "sensor": 1, "decoder_tone": 1, "gamut_output": 1, "unverifiable": 1})
+        # s3_near_white が無ければ規則 4 は分けない（旧 unverifiable と同じ）
+        self.assertEqual(out, {"k": 4, "sensor": 1, "decoder_tone": 1, "quant8": 1, "jpeg_encode": 0, "unverifiable": 1})
         bad = ce.attribute_pixels(k, None, s2_over, s3_white)
         self.assertEqual(bad["unverifiable"], 4)
         self.assertEqual(ce.attribute_pixels(k, sensor, s2_over, s3_white, valid=False)["unverifiable"], 4)
+        # dump が無い経路は S3 が分からないので JPEG 符号化とは言わない
+        near = np.ones(5, bool)
+        self.assertEqual(ce.attribute_pixels(k, sensor, s2_over, None, s3_near_white=near)["jpeg_encode"], 0)
+
+    def test_attribute_pixels_splits_jpeg_encode(self):
+        # K の 6 画素: sensor / tone / quant8 / jpeg_encode ×2 / unverifiable
+        k = np.array([True, True, True, True, True, True, False])
+        sensor = np.array([True, False, False, False, False, False, False])
+        s2_over = np.array([False, True, False, False, False, False, False])
+        s3_white = np.array([False, False, True, False, False, False, False])
+        near = np.array([False, False, True, True, True, False, False])
+        out = ce.attribute_pixels(k, sensor, s2_over, s3_white, s3_near_white=near)
+        self.assertEqual(out, {"k": 6, "sensor": 1, "decoder_tone": 1, "quant8": 1, "jpeg_encode": 2, "unverifiable": 1})
+        # 規則の順序: quant8 は jpeg_encode より先（S3 が 8bit 白なら near でも quant8）
+        self.assertEqual(sum(out[c] for c in ce.ATTR_CATEGORIES), out["k"])
+
+    def test_attribute_pixels_k_from_s3_has_no_rule4(self):
+        # K を S3 の 8bit 白から取ると、sensor / tone 以外は全部 quant8（jpeg_encode / unverifiable は構造上 0）
+        rng = np.random.default_rng(3)
+        s3_white = rng.random(200) > 0.5
+        sensor, s2_over = rng.random(200) > 0.8, rng.random(200) > 0.6
+        out = ce.attribute_pixels(s3_white, sensor, s2_over, s3_white, s3_near_white=np.ones(200, bool))
+        self.assertEqual(out["jpeg_encode"] + out["unverifiable"], 0)
+        self.assertEqual(out["sensor"] + out["decoder_tone"] + out["quant8"], out["k"])
 
     def test_classify_attribution(self):
         def c(**kw):
@@ -1401,11 +1461,12 @@ class DiagnosisAttributionTests(unittest.TestCase):
         self.assertEqual(ce.classify_attribution(c(sensor=5), 1000), "no_clip")
         self.assertEqual(ce.classify_attribution(c(decoder_tone=80, sensor=20), 1000), "decoder_tone")
         self.assertEqual(ce.classify_attribution(c(decoder_tone=60, sensor=40), 1000), "mixed")
-        self.assertEqual(ce.classify_attribution(c(decoder_tone=40, sensor=25, gamut_output=20, unverifiable=15), 1000), "mixed")
+        self.assertEqual(ce.classify_attribution(c(decoder_tone=40, sensor=25, quant8=20, unverifiable=15), 1000), "mixed")
         self.assertEqual(ce.classify_attribution(None, 1000), "unverifiable")
+        self.assertEqual(ce.classify_attribution(c(jpeg_encode=80, decoder_tone=20), 1000), "jpeg_encode")
 
     def test_classify_scene(self):
-        counts = {"sky_bright": {"k": 10, "sensor": 0, "decoder_tone": 10, "gamut_output": 0, "unverifiable": 0}}
+        counts = {"sky_bright": {"k": 10, "sensor": 0, "decoder_tone": 10, "quant8": 0, "jpeg_encode": 0, "unverifiable": 0}}
         scene = ce.classify_scene_diagnosis
         self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "no_clip"}, {}, [], 1.0, 0.0), "no_clip")
         self.assertEqual(scene({"sky_bright": "sensor", "cloud_grad": "sensor"}, {}, [], 1.0, 0.5), "sensor")
@@ -1414,8 +1475,11 @@ class DiagnosisAttributionTests(unittest.TestCase):
         self.assertEqual(scene({"sky_bright": "decoder_tone", "cloud_grad": "decoder_tone"}, counts, [0.2, 0.3], 0.9, 0.0), "mixed")
         # S1 にも階調が無く S0 も飽和していない → 検証不能（API 境界）
         self.assertEqual(scene({"sky_bright": "decoder_tone", "cloud_grad": "decoder_tone"}, counts, [0.2, 0.3], 0.2, 0.0), "unverifiable")
-        gam = {"cloud_grad": {"k": 10, "sensor": 1, "decoder_tone": 2, "gamut_output": 7, "unverifiable": 0}}
-        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "gamut_output"}, gam, [], 1.0, 0.0), "gamut_output")
+        gam = {"cloud_grad": {"k": 10, "sensor": 1, "decoder_tone": 2, "quant8": 7, "jpeg_encode": 0, "unverifiable": 0}}
+        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "quant8"}, gam, [], 1.0, 0.0), "quant8")
+        # jpeg_encode と unverifiable は合算して旧 unverifiable として比べる（単独では quant8 より少なくても）
+        split = {"cloud_grad": {"k": 10, "sensor": 0, "decoder_tone": 0, "quant8": 4, "jpeg_encode": 3, "unverifiable": 3}}
+        self.assertEqual(scene({"sky_bright": "no_clip", "cloud_grad": "mixed"}, split, [], 1.0, 0.0), "unverifiable")
         self.assertEqual(scene({"sky_bright": "sensor", "cloud_grad": "mixed"}, counts, [0.9], 1.0, 0.3), "mixed")
 
     def test_candidate_checks_and_best(self):
@@ -1567,6 +1631,11 @@ class DiagnosisMeasureTests(unittest.TestCase):
         rows, summary = ce.diagnosis_measure(images, white, levels, dumps, cfa, rois, 60,
                                              cli_any_gt_1={"d_s1_linear": float((s1 > 1).any(axis=2).mean())})
         st = rows["stages"]
+        self.assertEqual(st["k_source"], "s3_dump")  # K は S3 dump の 8bit 白（§6.4）
+        self.assertEqual(st["attr_full_jpeg_encode"] + st["attr_full_unverifiable"], 0.0)
+        self.assertIn("attr_full_k_jpeg8_frac", st)
+        jfr = [st[f"attr_full_jpeg8_{c}"] for c in ce.ATTR_CATEGORIES]  # 参考: JPEG の K の内訳も合計 1
+        self.assertAlmostEqual(sum(jfr), 1.0, places=6)
         self.assertTrue(st["cfa_align_ok"])
         self.assertAlmostEqual(st["s1_cli_any_gt_1_diff"], 0.0, places=6)
         self.assertGreater(st["s1_gt1_any"], 0.05)
@@ -1578,7 +1647,7 @@ class DiagnosisMeasureTests(unittest.TestCase):
             self.assertAlmostEqual(sum(fr), 1.0, places=6)
         self.assertGreater(st["attr_full_sensor"], 0.0)
         self.assertGreater(st["attr_full_decoder_tone"], 0.0)
-        self.assertIn(st["scene_class"], {"no_clip", "sensor", "decoder_tone", "gamut_output", "unverifiable", "mixed"})
+        self.assertIn(st["scene_class"], {"no_clip", "sensor", "decoder_tone", "quant8", "unverifiable", "mixed"})
         self.assertIn(summary["roi_class"]["sky_bright"], {"sensor", "decoder_tone", "mixed"})
         self.assertAlmostEqual(rows["camera"]["mid_p50_diff"], 0.0)
         interp = rows["d_interp_camera_p50"]
@@ -1596,6 +1665,9 @@ class DiagnosisMeasureTests(unittest.TestCase):
         rows, summary = ce.diagnosis_measure(images, white, {k: 255 for k in images}, {}, None, rois, 60)
         self.assertEqual(rows["stages"]["attr_full_unverifiable"], 1.0)
         self.assertFalse(summary["stages_ok"])
+        # dump が無ければ K は d_lens_off の 8bit JPEG から取る
+        self.assertEqual(rows["stages"]["k_source"], "jpeg8")
+        self.assertAlmostEqual(rows["stages"]["attr_full_k_frac"], rows["stages"]["attr_full_k_jpeg8_frac"])
 
 
 MOCK_CLI = r'''#!{python}
@@ -1734,7 +1806,7 @@ class DiagnosisMockCliIntegrationTests(unittest.TestCase):
         self.assertEqual(stages["cfa_align_ok"], "True")
         self.assertLess(abs(float(stages["s1_cli_any_gt_1_diff"])), 1e-6)  # dump の読み方（byte order / layout）が CLI 統計と一致
         self.assertGreater(float(stages["s1_gt1_any"]), 0.0)
-        self.assertIn(stages["scene_class"], {"no_clip", "sensor", "decoder_tone", "gamut_output", "unverifiable", "mixed"})
+        self.assertIn(stages["scene_class"], {"no_clip", "sensor", "decoder_tone", "quant8", "unverifiable", "mixed"})
         self.assertEqual(by[("preview", "d_s1_linear")]["ci_gamut"], "False")
         self.assertEqual(by[("full", "c_best")]["c_best_of"], stages["c_best"])
         self.assertEqual(by[("full", "stages")]["width"], "1200")

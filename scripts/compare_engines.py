@@ -3802,7 +3802,14 @@ MAGENTA_RATE_MAX = 0.01
 ATTR_MIN_CLIP_FRACTION = 0.01
 ATTR_MAJOR_FRACTION = 0.5
 ATTR_SECOND_FRACTION = 0.3
-ATTR_CATEGORIES = ("sensor", "decoder_tone", "gamut_output", "unverifiable")
+#: §10.1 の帰属カテゴリ（規則の順）。レポート §8-3（オーナー判断）で名称と内訳を改めた。旧名との対応:
+#: - quant8（8bit 量子化。白の手前 1/255）= 旧 gamut_output（色域・SDR 出力）。S2 が [0,1] で S3 が 8bit 255 に丸まる値。
+#:   中身は色域の損失ではなく白の手前の丸め（レポート §3.3）なので改名した。規則の判定式は変えていない。
+#: - jpeg_encode（JPEG 符号化）+ unverifiable（検証不能）= 旧 unverifiable。S3 が 8bit 255 未満なのに K に入った画素のうち、
+#:   S3 ≥ JPEG_NEAR_WHITE_LINEAR（白の手前で止まっている）を jpeg_encode、それ未満と照合不能を unverifiable に分けた。
+ATTR_CATEGORIES = ("sensor", "decoder_tone", "quant8", "jpeg_encode", "unverifiable")
+#: 規則 4 の分割: S3（線形、いずれかのチャンネル）がこの値以上なら「JPEG 符号化」（sRGB 8bit で 253 付近から上）。
+JPEG_NEAR_WHITE_LINEAR = 0.98
 #: §10.2 の「S0 も飽和していない」: cloud_grad の CFA セル飽和率がこれ未満。
 SCENE_SENSOR_FREE_MAX = 0.01
 #: §8.4: 標本化したトーン曲線を S1 に掛けた値と S2 の ΔL（線形輝度）p99 の許容。
@@ -3817,6 +3824,8 @@ TONE_CURVE_BOOST1 = ((0.0, 0.0), (0.0025, 0.00191), (0.005, 0.00405), (0.01, 0.0
                      (0.4, 0.71799), (0.5, 0.805), (0.6, 0.87147), (0.7, 0.92126), (0.8, 0.9573),
                      (0.9, 0.98257), (0.95, 0.99208), (1.0, 1.0), (1.1, 1.0145), (1.2, 1.029),
                      (1.5, 1.0725), (2.0, 1.145), (2.5, 1.2175), (2.7, 1.2465))
+#: cloud_grad の帯に足す低彩度条件（HSV の S の上限、レポート §8-4）。値の根拠は diagnosis_rois のコメント。
+CLOUD_GRAD_MAX_SAT = 0.2
 DIAG_ROI_NAMES = ("sky_bright", "cloud_grad", "clip_edge", "fg_dark", "midtone")
 #: §7.2: sky_bright の平行移動を流用する ROI（この順）。
 SKY_SHIFT_SOURCES = ("midtone", "clip_edge", "cloud_grad")
@@ -4376,6 +4385,9 @@ def diagnosis_rois(camera_rgb8: np.ndarray, size: int) -> tuple[dict[str, tuple[
     rgb01 = camera_rgb8.astype(np.float32) / 255.0
     L = luma_of(rgb01)
     S = rgb01.max(axis=2) - rgb01.min(axis=2)
+    # HSV の S（(max − min) / max）。上の S はクロマ（max − min）で midtone 用。明るい画素では両者が最大 ~1.6 倍違う。
+    vmax = rgb01.max(axis=2)
+    hsv_s = np.where(vmax > 0, S / np.maximum(vmax, 1e-6), 0.0)
     area = float(s * s)
     taken: list[tuple[int, int, int, int]] = []
     rois: dict[str, tuple[int, int, int, int] | None] = {}
@@ -4389,15 +4401,32 @@ def diagnosis_rois(camera_rgb8: np.ndarray, size: int) -> tuple[dict[str, tuple[
     if rois["sky_bright"]:
         taken.append(rois["sky_bright"])
 
+    blurred_L = cv2.GaussianBlur(L, (0, 0), 2.0).astype(np.float64)
+
+    def pick_cloud(band: np.ndarray) -> tuple[int, int, int, int] | None:
+        xs, ys, n = counts(band)
+        # 起伏は帯（0.6 < L < 0.98）内の画素だけで測る。箱全体の標準偏差だと地平線（空と暗い前景の境界）が最大になる。
+        blurred = blurred_L * band
+        _, _, s1 = _grid_sums(cv2.integral(blurred), s, step)
+        _, _, s2 = _grid_sums(cv2.integral(blurred * blurred), s, step)
+        nb = np.maximum(n, 1.0)
+        local_std = np.sqrt(np.clip(s2 / nb - (s1 / nb) ** 2, 0.0, None))
+        return _pick(xs, ys, local_std, s, taken, allowed=(n / area) >= 0.7)
+
+    # 帯に低彩度（HSV の S < CLOUD_GRAD_MAX_SAT）の条件を足す（レポート §8-4。DSC04754 で雲ではなく手前の明るい
+    # 被写体を拾った誤抽出の対策）。条件を満たす箱が無いときは従来の帯（彩度条件なし）で選び直す: cloud_grad が
+    # 欠けるとシーン判定（no_clip 扱い）・S1/S2 の階調比・タスク C の実施条件まで連鎖して欠測になるため。
+    # どちらで選んだかは info["cloud_grad_low_sat"] に残す。
+    # 閾値 0.2 の根拠（2026-10-21、10 カット preview + 3 full の カメラ JPEG で確認）: 夜明けの桃色の雲 DSC04532 の箱は
+    # 帯内の S が p50 / p90 / p99 = 0.08 / 0.10 / 0.12 で 0.2 でも同じ箱のまま。0.2 で動くのは 4 カット（DSC04754 は車体 →
+    # 空、DSC04607 / 04579 / 04746 は帯内に S 0.19〜0.25 の青みの稜線・空を含む箱から隣の低彩度の空へ 1 箱）。0.25 なら
+    # DSC04754 だけが動き、0.3 以上では何も動かない（DSC04754 の誤抽出が残る）。オーナー判断（レポート §8-4）の 0.2 を採った。
     band = (L > 0.6) & (L < 0.98)
-    xs, ys, n = counts(band)
-    # 起伏は帯（0.6 < L < 0.98）内の画素だけで測る。箱全体の標準偏差だと地平線（空と暗い前景の境界）が最大になる。
-    blurred = cv2.GaussianBlur(L, (0, 0), 2.0).astype(np.float64) * band
-    _, _, s1 = _grid_sums(cv2.integral(blurred), s, step)
-    _, _, s2 = _grid_sums(cv2.integral(blurred * blurred), s, step)
-    nb = np.maximum(n, 1.0)
-    local_std = np.sqrt(np.clip(s2 / nb - (s1 / nb) ** 2, 0.0, None))
-    rois["cloud_grad"] = _pick(xs, ys, local_std, s, taken, allowed=(n / area) >= 0.7)
+    rois["cloud_grad"] = pick_cloud(band & (hsv_s < CLOUD_GRAD_MAX_SAT))
+    info["cloud_grad_max_sat"] = CLOUD_GRAD_MAX_SAT
+    info["cloud_grad_low_sat"] = rois["cloud_grad"] is not None
+    if rois["cloud_grad"] is None:
+        rois["cloud_grad"] = pick_cloud(band)
     if rois["cloud_grad"]:
         taken.append(rois["cloud_grad"])
 
@@ -4624,12 +4653,20 @@ def attribute_pixels(
     s2_over: np.ndarray | None,
     s3_white8: np.ndarray | None,
     valid: bool = True,
+    s3_near_white: np.ndarray | None = None,
 ) -> dict[str, int]:
     """§10.1 の帰属規則を画素集合 K（clipped）に順に適用して件数を返す（純粋）。
 
     1 センサー飽和（CFA セルのいずれかが T 以上）→ 2 デコーダ/トーン（S2 のいずれかのチャンネルが 1.0 超）→
-    3 色域・SDR 出力（S2 が [0,1] で、S3 が 8bit sRGB で 255 に丸まる値 = clamp・量子化で白）→ 4 検証不能（それ以外。
-    S3 で白でないのに 8bit で白 = JPEG / リサイズ由来、位置合わせ失敗、dump 欠損）。
+    3 8bit 量子化 quant8（S2 が [0,1] で、S3 が 8bit sRGB で 255 に丸まる値。旧「色域・SDR 出力」）→
+    4 それ以外（S3 で 8bit 白でないのに K に入った画素）を S3 で 2 つに分ける:
+    s3_near_white（S3 ≥ JPEG_NEAR_WHITE_LINEAR）なら JPEG 符号化 jpeg_encode、それ以外は検証不能 unverifiable
+    （位置合わせ失敗・リサイズ等）。s3_near_white が None なら分けずに全部 unverifiable（旧規則 4 と同じ）。
+    dump が無い・照合できない（valid False / マスク None）なら S3 の値が分からないので、K 全体を unverifiable にする
+    （JPEG 符号化とは言えない）。
+
+    K を S3 dump（≥ WHITE8_LINEAR）から取る経路（diagnosis_measure、レポート §6.4）では、規則 3 が残りを全部
+    受け取るので jpeg_encode / unverifiable は構造上 0 になる（JPEG だけで白になった画素はそもそも K に入らない）。
     """
     k = clipped.astype(bool)
     n_k = int(k.sum())
@@ -4644,9 +4681,13 @@ def attribute_pixels(
     is_tone = rest & s2_over
     out["decoder_tone"] = int(is_tone.sum())
     rest &= ~s2_over
-    is_gamut = rest & s3_white8
-    out["gamut_output"] = int(is_gamut.sum())
-    out["unverifiable"] = int((rest & ~s3_white8).sum())
+    is_quant = rest & s3_white8
+    out["quant8"] = int(is_quant.sum())
+    rest &= ~s3_white8
+    if s3_near_white is not None:
+        out["jpeg_encode"] = int((rest & s3_near_white).sum())
+        rest &= ~s3_near_white
+    out["unverifiable"] = int(rest.sum())
     return out
 
 
@@ -4679,8 +4720,10 @@ def classify_scene_diagnosis(
     - no_clip: sky_bright / cloud_grad がどちらも「クリップなし」（または ROI 無し）
     - sensor: 両方が sensor
     - decoder_tone: cloud_grad が decoder_tone で、exposure −0.7 / −1.0 のどちらかで grad_texture_ratio ≥ 0.5
-    - gamut_output: 2 ROI の K を合算した帰属で gamut_output が最大
-    - unverifiable: 合算で unverifiable が最大、または S1 に階調が無く（s1 比 < 0.5）S0 も飽和していない
+    - quant8（旧 gamut_output）: 2 ROI の K を合算した帰属で quant8 が最大
+    - unverifiable: 合算で「jpeg_encode + unverifiable」（= 旧 unverifiable）が最大、または S1 に階調が無く
+      （s1 比 < 0.5）S0 も飽和していない。jpeg_encode を独立のシーン判定にしないのは、§10.2 の判定を名称変更
+      （§8-3）で動かさないため（旧規則 4 の中身を 2 つに分けただけ）
     - mixed: それ以外
     """
     sky, cloud = roi_class.get("sky_bright"), roi_class.get("cloud_grad")
@@ -4692,10 +4735,11 @@ def classify_scene_diagnosis(
     if cloud == "decoder_tone" and any(r >= GRAD_RECOVER_MIN for r in ratios):
         return "decoder_tone"
     total = {c: sum((counts.get(n) or {}).get(c, 0) for n in ("sky_bright", "cloud_grad")) for c in ATTR_CATEGORIES}
+    total["unverifiable"] += total.pop("jpeg_encode")
     if sum(total.values()) > 0:
-        top = max(ATTR_CATEGORIES, key=lambda c: total[c])
-        if top == "gamut_output":
-            return "gamut_output"
+        top = max(total, key=lambda c: total[c])
+        if top == "quant8":
+            return "quant8"
         if top == "unverifiable":
             return "unverifiable"
     if _is_number(s1_grad_ratio) and s1_grad_ratio < GRAD_RECOVER_MIN and _is_number(cloud_cfa_sat) and cloud_cfa_sat < SCENE_SENSOR_FREE_MAX:
@@ -4959,7 +5003,19 @@ def diagnosis_measure(
     stage_ok = all(d is not None and d.shape[:2] == cam_gray.shape for d in (s2, s3))
     s2_over = (s2 > 1.0).any(axis=2) if stage_ok else None
     s3_white8 = (s3 >= WHITE8_LINEAR).any(axis=2) if stage_ok else None
-    clipped_off = white["d_lens_off"].any(axis=2) if "d_lens_off" in white else None
+    s3_near_white = (s3 >= JPEG_NEAR_WHITE_LINEAR).any(axis=2) if stage_ok else None
+    # K（白の画素集合）は S3 dump の「8bit sRGB で 255 に丸まる値」（≥ WHITE8_LINEAR、lens OFF 幾何）から取る
+    # （レポート §6.4 / §8-5）。8bit JPEG の d_lens_off から取ると、原寸の lens OFF で白の手前の画素が JPEG の量子化で
+    # 255 → 254 に落ちて白を数え損なう。lens OFF の tiff16 は現像していない（d_tiff_srgb は lens ON で幾何が違う）ので
+    # 使わない。dump が無い・寸法が合わない（stage_ok False）ときは従来どおり d_lens_off の 8bit JPEG の白に戻す
+    # （この経路は attribute_pixels が K 全体を unverifiable にするので、効くのは k_frac だけ）。
+    # 比較用に JPEG の K の割合も attr_{roi}_k_jpeg8_frac に残す。
+    clipped_jpeg8 = white["d_lens_off"].any(axis=2) if "d_lens_off" in white else None
+    if stage_ok and s3_white8 is not None and "d_lens_off" in white:
+        clipped_off, k_source = s3_white8, "s3_dump"
+    else:
+        clipped_off, k_source = clipped_jpeg8, "jpeg8"
+    stages["k_source"] = k_source if clipped_off is not None else None
     attribution: dict[str, Any] = {}
     roi_class: dict[str, str] = {}
     roi_counts: dict[str, dict[str, int] | None] = {}
@@ -4979,12 +5035,25 @@ def diagnosis_measure(
                 _crop(clipped_off, box), _crop(sensor_maps[tag], box) if sensor_maps[tag] is not None else None,
                 _crop(s2_over, box) if s2_over is not None else None, _crop(s3_white8, box) if s3_white8 is not None else None,
                 valid=cfa_ok and stage_ok,
+                s3_near_white=_crop(s3_near_white, box) if s3_near_white is not None else None,
             )
             classes[tag] = classify_attribution(counts, roi_pixels)
             if tag == "libraw":
                 roi_counts[name] = counts
                 attribution.update(_roi_attr(counts, f"attr_{name}", roi_pixels))
         roi_class[name] = classes["libraw"]
+        if clipped_jpeg8 is not None:
+            attribution[f"attr_{name}_k_jpeg8_frac"] = float(_crop(clipped_jpeg8, box).mean())
+            if k_source == "s3_dump":
+                # 参考: 旧来の K（8bit JPEG の白）に同じ規則を当てた内訳（attr_{roi}_jpeg8_*）。K を S3 から取ると
+                # jpeg_encode / unverifiable は構造上 0 になるので、JPEG だけで白になった画素の量はこちらで見る（レポート §3.3）。
+                jcounts = attribute_pixels(
+                    _crop(clipped_jpeg8, box), _crop(sensor_maps["libraw"], box) if sensor_maps["libraw"] is not None else None,
+                    _crop(s2_over, box), _crop(s3_white8, box), valid=cfa_ok and stage_ok,
+                    s3_near_white=_crop(s3_near_white, box),
+                )
+                jk = jcounts["k"]
+                attribution.update({f"attr_{name}_jpeg8_{c}": jcounts[c] / jk if jk else float("nan") for c in ATTR_CATEGORIES})
         attribution[f"attr_{name}_class"] = classes["libraw"]
         attribution[f"attr_{name}_class_camera_threshold"] = classes["camera"]
         attribution[f"attr_{name}_sensor_threshold_sensitive"] = classes["libraw"] != classes["camera"]
@@ -5301,14 +5370,27 @@ def diagnosis_tables_md(rows: list[dict[str, Any]], summaries: list[dict[str, An
             fmt(r.get("attr_cloud_grad_class")), fmt(sens), fmt(c.get("cfa_sat_g")), fmt(c.get("cfa_sat_b")),
             fmt(c.get("cfa_sat_cell_any")), fmt(r.get("s1_gt1_any")), fmt(r.get("s2_gt1_any")), fmt(r.get("s3_ge1_any")),
             fmt(r.get("clip8_any")), fmt(r.get("c_best")), fmt(r.get("taskc_eligible"))]) + " |")
-    lines += ["", "## 帰属の内訳（K に占める割合、lens OFF 幾何）", "",
-              "| capture | mode | ROI | K/ROI | sensor | decoder_tone | gamut_output | unverifiable |", "|" + "---|" * 8]
+    lines += ["", "## 帰属の内訳（K に占める割合、lens OFF 幾何。K の出所は k_source）", "",
+              "quant8 = 8bit 量子化（白の手前 1/255、旧「色域・SDR 出力」）、jpeg_encode = JPEG 符号化（S3 ≥ 0.98、旧「検証不能」の一部）。"
+              "K/ROI(jpeg8) は d_lens_off の 8bit JPEG で数えた K の割合（比較用）。", "",
+              "| capture | mode | ROI | k_source | K/ROI | K/ROI(jpeg8) | sensor | decoder_tone | quant8 | jpeg_encode | unverifiable |",
+              "|" + "---|" * 11]
     for r in stage_rows:
         for roi in ("sky_bright", "cloud_grad", "full"):
             if f"attr_{roi}_k_frac" not in r:
                 continue
-            lines.append("| " + " | ".join([r["capture_id"], r["mode"], roi, fmt(r.get(f"attr_{roi}_k_frac"))]
+            lines.append("| " + " | ".join([r["capture_id"], r["mode"], roi, fmt(r.get("k_source")),
+                                            fmt(r.get(f"attr_{roi}_k_frac")), fmt(r.get(f"attr_{roi}_k_jpeg8_frac"))]
                                            + [fmt(r.get(f"attr_{roi}_{c}")) for c in ATTR_CATEGORIES]) + " |")
+    lines += ["", "## 参考: K を 8bit JPEG（d_lens_off の 255）で取った場合の内訳（K/ROI(jpeg8) に占める割合）", "",
+              "| capture | mode | ROI | K/ROI(jpeg8) | sensor | decoder_tone | quant8 | jpeg_encode | unverifiable |",
+              "|" + "---|" * 9]
+    for r in stage_rows:
+        for roi in ("sky_bright", "cloud_grad", "full"):
+            if f"attr_{roi}_jpeg8_sensor" not in r:
+                continue
+            lines.append("| " + " | ".join([r["capture_id"], r["mode"], roi, fmt(r.get(f"attr_{roi}_k_jpeg8_frac"))]
+                                           + [fmt(r.get(f"attr_{roi}_jpeg8_{c}")) for c in ATTR_CATEGORIES]) + " |")
     lines += ["", "## 段階と検査（§8.1 / §8.4）", "",
               "| capture | mode | loss s1s2 | loss s2s3 | loss s3s4 (rate diff) | loss s4s5 | ΔE in-range | S2/S3 absdiff mean | curve ΔL p99 cloud | curve ΔL p99 mid | lens clip diff |",
               "|" + "---|" * 11]
@@ -5449,12 +5531,17 @@ def run_diagnosis(
             "fg_p01_drop_max": FG_P01_DROP_MAX, "magenta_rate_max": MAGENTA_RATE_MAX,
             "attr_min_clip_fraction": ATTR_MIN_CLIP_FRACTION, "attr_major": ATTR_MAJOR_FRACTION, "attr_second": ATTR_SECOND_FRACTION,
             "white16_linear": WHITE16_LINEAR, "white8_linear": WHITE8_LINEAR, "curve_check_tol": CURVE_CHECK_TOL,
+            "jpeg_near_white_linear": JPEG_NEAR_WHITE_LINEAR, "cloud_grad_max_sat": CLOUD_GRAD_MAX_SAT,
             "roi_fraction": ROI_FRACTION, "roi_min_response": ROI_MIN_RESPONSE,
         },
         "notes": {
             "tone_curve": "§8.4 の曲線は定数置換で標本化した boost 1 の応答 24 点（4 カット・ISO 100〜2000 で同値、2026-10-21）を PCHIP で補間したもの",
             "stage_loss_s3s4": "S3（lens OFF）と S4（lens ON）は幾何が違うため、白の率の差（S4 − S3、符号付き）で代えた",
-            "attribution_rule3": "S3 の線形値が 8bit sRGB で 255 に丸まる（≥ WHITE8_LINEAR）なら色域・SDR 出力（clamp・量子化）",
+            "attribution_k": "K は S3 dump の ≥ WHITE8_LINEAR（8bit sRGB で 255 に丸まる値、lens OFF 幾何）。dump が無ければ d_lens_off の 8bit JPEG の白（k_source = jpeg8）",
+            "attribution_rule3": "S3 の線形値が 8bit sRGB で 255 に丸まる（≥ WHITE8_LINEAR）なら 8bit 量子化 quant8（旧 gamut_output「色域・SDR 出力」）",
+            "attribution_rule4": "それ以外のうち S3 ≥ JPEG_NEAR_WHITE_LINEAR なら JPEG 符号化 jpeg_encode、残りは検証不能 unverifiable（旧 unverifiable を 2 つに分けた）。K を S3 から取る経路では両方 0",
+            "scene_class": "シーン判定は jpeg_encode + unverifiable を合算して旧 unverifiable として比べる（判定を名称変更で動かさない）",
+            "cloud_grad": "帯 0.6 < L < 0.98 に HSV の S < CLOUD_GRAD_MAX_SAT を足す。満たす箱が無ければ従来の帯で選ぶ（diagnosis_summary.json の by_capture.*.roi_info.cloud_grad_low_sat）",
             "classification": "最大の帰属が 50% 未満のときは mixed",
             "fg_dark": "構造の閾値は箱の Laplacian 平均の中央値（相対）",
         },
