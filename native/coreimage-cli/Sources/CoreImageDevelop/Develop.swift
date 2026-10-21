@@ -202,6 +202,38 @@ func millis(_ start: DispatchTime, _ end: DispatchTime) -> Double {
     return (ns / 1_000_000 * 10).rounded() / 10
 }
 
+/// 段階別の計時（Issue #102）。環境変数 `GEOFRAME_CI_TIMING=1` のときだけ、1 件ごとに stderr へ 1 行書く。
+/// stdout の応答 JSON・出力画像には一切影響しない（時刻を取るだけ）。Core Image は遅延評価なので、
+/// RAW のデコード・デモザイク・レンズ補正・後段カーネルはすべて `render`（CIContext のレンダ）に入る。
+/// 段階をさらに分けた計測は docs/coreimage-small-render-performance.md と scripts/coreimage-small-decode/。
+public enum StageTiming {
+    public static let environmentKey = "GEOFRAME_CI_TIMING"
+    public static let enabled = ProcessInfo.processInfo.environment[environmentKey] == "1"
+
+    /// `timing create=… configure=… graph=… render=… encode_write=… other=… total=…`（ms）。
+    /// - create: `CIRAWFilter(imageURL:)`（ファイルを開きメタデータを読む）
+    /// - configure: decoderVersion〜adjustments のデコード段・上書き・白点ガード
+    /// - graph: `outputImage` 取得と後段チェーンのグラフ組み立て（画素は計算しない）
+    /// - render: CIContext のレンダ（RAW デコード〜後段カーネル〜読み出し）。skip_write では -1
+    /// - encode_write: エンコード・一時ファイル書き込み・rename。skip_write では -1
+    /// - other: 上記以外（単発呼び出しでの CIContext の生成、診断モードの統計など）
+    static func line(
+        t0: DispatchTime, created: DispatchTime, configured: DispatchTime, graphBuilt: DispatchTime,
+        renderStart: DispatchTime?, rendered: DispatchTime?, written: DispatchTime?, end: DispatchTime
+    ) -> String {
+        let render = renderStart.flatMap { start in rendered.map { millis(start, $0) } } ?? -1
+        let encode = rendered.flatMap { start in written.map { millis(start, $0) } } ?? -1
+        let accounted = millis(t0, graphBuilt) + max(0, render) + max(0, encode)
+        let other = ((millis(t0, end) - accounted) * 10).rounded() / 10
+        return "timing create=\(millis(t0, created)) configure=\(millis(created, configured)) graph=\(millis(configured, graphBuilt))"
+            + " render=\(render) encode_write=\(encode) other=\(other) total=\(millis(t0, end))"
+    }
+
+    static func report(_ line: String) {
+        FileHandle.standardError.write(Data(("geoframe-ci-develop: " + line + "\n").utf8))
+    }
+}
+
 /// 現像に使う CIContext（作業空間 extended linear sRGB・half float、中間結果はキャッシュしない）。
 /// 単発呼び出しでは 1 件ごとに作り、`--batch` ではプロセスで 1 つを使い回す。
 public func makeRenderContext() -> CIContext {
@@ -222,6 +254,7 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
     guard let filter = CIRAWFilter(imageURL: request.input) else {
         throw DevelopError(.unsupportedRaw, "Core Image cannot decode this RAW file")
     }
+    let tCreated = DispatchTime.now()
 
     // decoderVersion は最初に設定する。設定すると他のパラメータが既定値へ戻る
     // （実測: sharpnessAmount=0 → decoderVersion 設定 → 1.0 に戻った）。
@@ -283,6 +316,7 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
 
     // outputImage の参照はここ 1 回だけ。同じ filter で 2 回以上参照すると extent が半分ずつ縮む
     // （設計書 §2.2。macOS 27.0.1 で確認）ので、以降は `decoded` を使い回す。
+    let tConfigured = DispatchTime.now()
     guard let decoded = filter.outputImage else {
         throw DevelopError(.renderFailed, "CIRAWFilter produced no output image")
     }
@@ -342,6 +376,10 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
     let outputWidth: Int
     let outputHeight: Int
     let written: Bool
+    // 計測フック（GEOFRAME_CI_TIMING=1 のときだけ stderr へ。Issue #102）用の時刻。skip_write では nil のまま。
+    var tRenderStart: DispatchTime?
+    var tRendered: DispatchTime?
+    var tWritten: DispatchTime?
     if request.diagnostics?.skipWrite == true {
         // 診断モードの skip_write: 画像のレンダ・エンコード・書き込みをしない（output のパス検証は済んでいる）。
         outputWidth = Int(extent.width)
@@ -349,6 +387,7 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
         written = false
     } else {
         let cgImage: CGImage
+        tRenderStart = DispatchTime.now()
         switch request.format {
         case .jpeg:
             guard let rendered = context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: colorSpace) else {
@@ -359,7 +398,9 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
             cgImage = try renderRGB16(image, extent: extent, colorSpace: colorSpace, context: context)
         }
 
+        tRendered = DispatchTime.now()
         try AtomicImageWriter.write(cgImage, to: request.output, format: request.format, jpegQuality: request.jpegQuality)
+        tWritten = DispatchTime.now()
         outputWidth = cgImage.width
         outputHeight = cgImage.height
         written = true
@@ -374,6 +415,12 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
         )
     }
     let t2 = DispatchTime.now()
+    if StageTiming.enabled {
+        StageTiming.report(StageTiming.line(
+            t0: t0, created: tCreated, configured: tConfigured, graphBuilt: t1,
+            renderStart: tRenderStart, rendered: tRendered, written: tWritten, end: t2
+        ))
+    }
 
     let properties = filter.properties
     let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
