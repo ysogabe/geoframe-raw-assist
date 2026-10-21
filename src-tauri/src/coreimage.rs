@@ -153,6 +153,7 @@ pub struct CoreImagePreviewResult {
 /// `<app_data_dir>/config.json` の `source_root` を読む（書き込まない）。
 pub fn read_source_root(app_data_dir: &Path) -> Result<PathBuf, CoreImageError> {
     let config_path = app_data_dir.join("config.json");
+    probe::note_config_read();
     let text = match fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -186,6 +187,68 @@ pub fn read_source_root(app_data_dir: &Path) -> Result<PathBuf, CoreImageError> 
     }
 }
 
+/// config.json の同一性の目印（Issue #94）。サイズ・mtime・inode の組。
+///
+/// mtime は APFS ではナノ秒精度だが、同じ瞬間に同じサイズで書き換わる場合や、Python 側が
+/// 一時ファイル + rename で差し替える場合（inode が変わる）にも読み直すよう 3 つを組にする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    ino: u64,
+}
+
+impl ConfigStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            ino: metadata.ino(),
+        }
+    }
+}
+
+/// config キャッシュに置く件数の上限（キーは config.json のパス。アプリでは 1 件しか使わない。
+/// テストは並列に別々の app_data_dir を使うので、1 枠だと互いに上書きし合う）。
+const SOURCE_ROOT_CACHE_MAX: usize = 64;
+
+/// `read_source_root` の結果を config.json の [`ConfigStamp`] ごとに覚える版（Issue #94）。
+///
+/// キャッシュヒット時は config.json を stat するだけで、読み直し・JSON 解析をしない。
+/// 目印が変わったら（撮影フォルダの切り替えで Python が書き換えた等）読み直すので、古い root を
+/// 使い続けない。stat に失敗したとき・目印が違うときは `read_source_root` をそのまま呼ぶ
+/// （エラーの判定は常に `read_source_root` に任せ、エラー契約をここで作らない）。成功だけ覚える。
+fn read_source_root_cached(app_data_dir: &Path) -> Result<PathBuf, CoreImageError> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (ConfigStamp, PathBuf)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let config_path = app_data_dir.join("config.json");
+    let Ok(metadata) = fs::metadata(&config_path) else {
+        return read_source_root(app_data_dir);
+    };
+    let stamp = ConfigStamp::of(&metadata);
+    if let Some((cached_stamp, root)) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&config_path)
+    {
+        if *cached_stamp == stamp {
+            return Ok(root.clone());
+        }
+    }
+    let root = read_source_root(app_data_dir)?;
+    // 読む直前の stat の目印で覚える。stat と読み込みの間に書き換わった場合は、覚えた目印が
+    // 次回の stat と食い違うので次回読み直される（古い root を覚え続けることはない）。
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= SOURCE_ROOT_CACHE_MAX && !guard.contains_key(&config_path) {
+        guard.clear();
+    }
+    guard.insert(config_path, (stamp, root.clone()));
+    Ok(root)
+}
+
 // ---------------------------------------------------------------------------
 // capture_id → ARW の解決（local_raw/source_files.py と同じ規則）
 // ---------------------------------------------------------------------------
@@ -216,9 +279,73 @@ pub fn pick_arw_entry(candidates: &[String], capture_id: &str) -> Option<String>
     candidates.iter().min().cloned()
 }
 
+/// 解決メモ（`(canonical root, capture_id)` → 解決済みパス）の件数上限。超えたら全消去する。
+/// 1 件は数百バイトなので、撮影フォルダ数枚ぶん（数千枚）を覚えても数 MB に収まる。
+const ARW_MEMO_MAX: usize = 4096;
+
+/// テストから「撮影フォルダの列挙（`read_dir`）が何回走ったか」「config.json を何回読んだか」を
+/// 数えるフック。スレッドローカルなのは、並列に走る他のテストの列挙・読み込みを数えないため
+/// （解決はすべて呼び出しスレッドで同期的に行われる）。本番ビルドでは何もしない。
+#[cfg(test)]
+mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static READ_DIR_CALLS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static CONFIG_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note_read_dir() {
+        READ_DIR_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    pub(super) fn note_config_read() {
+        CONFIG_READS.with(|calls| calls.set(calls.get() + 1));
+    }
+}
+
+#[cfg(not(test))]
+mod probe {
+    pub(super) fn note_read_dir() {}
+    pub(super) fn note_config_read() {}
+}
+
+fn arw_memo() -> MutexGuard<'static, HashMap<(PathBuf, String), PathBuf>> {
+    static MEMO: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// メモの解決結果がまだ使えるか。消えた・シンボリックリンクに差し替わった（canonicalize の結果が
+/// 自分自身でなくなる）・フォルダ外になった・通常ファイルでなくなった、のどれかなら使えない。
+fn memo_still_valid(root: &Path, memo: &Path) -> bool {
+    match memo.canonicalize() {
+        Ok(canonical) => canonical == memo && memo.parent() == Some(root) && memo.is_file(),
+        Err(_) => false,
+    }
+}
+
 /// `root` 直下から `capture_id` の ARW を実エントリ名で解決し、canonicalize したパスを返す。
 ///
 /// シンボリックリンクでフォルダ外を指すもの（解決後の親が root と一致しないもの）は拒否する。
+///
+/// Issue #94: 撮影フォルダ全体の列挙はフォルダが大きい・外付けボリュームだと遅く、キャッシュに
+/// 当たる現像でも毎回走っていた。そこで成功した解決を `(canonical root, capture_id)` でメモし、
+/// 2 回目以降はメモのパスを canonicalize / stat して確かめるだけで返す（列挙しない）。
+///
+/// - ID の形式検査と root の canonicalize / ディレクトリ検査はメモより前に毎回行う
+///   （INVALID_CAPTURE_ID / SOURCE_ROOT_NOT_FOUND の契約はメモの有無で変わらない）。
+/// - メモが使えなければ（[`memo_still_valid`]）消して、従来の列挙経路で解決し直す。エラーは
+///   すべて列挙経路が出すので、ARW_NOT_FOUND / ARW_OUTSIDE_SOURCE_ROOT の条件も従来どおり。
+/// - 返すのは前回返したパスそのもの（実エントリ名・拡張子の大小を含む）。キャッシュ鍵がパスを
+///   含むので、作り直すと不要なキャッシュミスになる。`<ID>.ARW` を直接 stat する方式は、
+///   大小文字を区別しないボリュームで実エントリ名（`.arw` 等）が得られないので採らない。
+/// - エラーは覚えない（ファイルが後から置かれたら次回見つかる）。
+/// - 受け入れたずれ: 大小文字を区別するボリュームで `<ID>.arw` をメモした後に `<ID>.ARW` が
+///   足されても、メモが使える限り `pick_arw_entry` の「正規表記優先」は反映されない（メモの
+///   ファイル自体は存在・フォルダ内・通常ファイルであることを確かめている）。APFS の既定
+///   （大小文字を区別しない）では 2 つは共存できない。
 pub fn resolve_arw(root: &Path, capture_id: &str) -> Result<PathBuf, CoreImageError> {
     if !is_valid_capture_id(capture_id) {
         return Err(CoreImageError::new(
@@ -241,7 +368,27 @@ pub fn resolve_arw(root: &Path, capture_id: &str) -> Result<PathBuf, CoreImageEr
             ),
         ));
     }
-    let entries = fs::read_dir(&root).map_err(|error| {
+    let key = (root, capture_id.to_string());
+    let memo = arw_memo().get(&key).cloned();
+    if let Some(memo) = memo {
+        if memo_still_valid(&key.0, &memo) {
+            return Ok(memo);
+        }
+        arw_memo().remove(&key);
+    }
+    let resolved = enumerate_arw(&key.0, capture_id)?;
+    let mut memo = arw_memo();
+    if memo.len() >= ARW_MEMO_MAX && !memo.contains_key(&key) {
+        memo.clear();
+    }
+    memo.insert(key, resolved.clone());
+    Ok(resolved)
+}
+
+/// 従来の解決経路。canonicalize 済みのディレクトリ `root` を列挙して `capture_id` の ARW を探す。
+fn enumerate_arw(root: &Path, capture_id: &str) -> Result<PathBuf, CoreImageError> {
+    probe::note_read_dir();
+    let entries = fs::read_dir(root).map_err(|error| {
         CoreImageError::new(
             "SOURCE_ROOT_NOT_FOUND",
             format!("現像元フォルダを読めません: {}: {error}", root.display()),
@@ -268,7 +415,7 @@ pub fn resolve_arw(root: &Path, capture_id: &str) -> Result<PathBuf, CoreImageEr
     let resolved = root.join(&name).canonicalize().map_err(|error| {
         CoreImageError::new("ARW_NOT_FOUND", format!("{name} を開けません: {error}"))
     })?;
-    if resolved.parent() != Some(root.as_path()) {
+    if resolved.parent() != Some(root) {
         return Err(CoreImageError::new(
             "ARW_OUTSIDE_SOURCE_ROOT",
             format!("{name} は現像元フォルダの外を指しています"),
@@ -1042,7 +1189,8 @@ pub(crate) fn develop(
     timeout: Duration,
 ) -> Result<CoreImagePreviewResult, CoreImageError> {
     // 1. 入力の解決（設定 → ARW）。capture_id の形式検査も resolve_arw が FS より先に行う。
-    let source_root = read_source_root(app_data_dir)?;
+    //    どちらも 2 回目以降はメモを使い、config.json の読み直しとフォルダの列挙をしない（#94）。
+    let source_root = read_source_root_cached(app_data_dir)?;
     let input = resolve_arw(&source_root, capture_id)?;
     let metadata = fs::metadata(&input).map_err(|error| {
         CoreImageError::new(
@@ -1419,6 +1567,152 @@ mod tests {
         assert_eq!(
             read_source_root(dir.path()).unwrap(),
             PathBuf::from("/Volumes/X")
+        );
+    }
+
+    // --- #94: キャッシュヒット時に列挙・config 読み直しをしない ---------------------------
+    //
+    // 「列挙しなかった」はスレッドローカルの呼び出し回数（probe）で直接確かめる。
+    // 「同じ ID の別名の候補を足しても前の結果が返る」という振る舞いでの確かめ方は、テストの
+    // 一時ディレクトリが大小文字を区別しない APFS だと `DSC.arw` と `DSC.ARW` を共存させられず
+    // 組めないため採らない。
+
+    fn read_dir_calls() -> usize {
+        probe::READ_DIR_CALLS.with(|calls| calls.get())
+    }
+
+    fn config_reads() -> usize {
+        probe::CONFIG_READS.with(|calls| calls.get())
+    }
+
+    #[test]
+    fn second_resolve_uses_memo_without_enumerating() {
+        let dir = TempDir::new("memo-hit");
+        touch_file(&dir.path().join("DSC00010.arw"));
+        let before = read_dir_calls();
+        let first = resolve_arw(dir.path(), "DSC00010").expect("first");
+        assert_eq!(read_dir_calls(), before + 1, "1 回目は列挙する");
+        let second = resolve_arw(dir.path(), "DSC00010").expect("second");
+        assert_eq!(read_dir_calls(), before + 1, "2 回目は列挙しない");
+        // 実エントリ名（小文字拡張子）のまま、前回と同じパス。
+        assert_eq!(first, second);
+        assert_eq!(
+            second.file_name().and_then(|n| n.to_str()),
+            Some("DSC00010.arw")
+        );
+        // 別の ID は別のメモなので列挙する。
+        touch_file(&dir.path().join("DSC00011.ARW"));
+        resolve_arw(dir.path(), "DSC00011").expect("other id");
+        assert_eq!(read_dir_calls(), before + 2);
+        // 形式検査・root 検査はメモより前（メモがあっても契約どおりのエラー）。
+        assert_eq!(
+            resolve_arw(dir.path(), "../DSC00010").unwrap_err().code,
+            "INVALID_CAPTURE_ID"
+        );
+    }
+
+    #[test]
+    fn memo_is_not_used_when_file_disappears() {
+        let dir = TempDir::new("memo-gone");
+        let path = dir.path().join("DSC00012.ARW");
+        touch_file(&path);
+        resolve_arw(dir.path(), "DSC00012").expect("first");
+        fs::remove_file(&path).unwrap();
+        let before = read_dir_calls();
+        assert_eq!(
+            resolve_arw(dir.path(), "DSC00012").unwrap_err().code,
+            "ARW_NOT_FOUND"
+        );
+        assert_eq!(read_dir_calls(), before + 1, "メモが使えず列挙し直す");
+        // エラーは覚えない: 置き直せば見つかる。
+        touch_file(&path);
+        assert!(resolve_arw(dir.path(), "DSC00012").is_ok());
+    }
+
+    #[test]
+    fn memo_is_not_used_when_replaced_by_outside_symlink() {
+        let outside = TempDir::new("memo-outside");
+        let target = outside.path().join("secret.ARW");
+        touch_file(&target);
+        let root = TempDir::new("memo-symroot");
+        let path = root.path().join("DSC00013.ARW");
+        touch_file(&path);
+        resolve_arw(root.path(), "DSC00013").expect("first");
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        let before = read_dir_calls();
+        assert_eq!(
+            resolve_arw(root.path(), "DSC00013").unwrap_err().code,
+            "ARW_OUTSIDE_SOURCE_ROOT"
+        );
+        assert_eq!(read_dir_calls(), before + 1);
+        // 失敗は覚えないので、もう一度呼んでも同じエラー（メモから通さない）。
+        assert_eq!(
+            resolve_arw(root.path(), "DSC00013").unwrap_err().code,
+            "ARW_OUTSIDE_SOURCE_ROOT"
+        );
+    }
+
+    #[test]
+    fn memo_is_re_resolved_when_replaced_by_inside_symlink() {
+        let root = TempDir::new("memo-inside");
+        let path = root.path().join("DSC00014.ARW");
+        touch_file(&path);
+        let other = root.path().join("other.bin");
+        touch_file(&other);
+        resolve_arw(root.path(), "DSC00014").expect("first");
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).expect("symlink");
+        let before = read_dir_calls();
+        // 従来の列挙経路と同じ結果（フォルダ内を指すリンクは解決先を返す）。
+        let resolved = resolve_arw(root.path(), "DSC00014").expect("re-resolve");
+        assert_eq!(read_dir_calls(), before + 1, "メモは使わず解決し直す");
+        assert_eq!(resolved, other.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn source_root_cache_rereads_when_config_changes() {
+        let app = TempDir::new("config-cache");
+        let config = app.path().join("config.json");
+        // 同じ長さの値にして、サイズではなく mtime の変化で読み直すことを確かめる。
+        fs::write(&config, r#"{"source_root":"/Volumes/A"}"#).unwrap();
+        set_age(&config, Duration::from_secs(120));
+        let before = config_reads();
+        assert_eq!(
+            read_source_root_cached(app.path()).unwrap(),
+            PathBuf::from("/Volumes/A")
+        );
+        assert_eq!(
+            read_source_root_cached(app.path()).unwrap(),
+            PathBuf::from("/Volumes/A")
+        );
+        assert_eq!(config_reads(), before + 1, "2 回目は読み直さない");
+
+        // 同じ inode・同じサイズのまま中身と mtime だけ変える（rename ではなく上書き）。
+        fs::File::options()
+            .write(true)
+            .truncate(true)
+            .open(&config)
+            .unwrap()
+            .write_all(br#"{"source_root":"/Volumes/B"}"#)
+            .unwrap();
+        set_age(&config, Duration::from_secs(60));
+        assert_eq!(
+            read_source_root_cached(app.path()).unwrap(),
+            PathBuf::from("/Volumes/B")
+        );
+        assert_eq!(config_reads(), before + 2);
+
+        // エラーは覚えず、read_source_root と同じコードを返す。
+        fs::write(&config, "{not json").unwrap();
+        assert_eq!(
+            read_source_root_cached(app.path()).unwrap_err().code,
+            "CONFIG_INVALID"
+        );
+        fs::remove_file(&config).unwrap();
+        assert_eq!(
+            read_source_root_cached(app.path()).unwrap_err().code,
+            "SOURCE_ROOT_NOT_CONFIGURED"
         );
     }
 
@@ -2211,7 +2505,8 @@ exit 1"#;
             json!(arw.canonicalize().unwrap().to_string_lossy())
         );
 
-        // 2 回目はキャッシュヒット（CLI を呼ばない）。
+        // 2 回目はキャッシュヒット（CLI を呼ばない）。フォルダの列挙・config の読み直しもしない（#94）。
+        let (dirs_before, configs_before) = (read_dir_calls(), config_reads());
         let second = develop(
             app_data.path(),
             &cli,
@@ -2224,6 +2519,16 @@ exit 1"#;
         .unwrap();
         assert!(second.cache_hit);
         assert_eq!(calls(bin.path()), 1);
+        assert_eq!(
+            read_dir_calls(),
+            dirs_before,
+            "キャッシュヒットで列挙しない"
+        );
+        assert_eq!(
+            config_reads(),
+            configs_before,
+            "キャッシュヒットで config を読まない"
+        );
         assert_eq!(second.output_path, first.output_path);
         assert_eq!(second.params_hash, first.params_hash);
         assert_eq!(second.adjustments_applied, first.adjustments_applied);
