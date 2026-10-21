@@ -10,7 +10,7 @@ Core Image（CIRAWFilter）の **`apple_default`・decoder 9・レンズ補正 O
 | 項目 | 値 |
 |---|---|
 | macOS | 27.0.1（Apple M3）。対応 OS は最新の macOS のみ（古い macOS の個別検証はしない） |
-| CLI | `geoframe-ci-develop` 0.1.0（`native/coreimage-cli`）。0.2.0（#79、個別上書きキーと tiff16 の sRGB 出力を追加）、0.3.0（#73、`adjustments` と応答の `adjustments_applied` を追加）、0.4.0（#92、診断モード `diagnostics` と `settings.gamut_mapping` / `baseline_exposure` を追加）でも、既定リクエスト（`adjustments` / `diagnostics` 無し）の `applied` は同一（差分 0 件を確認済み） |
+| CLI | `geoframe-ci-develop` 0.1.0（`native/coreimage-cli`）。0.2.0（#79、個別上書きキーと tiff16 の sRGB 出力を追加）、0.3.0（#73、`adjustments` と応答の `adjustments_applied` を追加）、0.4.0（#92、診断モード `diagnostics` と `settings.gamut_mapping` / `baseline_exposure` を追加）、0.5.0（#82、`--batch` を追加）でも、既定リクエスト（`adjustments` / `diagnostics` 無し）の `applied` は同一（差分 0 件を確認済み） |
 | リクエスト | `"decoder_version": "9"`, `"settings": {"profile": "apple_default", "lens_correction": true}` |
 | 実効パラメータ | [`coreimage-baseline/applied-params-macos-27.0.1.json`](coreimage-baseline/applied-params-macos-27.0.1.json)（α6400 夜間・長秒 11 カット、ISO 3200 / 6400） |
 | 画質指標 | [比較レポート §9.5](coreimage-engine-comparison.md) の `CI apple_default v9 lens ON`（下表に再掲） |
@@ -118,3 +118,4 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 | 2026-10-20 | 27.0.1 | 0.1.0 | ベースライン作成 | §9.5 の値 | §9.6 | ベースライン | Issue #74 / #75 |
 | 2026-10-21 | 27.0.1 | 0.3.0 | 差分 0 件（`adjustments` 無し） | `--adjustments` で昼 6 + 星空 3 カット全合格（§16.5） | §16 | 合格 | Issue #72 / #73。`adjustments` 写像の較正後（NR full 上限 0.5） |
 | 2026-10-21 | 27.0.1 | 0.4.0 | 差分 0 件（`diagnostics` 無し） | 対象外（診断モードの追加のみ。`diagnostics` 無し と `{}` で tiff16 バイト一致） | — | 合格 | Issue #92。診断モード（CLI 0.4.0）の追加 |
+| 2026-10-21 | 27.0.1 | 0.5.0 | 差分 0 件 | 対象外（`--batch` の追加のみ。バッチと単発で tiff16 バイト一致・設定の持ち越し無しを `BatchTests` で確認） | — | 合格 | Issue #82。バッチモード（CLI 0.5.0）の追加 |

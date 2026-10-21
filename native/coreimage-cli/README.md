@@ -40,10 +40,11 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.4.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.5.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
+$B --batch < requests.jsonl                          # 複数件を 1 プロセスで（下記「バッチモード」）
 
 echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC04430.jpg","mode":"preview","decoder_version":"9"}' | $B
 ```
@@ -51,7 +52,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.4.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.5.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
@@ -319,7 +320,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04705.ARW","output":"'$PWD'/work/dia
 
 ## レスポンス（stdout に JSON 1 行）
 
-stdout には JSON 1 行だけを書く。ログは stderr。キーはソート済み。
+stdout には JSON 1 行だけを書く（`--batch` では応答 1 件につき 1 行。上記「バッチモード」）。ログは stderr。キーはソート済み。
 
 ### 成功（終了コード 0）
 
@@ -367,6 +368,78 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 | `WRITE_FAILED` | エンコード・一時ファイル書き込み・rename の失敗 |
 | `INTERNAL_ERROR` | 想定外の例外 |
 
+## バッチモード（CLI 0.5.0、Issue #82）
+
+PSO（1 枚につき数十回の小さなレンダ）やブラケット合成（2〜9 フレームを同じ設定で現像）向けに、1 プロセスで複数の
+リクエストを順に処理する。Rust 側の受け口は `src-tauri/src/coreimage.rs` の `BatchSession`。
+
+```sh
+printf '%s\n' '{"input":"/abs/a.ARW","output":"/abs/work/a.jpg","mode":"preview","max_edge":640}' \
+              '{"input":"/abs/b.ARW","output":"/abs/work/b.jpg","mode":"preview","max_edge":640}' \
+  | $B --batch
+```
+
+- `--batch` を**唯一の引数**として起動する（他の引数と併用すると従来どおり未知の引数として終了コード 2）。
+- stdin は JSON Lines。**1 行 = 1 リクエスト**で、形式は単発のリクエストそのまま（改行を含まない 1 行の JSON にする）。
+- 応答は 1 件につき 1 行を stdout に書き、1 行ごとに書き切る（`write(2)`、バッファしない）。順序はリクエストの順。
+  stdout には応答以外を書かない。ログは stderr（`#<sequence> ok ...` / `#<sequence> error ...` と最後に `batch done: N request(s)`）。
+- 応答には `sequence` が付く。**1 始まり**の、受け付けた順の番号（空行以外の行を 1 件と数える）。
+  呼び出し側は「送った件数」と照合すればよい。単発の呼び出しでは `sequence` を付けない（キー自体が無い）。
+- 1 件が失敗しても `{"error":{...},"ok":false,"sequence":N}`（単発の失敗応答 + `sequence`）を返して次へ進む。プロセスは落とさない。
+- 空行（空白だけの行を含む）は読み飛ばし、応答も番号も出さない。JSON として壊れている行には `INVALID_REQUEST` を返す（番号は消費する）。
+- stdin の EOF で終了する。終了コードは個々の成否に関わらず 0。stdout の読み手が先に居なくなった（EPIPE）ときはそこで止めて 0 で終わる。
+
+### 使い回すもの・使い回さないもの
+
+- **`CIContext` はプロセスで 1 つを使い回し、1 件ごとに `clearCaches()` する**。`clearCaches()` しないと、同じ RAW を
+  続けて回したときに 1 件あたりの時間が伸び続けた（下の計測。30 件で 1 件 1.3 秒 → 2.3 秒、CPU 時間も約 2 倍）。
+  各件は `autoreleasepool` で囲む。
+- **`CIRAWFilter` は使い回さない（毎回作る）**。同じ `input` が続く場合でも作り直す。理由（macOS 27.0.1 での実測）:
+  - `outputImage` を参照するたびに extent が半分になる（6000×4000・scaleFactor 0.1 で 600×400 → 300×200 → 150×100）。
+    `decoderVersion` を設定し直しても戻らない。使い回すと 2 件目以降が正しい寸法で出ない。
+  - 同じ値の `decoderVersion` の再設定は何もしない（他のパラメータも戻らない）。別の版へ切り替えると既定に戻るのは
+    sharpness / NR / boostShadowAmount / baselineExposure だけで、exposure・neutralTemperature/Tint・レンズ補正・boostAmount・
+    gamut mapping・scaleFactor・`linearSpaceFilter` は前の値が残る。「`decoder_version` を先に設定して他を設定し直す」では
+    前のリクエストの設定が漏れないことを保証できない。
+  - 作り直しのコストは 1 件約 80 ms（`CIRAWFilter(imageURL:)` を 10 回で 780 ms。最初の 1 回は約 260 ms）。640px の
+    preview 1 件（約 1.4 秒）の 6% 程度で、正しさを優先した。`CIContext` の生成は 1 件約 7 ms。
+- バッチの出力が単発とバイト単位で一致すること、前の件の設定（neutral・個別上書き・診断の `linear_space_filter`・
+  `adjustments`・別ファイル）が次の件に漏れないことは `BatchTests.testBatchOutputIsByteIdenticalToSingleShotAndDoesNotLeakSettings`
+  （tiff16 で比較）が確かめる。
+
+### 計測（2026-10-21、Apple M3 / macOS 27.0.1）
+
+元データ `/Volumes/Backup/100MSDCF/*.ARW`（読むだけ）。出力は `work/bench/`（gitignore 済み）。リクエストはアプリの既定と同じ
+`decoder_version "9"`・`apple_default`・レンズ補正 ON、`format: jpeg`。「単発 × N」は 1 件ごとに CLI を起動し、
+「バッチ」は同じ N 件を 1 回の `--batch` に流した壁時計時間（`perl -MTime::HiRes` で計測。事前に ARW を一度読んでページキャッシュに載せた）。
+
+| ケース | 件数 | 単発 × N（1 件あたり） | バッチ（1 件あたり） | 差 |
+|---|---|---|---|---|
+| preview 長辺 640px、同じファイル（DSC04430）が続く | 30 | 50.73 秒（1691 ms） | 44.48 秒（1483 ms） | −12% |
+| preview 長辺 640px、別々のファイル（ソート順で 7 件おきの 30 ファイル） | 30 | 47.72 秒（1591 ms） | 42.59 秒（1420 ms） | −11% |
+| full（原寸 6000×4000）、別々のファイル | 9 | 23.29 秒（2588 ms） | 21.79 秒（2421 ms） | −6% |
+
+- **どのケースもバッチの方が 1 件あたり短い**。縮んだのはプロセス起動・初期化のぶん（1 件あたり約 0.2 秒）。
+  640px でも CLI 内の 1 件の処理時間（応答の `elapsed_ms.total`）は中央値 1.36〜1.47 秒あり、ほとんどが RAW のデコード
+  （`render_encode`）なので、バッチ化だけで桁は変わらない。
+- `clearCaches()` の有無（同じファイル 30 件）: 無し 54.68 秒（1823 ms/件、後半ほど遅い）、有り 44.5 秒、1 件ごとに
+  `CIContext` を作る場合 45.8 秒。
+- ピーク RSS（`/usr/bin/time -l` の maximum resident set size）: full 9 件のバッチで 359,383,040 byte（約 343 MiB。
+  peak memory footprint 約 1.09 GiB）。単発の full 1 件は 289,538,048 byte（約 276 MiB。footprint 約 1.01 GiB）。
+  preview 640px 30 件のバッチは約 187 MiB（単発 1 件 約 184 MiB）。件数に比例しては増えない。
+
+計測コマンド（zsh。`$B` は `.build/release/geoframe-ci-develop`、`$OUT` は `work/bench/<ケース>`）:
+
+```sh
+req() { print -r -- "{\"input\":\"$1\",\"output\":\"$OUT/$2.jpg\",\"mode\":\"preview\",\"max_edge\":640,\"decoder_version\":\"9\",\"settings\":{\"profile\":\"apple_default\",\"lens_correction\":true}}"; }
+# full は "mode":"full" にして max_edge を外す
+files=(/Volumes/Backup/100MSDCF/*.ARW)
+inputs=(); for i in {1..30}; do inputs+=(${files[$((i*7))]}); done        # 同じファイルのケースは DSC04430.ARW × 30
+for i in {1..30}; do req ${inputs[$i]} s-$i | $B > /dev/null 2>&1; done   # 単発 × 30
+for i in {1..30}; do req ${inputs[$i]} b-$i; done >| $OUT/batch.jsonl
+/usr/bin/time -l $B --batch < $OUT/batch.jsonl > $OUT/batch.out           # バッチ（RSS もここで取る）
+```
+
 ## 出力
 
 | format | 画素 | 色空間 / ICC | メタデータ |
@@ -392,5 +465,6 @@ stdout には JSON 1 行だけを書く。ログは stderr。キーはソート�
 ## 制限（PoC）
 
 - 対象は ARW のみ（拡張子で判定）。
-- 1 プロセス 1 リクエスト。並列実行時のメモリ使用量は未計測（full TIFF16 で 16bit バッファ約 192MB + CI 中間）。
+- 単発の呼び出しは 1 プロセス 1 リクエスト。複数件は `--batch`（上記「バッチモード」）で 1 プロセスに流せる。
+  並列実行時のメモリ使用量は未計測（full TIFF16 で 16bit バッファ約 192MB + CI 中間）。
 - 未確認事項は ADR「未確認事項・後続」を参照。

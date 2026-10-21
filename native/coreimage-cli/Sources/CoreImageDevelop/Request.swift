@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.4.0"
+public let cliVersion = "0.5.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {

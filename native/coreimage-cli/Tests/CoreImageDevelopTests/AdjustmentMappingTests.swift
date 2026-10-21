@@ -231,7 +231,7 @@ final class AdjustmentMappingTests: XCTestCase {
     }
 
     func testCapabilitiesAdvertiseAdjustments() throws {
-        XCTAssertEqual(cliVersion, "0.4.0")
+        XCTAssertEqual(cliVersion, "0.5.0")
         let json = encodeJSONLine(Capabilities(probe: nil))
         XCTAssertTrue(json.contains(#""adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true}"#), json)
     }
