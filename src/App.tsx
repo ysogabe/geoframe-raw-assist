@@ -32,6 +32,7 @@ import {
   getAnalysis,
   getDriveUploadState,
   getHealth,
+  getPresets,
   getSourceFolder,
   generateDevelopmentCandidates,
   importToPhotos,
@@ -127,6 +128,8 @@ export default function Home() {
 
     const checkHealth = (attempt: number) => {
       getHealth()
+        // プリセットは Tauri なら Rust（get_presets）を優先し、失敗・ブラウザモードでは health の値を使う（#80）。
+        .then(async (payload) => ({ ...payload, presets: await getPresets(payload.presets) }))
         .then((payload) => {
           if (!cancelled) dispatch({ type: "health/ok", health: payload });
         })

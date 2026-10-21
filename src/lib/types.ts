@@ -31,7 +31,8 @@ export type CaptureId = string;
 /**
  * プリセット名。
  * union 型は意図的に廃止した（Python 側との二重定義を避けるため）。
- * 実際の一覧は GET /api/health の `presets` から動的に取得する。
+ * 実際の一覧は動的に取得する（Tauri では Rust の `get_presets`、ブラウザモードと取得失敗時は
+ * GET /api/health の `presets`。raw-api.ts の `getPresets`。Issue #80）。
  */
 export type PresetName = string;
 

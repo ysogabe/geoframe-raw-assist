@@ -9,8 +9,11 @@
 //!   キャッシュ鍵が割れないように）。bool・文字列・null・非有限値は拒否する。
 //! - `noise_reduction` は `off` / `light` / `full` のいずれか（大文字小文字は区別する）。
 //!
-//! 今後の拡張（#80 プリセットの Rust 移行）: このモジュールにプリセット表と
-//! `resolve_adjustments(preset, overrides)` を足し、最後に `normalize_adjustments` を通す形にする。
+//! 責務（#80 で整理）: このモジュールは Adjustments の**値域と検証・正規化**だけを持つ。
+//! プリセット表と `resolve_adjustments(preset, overrides)` は `crate::presets` にあり、
+//! 既定値へのマージ後に必ずここの `normalize_adjustments` を通す（規則はここ 1 か所）。
+//! 値域の一致はフィクスチャ `tests/fixtures/presets.json` で Python・フロントと突き合わせる
+//! （`presets.rs` のテスト）。
 //! Tauri コマンドの署名は変えない。正規化規則（クランプ・float 化）を変えたら
 //! `coreimage::CACHE_KEY_SCHEMA` を上げること。
 

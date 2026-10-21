@@ -677,6 +677,16 @@ outputs/
 全プリセットは `Adjustments` の全キーを持つ。rawpy 固定値は AHD / sRGB / 16bit（最終JPEGは8bit）。
 数値は初期案であり、**Wave 3 で実画像を見ながら微調整してよい**（キー構成と name は凍結）。
 
+> **定義の正は Rust 側へ移る（Issue #80）。** プリセット表と `resolve_adjustments` は
+> `src-tauri/src/presets.rs`、値域（§2）と検証・正規化は `src-tauri/src/adjustments.rs` が持つ。
+> デスクトップアプリの UI は Tauri コマンド `get_presets`（戻り値は `PresetInfo[]`）から一覧を取り、
+> ブラウザモードと取得失敗時だけ `GET /api/health` の `presets` を使う。
+> Python の表（`local_raw/presets.py` の `PRESETS` / `ADJUSTMENT_RANGES`）は**移行完了まで同じ値を保つ**。
+> 一致はフィクスチャ `src-tauri/tests/fixtures/presets.json` で担保する（Python の
+> `tests/test_presets_fixture.py`、Rust の `presets.rs` のテスト、フロントの `src/lib/format.test.ts`
+> が同じファイルと突き合わせる。片方だけ変えるとどれかが落ちる）。値を変えるときは Python と Rust の
+> 両方を直してから `.venv/bin/python scripts/export_presets_fixture.py --write` で再生成する。
+
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `neutral_recovery` | 階調回復 | 0.0 | 0 | 15 | 60 | 1.0 | 1.03 | 1.02 | 1.04 | light |
