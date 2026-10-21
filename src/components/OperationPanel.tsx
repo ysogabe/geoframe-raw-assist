@@ -25,9 +25,9 @@ import type {
   DevelopmentCandidatesResponse,
   StarSceneInfo,
   GroupInfo,
-  HealthResponse,
   MergedResult,
   PhotoInfo,
+  PresetInfo,
   PresetName,
 } from "../lib/types";
 import { DevelopControls } from "./DevelopControls";
@@ -44,7 +44,8 @@ type OperationPanelProps = {
   onViewCapture: (groupId: number, captureId: CaptureId) => void;
   engineStatus: EngineStatus;
   engineVersion: string;
-  health: HealthResponse | null;
+  /** プリセット一覧（state.presets）。health とは独立に届く（#98）。 */
+  presets: PresetInfo[];
   presetName: PresetName;
   adjustments: Adjustments | null;
   changedKeys: (keyof Adjustments)[];
@@ -119,7 +120,7 @@ export function OperationPanel({
   onViewCapture,
   engineStatus,
   engineVersion,
-  health,
+  presets,
   presetName,
   adjustments,
   changedKeys,
@@ -192,7 +193,7 @@ export function OperationPanel({
   const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
   const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
   const result = showMerged ? mergedResult : developResult;
-  const presetLabel = health?.presets.find((preset) => preset.name === presetName)?.label ?? presetName;
+  const presetLabel = presets.find((preset) => preset.name === presetName)?.label ?? presetName;
 
   /**
    * 原寸ビューアの送り輪を組み立てる。**グループを跨いだ全写真**を一覧と同じ並び順で並べ、
@@ -461,7 +462,7 @@ export function OperationPanel({
           <DevelopControls
             engineStatus={engineStatus}
             engineVersion={engineVersion}
-            health={health}
+            presets={presets}
             presetName={presetName}
             adjustments={adjustments}
             changedKeys={changedKeys}

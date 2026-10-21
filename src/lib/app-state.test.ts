@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activePreset,
   currentDevelopmentCandidates,
   currentDevelopmentCandidatesResponse,
   effectiveAdjustments,
@@ -113,6 +114,8 @@ function run(state: State, ...actions: Action[]): State {
 const withEngine: State = {
   ...initialState,
   health: HEALTH,
+  presets: HEALTH.presets,
+  presetsSource: "health",
   engineStatus: "ready",
   analysis: analysisOf([group(1, ["A1", "A2"]), group(2, ["B1", "B2", "B3"], { kind: "bracket" })]),
 };
@@ -630,5 +633,113 @@ describe("effectiveAdjustments / resolveAdjustments（調整値の解決は 1 �
   it("coreimage-api の resolveAdjustments は同じ実装（再エクスポート）", async () => {
     const api = await import("./coreimage-api");
     expect(api.resolveAdjustments).toBe(resolveAdjustments);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// プリセット一覧を health から切り離す（#98）
+// ---------------------------------------------------------------------------
+
+describe("presets/loaded（#98）", () => {
+  const RUST_PRESETS: PresetInfo[] = [
+    preset("neutral_recovery", { exposure: 0.1 }),
+    preset("shadow_rescue", { shadow_lift: 70 }),
+    preset("nightscape"),
+  ];
+
+  it("health が無くてもプリセット一覧と既定の選択が決まる", () => {
+    const next = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    expect(next.presets).toBe(RUST_PRESETS);
+    expect(next.presetsSource).toBe("rust");
+    expect(next.health).toBeNull();
+    expect(next.presetName).toBe("neutral_recovery");
+    expect(activePreset(next)?.adjustments.exposure).toBe(0.1);
+    expect(effectiveAdjustments(next)).not.toBeNull();
+  });
+
+  it("既定プリセットが一覧に無ければ先頭を選ぶ", () => {
+    const presets = [preset("nightscape"), preset("landscape_clear")];
+    const next = reducer(initialState, { type: "presets/loaded", presets, source: "rust" });
+    expect(next.presetName).toBe("nightscape");
+  });
+
+  it("health/fail でもプリセット一覧と選択は残る", () => {
+    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const next = reducer(loaded, { type: "health/fail" });
+    expect(next.engineStatus).toBe("offline");
+    expect(next.presets).toBe(RUST_PRESETS);
+    expect(next.presetName).toBe("neutral_recovery");
+    expect(activePreset(next)).not.toBeNull();
+  });
+
+  it("ブラウザモード: health/ok が health.presets を取り込む", () => {
+    const next = reducer(initialState, { type: "health/ok", health: HEALTH });
+    expect(next.presets).toBe(HEALTH.presets);
+    expect(next.presetsSource).toBe("health");
+    expect(next.engineStatus).toBe("ready");
+  });
+
+  it("rust → health の順に届いても rust の一覧が残る", () => {
+    const next = run(
+      initialState,
+      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
+      { type: "health/ok", health: HEALTH },
+    );
+    expect(next.presets).toBe(RUST_PRESETS);
+    expect(next.presetsSource).toBe("rust");
+    expect(next.health).toBe(HEALTH);
+    expect(next.engineStatus).toBe("ready");
+  });
+
+  it("health → rust の順に届くと rust の一覧で置き換わる", () => {
+    const next = run(
+      initialState,
+      { type: "health/ok", health: HEALTH },
+      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
+    );
+    expect(next.presets).toBe(RUST_PRESETS);
+    expect(next.presetsSource).toBe("rust");
+  });
+
+  it("後から届いた一覧に選択中のプリセットがあれば presetName と overrides を保つ", () => {
+    const state: State = { ...withEngine, presetName: "shadow_rescue", overrides: { exposure: 1 } };
+    const next = reducer(state, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    expect(next.presetName).toBe("shadow_rescue");
+    expect(next.overrides).toEqual({ exposure: 1 });
+    expect(effectiveAdjustments(next)?.shadow_lift).toBe(70);
+    expect(effectiveAdjustments(next)?.exposure).toBe(1);
+  });
+
+  it("後から届いた一覧に選択中のプリセットが無ければ推薦し直し、候補を捨てる", () => {
+    const shown: State = { ...stateShowingCandidates(), presetName: "landscape_clear" };
+    const next = reducer(shown, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    expect(next.presetName).toBe("neutral_recovery");
+    expect(next.developmentCandidates).toBeNull();
+  });
+
+  it("一覧未着で操作画面に入った推薦は、一覧到着後も保たれる", () => {
+    const shadowGroup = group(3, ["C1"], {
+      raw: { level: "maybe", label: "", reason_codes: ["deep_shadows"], reasons: [] },
+    } as Partial<GroupInfo>);
+    const state: State = { ...initialState, analysis: analysisOf([shadowGroup]) };
+    const next = run(
+      state,
+      { type: "screen/operation", groupId: 3 },
+      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
+    );
+    expect(next.presetName).toBe("shadow_rescue");
+  });
+
+  it("空の一覧は既存の一覧を潰さない", () => {
+    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const next = reducer(loaded, { type: "presets/loaded", presets: [], source: "rust" });
+    expect(next).toBe(loaded);
+  });
+
+  it("source/changed でもプリセット一覧を引き継ぐ", () => {
+    const loaded = reducer(withEngine, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const next = reducer(loaded, { type: "source/changed", info: folder("/other"), message: "" });
+    expect(next.presets).toBe(RUST_PRESETS);
+    expect(next.presetsSource).toBe("rust");
   });
 });

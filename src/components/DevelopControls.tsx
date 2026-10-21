@@ -1,13 +1,14 @@
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
-import type { Adjustments, HealthResponse, NoiseReduction, PresetName } from "../lib/types";
+import type { Adjustments, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
 import type { DevelopmentCandidate, DevelopmentCandidatesResponse, StarSceneInfo } from "../lib/types";
 import { DevelopmentCandidates } from "./DevelopmentCandidates";
 
 type DevelopControlsProps = {
   engineStatus: EngineStatus;
   engineVersion: string;
-  health: HealthResponse | null;
+  /** プリセット一覧（state.presets）。health とは独立に届く（#98）。 */
+  presets: PresetInfo[];
   presetName: PresetName;
   adjustments: Adjustments | null;
   changedKeys: (keyof Adjustments)[];
@@ -40,7 +41,7 @@ type DevelopControlsProps = {
 export function DevelopControls({
   engineStatus,
   engineVersion,
-  health,
+  presets,
   presetName,
   adjustments,
   changedKeys,
@@ -63,7 +64,6 @@ export function DevelopControls({
   onGenerateCandidates,
   onApplyCandidate,
 }: DevelopControlsProps) {
-  const presets = health?.presets ?? [];
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
   const busy = developMode !== null || mergeBusy || developmentCandidatesBusy;
   const disabled = engineStatus !== "ready" || !adjustments;
