@@ -19,6 +19,7 @@
 
 mod adjustments;
 mod coreimage;
+mod presets;
 
 use std::env;
 use std::fs;
@@ -893,7 +894,9 @@ fn main() {
             setup_status,
             // Core Image プレビュー現像（Issue #72 / #73）。GEOFRAME_PREVIEW_ENGINE=rawpy で切り戻し。
             coreimage::preview_engine,
-            coreimage::develop_preview_coreimage
+            coreimage::develop_preview_coreimage,
+            // プリセット定義（Issue #80）。定義の正は Rust 側。Python の /api/health は移行期間中の予備。
+            presets::get_presets
         ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;

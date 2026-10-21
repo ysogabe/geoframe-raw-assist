@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { isTauri } from "./setup";
 import type {
   Adjustments,
   AnalysisResponse,
@@ -12,6 +14,7 @@ import type {
   HealthResponse,
   ImportToPhotosResponse,
   MergedResult,
+  PresetInfo,
   PresetName,
   SourceFolderErrorReason,
   SourceFolderInfo,
@@ -104,6 +107,24 @@ async function postJson(path: string, body: unknown, fallback: string): Promise<
 
 export async function getHealth(): Promise<HealthResponse> {
   return (await getJson("/api/health", "ローカルRAWエンジンに接続できません。")) as HealthResponse;
+}
+
+/**
+ * プリセット一覧（`PresetInfo[]`。Issue #80）。定義の正は Rust（src-tauri/src/presets.rs）。
+ *
+ * - Tauri 実行時は `invoke("get_presets")` を優先する（Python エンジンを経由しない）。
+ * - ブラウザモード（isTauri() === false）では invoke を呼ばず、`/api/health` の `presets`（= fallback）を返す。
+ * - Tauri 側の取得に失敗した・空だったときも fallback に戻る（移行期間中は両方が同じ値を持つ。
+ *   一致は src-tauri/tests/fixtures/presets.json のテストで担保）。
+ */
+export async function getPresets(fallback: PresetInfo[]): Promise<PresetInfo[]> {
+  if (!isTauri()) return fallback;
+  try {
+    const presets = await invoke<PresetInfo[]>("get_presets");
+    return Array.isArray(presets) && presets.length > 0 ? presets : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function getAnalysis(): Promise<AnalysisResponse> {
