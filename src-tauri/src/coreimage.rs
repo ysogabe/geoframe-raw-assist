@@ -154,39 +154,8 @@ pub struct CoreImagePreviewResult {
 
 /// `<app_data_dir>/config.json` の `source_root` を読む（書き込まない）。
 pub fn read_source_root(app_data_dir: &Path) -> Result<PathBuf, CoreImageError> {
-    let config_path = app_data_dir.join("config.json");
     probe::note_config_read();
-    let text = match fs::read_to_string(&config_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CoreImageError::new(
-                "SOURCE_ROOT_NOT_CONFIGURED",
-                "現像元フォルダが未設定です（先にアプリで現像元フォルダを選んでください）",
-            ));
-        }
-        Err(error) => {
-            return Err(CoreImageError::new(
-                "CONFIG_UNREADABLE",
-                format!(
-                    "設定ファイルを読めません: {}: {error}",
-                    config_path.display()
-                ),
-            ));
-        }
-    };
-    let value: Value = serde_json::from_str(&text).map_err(|error| {
-        CoreImageError::new(
-            "CONFIG_INVALID",
-            format!("設定ファイルが JSON として読めません: {error}"),
-        )
-    })?;
-    match value.get("source_root").and_then(Value::as_str) {
-        Some(root) if !root.is_empty() && Path::new(root).is_absolute() => Ok(PathBuf::from(root)),
-        _ => Err(CoreImageError::new(
-            "SOURCE_ROOT_NOT_CONFIGURED",
-            "設定ファイルに現像元フォルダ（source_root の絶対パス）がありません",
-        )),
-    }
+    crate::source_folder::read_source_root(app_data_dir)
 }
 
 /// config.json の同一性の目印（Issue #94）。サイズ・mtime・inode の組。
@@ -2001,7 +1970,7 @@ mod tests {
         fs::write(dir.path().join("config.json"), "{not json").unwrap();
         assert_eq!(
             read_source_root(dir.path()).unwrap_err().code,
-            "CONFIG_INVALID"
+            "SOURCE_ROOT_NOT_CONFIGURED"
         );
         fs::write(dir.path().join("config.json"), r#"{"config_version":1}"#).unwrap();
         assert_eq!(
@@ -2165,7 +2134,7 @@ mod tests {
         fs::write(&config, "{not json").unwrap();
         assert_eq!(
             read_source_root_cached(app.path()).unwrap_err().code,
-            "CONFIG_INVALID"
+            "SOURCE_ROOT_NOT_CONFIGURED"
         );
         fs::remove_file(&config).unwrap();
         assert_eq!(

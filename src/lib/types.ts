@@ -595,7 +595,7 @@ export type SourceFolderInfo = {
   path: string;
   /** 表示用。プロジェクト相対 / "~/..." / 絶対のいずれか */
   display_path: string;
-  /** 既定の sample/100MSDCF のままかどうか */
+  /** 単一アプリ化で意味が無くなった（常に false） */
   is_default: boolean;
   exists: boolean;
   /** 読み取り可能か。false は macOS のアクセス許可が無い場合を含む */

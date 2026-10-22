@@ -66,6 +66,14 @@ export function isSourceFolderApiError(error: unknown): error is SourceFolderApi
   return error instanceof SourceFolderApiError;
 }
 
+/** Tauri の invoke rejection payload を既存 UI 向けエラーへ写す。 */
+export function sourceFolderApiErrorFromInvoke(error: unknown): SourceFolderApiError {
+  const body = (error ?? {}) as { code?: unknown; reason?: unknown; message?: unknown };
+  const message = typeof body.message === "string" ? body.message : "現像対象フォルダを変更できませんでした。";
+  const reason = typeof body.reason === "string" ? (body.reason as SourceFolderErrorReason) : null;
+  return new SourceFolderApiError(message, typeof body.code === "string" ? 400 : 0, reason);
+}
+
 /** 未実装エンドポイント（404）・接続不能を呼び出し側が判別するための印。 */
 export function isEndpointUnavailable(error: unknown): boolean {
   if (error instanceof RawApiError) return error.status === 404;
@@ -215,6 +223,7 @@ export async function exportSelection(batchName: string, items: ExportItem[]): P
 
 /** 現在の現像対象フォルダ。エンジン未起動・未実装時は isEndpointUnavailable が true になる。 */
 export async function getSourceFolder(): Promise<SourceFolderInfo> {
+  if (isTauri()) return invoke<SourceFolderInfo>("get_source_folder");
   return (await getJson("/api/source-folder", "現像対象フォルダを取得できませんでした。")) as SourceFolderInfo;
 }
 
@@ -225,6 +234,13 @@ export async function getSourceFolder(): Promise<SourceFolderInfo> {
  */
 export async function setSourceFolder(path: string): Promise<SourceFolderInfo> {
   const fallback = "現像対象フォルダを変更できませんでした。";
+  if (isTauri()) {
+    try {
+      return await invoke<SourceFolderInfo>("set_source_folder", { path });
+    } catch (error) {
+      throw sourceFolderApiErrorFromInvoke(error);
+    }
+  }
   const response = await fetch(`${LOCAL_RAW_API}/api/source-folder`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
