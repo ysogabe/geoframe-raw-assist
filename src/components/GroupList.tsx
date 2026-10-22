@@ -68,7 +68,7 @@ export function GroupList({
                 )}
               </div>
               <div className="group-copy">
-                <div className="group-meta"><span>{groupKindLabel(group.kind)}</span><small>信頼度 {formatConfidence(group.confidence)}%</small></div>
+                <div className="group-meta"><span>{groupKindLabel(group.kind)}</span>{analysis.scored !== false && <small>信頼度 {formatConfidence(group.confidence)}%</small>}</div>
                 <h3>{group.title}</h3>
                 <div className="recommendation"><span className="spark">✦</span><p><strong>{recommendedCaptureId}</strong><small>{reason}</small></p></div>
                 {/* 何を採用したのかは件数だけでは分からない。カードを開かずに読めるようにする。 */}

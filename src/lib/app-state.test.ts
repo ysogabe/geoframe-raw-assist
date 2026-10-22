@@ -758,3 +758,43 @@ describe("presets/loaded（#98）", () => {
     expect(next.presetsSource).toBe("rust");
   });
 });
+
+describe("フォルダ未設定（analysis/unconfigured。#110）", () => {
+  it("unconfigured になり、解析結果・進捗・エラーを捨てる", () => {
+    const before: State = {
+      ...withEngine,
+      analysisState: "running",
+      analysisProgress: { stage: "thumbnails", done: 1, total: 2 },
+      analyzeRequested: true,
+      analysisError: "x",
+    };
+    const next = reducer(before, { type: "analysis/unconfigured" });
+    expect(next.analysisState).toBe("unconfigured");
+    expect(next.analysis).toBeNull();
+    expect(next.analysisProgress).toBeNull();
+    expect(next.analysisError).toBe("");
+    expect(next.analyzeRequested).toBe(false);
+  });
+
+  it("フォルダを設定すると（source/changed）未設定から抜け、解析を開始できる", () => {
+    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured" });
+    const changed = reducer(unconfigured, { type: "source/changed", info: folder("/photos"), message: "変更" });
+    expect(changed.analysisState).toBe("unknown");
+    expect(changed.sourceFolder?.path).toBe("/photos");
+    const requested = reducer(changed, { type: "analysis/requested" });
+    expect(requested.analysisState).toBe("running");
+  });
+
+  it("再取得で absent / ready が返れば未設定から戻り、absent の error を保持する", () => {
+    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured" });
+    const absent = reducer(unconfigured, { type: "analysis/status", response: { status: "absent", error: "失敗" } });
+    expect(absent.analysisState).toBe("absent");
+    expect(absent.analysisError).toBe("失敗");
+    const ready = reducer(unconfigured, {
+      type: "analysis/status",
+      response: { status: "ready", analysis: { ...analysisOf([]), scored: false } },
+    });
+    expect(ready.analysisState).toBe("ready");
+    expect(ready.analysis?.scored).toBe(false);
+  });
+});

@@ -38,6 +38,7 @@ import {
   importToPhotos,
   isEndpointUnavailable,
   isSourceFolderApiError,
+  isSourceRootNotConfigured,
   mergeBracket,
   setSourceFolder,
   startAnalyze,
@@ -61,6 +62,7 @@ import { GroupStrip } from "./components/GroupStrip";
 import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 import { FullSizeViewer } from "./components/FullSizeViewer";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getSetupStatus, isTauri, onSetupUpdate, type SetupState } from "./lib/setup";
 import {
   coreImageErrorMessage,
@@ -92,7 +94,17 @@ const HEALTH_CHECK_MAX_ATTEMPTS = 20; // 1000ms × 20 ≈ 20秒、冷間起動�
 const MEDIA_CARD_GAP = 12;
 
 function messageOf(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  if (error instanceof Error && error.message) return error.message;
+  // Tauri の invoke は { code, message } の素のオブジェクトで reject する。
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === "string" && message ? message : fallback;
+}
+
+/** エンジン停止時の案内。Tauri では npm を使わないので、アプリの再起動を促す。 */
+function engineStoppedMessage(): string {
+  return isTauri()
+    ? "現像エンジンを利用できません。アプリを再起動してください"
+    : "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください";
 }
 
 /** POST /api/source-folder の失敗を、reason 別の案内文に落とす。 */
@@ -227,6 +239,10 @@ export default function Home() {
       const response = await getAnalysis();
       dispatch({ type: "analysis/status", response });
     } catch (error) {
+      if (isSourceRootNotConfigured(error)) {
+        dispatch({ type: "analysis/unconfigured" });
+        return;
+      }
       dispatch({ type: "analysis/error", message: messageOf(error, "解析状況を取得できませんでした。") });
     }
   }, []);
@@ -511,7 +527,26 @@ export default function Home() {
         await pollAnalysis();
       }
     } catch (error) {
+      if (isSourceRootNotConfigured(error)) {
+        dispatch({ type: "analysis/unconfigured" });
+        return;
+      }
       dispatch({ type: "analysis/error", message: messageOf(error, "解析を開始できませんでした。") });
+    }
+  }
+
+  /** 「フォルダ未設定」画面から、SourceFolderPanel と同じネイティブダイアログで現像元を選ぶ。 */
+  async function pickFolderForGate() {
+    try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (typeof selected !== "string" || !selected) return;
+      await applySourceFolder(selected);
+    } catch (error) {
+      dispatch({
+        type: "notice/set",
+        message: messageOf(error, "フォルダ選択ダイアログを開けませんでした。"),
+        tone: "error",
+      });
     }
   }
 
@@ -551,7 +586,7 @@ export default function Home() {
   async function runDevelop(mode: DevelopMode) {
     if (!group || !captureId) return;
     if (state.engineStatus !== "ready") {
-      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください", tone: "error" });
+      dispatch({ type: "notice/set", message: engineStoppedMessage(), tone: "error" });
       return;
     }
     const preset = activePreset(state);
@@ -647,7 +682,7 @@ export default function Home() {
     // 多重起動はコストが大きいのでここでも弾く。
     if (state.developMode || state.mergeMode || state.developmentCandidatesBusy) return;
     if (state.engineStatus !== "ready") {
-      dispatch({ type: "notice/set", message: "ローカルRAWエンジンが停止中です。npm run dev:raw で起動してください", tone: "error" });
+      dispatch({ type: "notice/set", message: engineStoppedMessage(), tone: "error" });
       return;
     }
     const preset = activePreset(state);
@@ -849,6 +884,8 @@ export default function Home() {
             errorMessage={state.analysisError}
             busy={state.analyzeRequested}
             onStart={() => void beginAnalyze(false)}
+            native={isTauri()}
+            onPickFolder={() => void pickFolderForGate()}
           />
         ) : screen === "operation" && group && viewing ? (
           <>

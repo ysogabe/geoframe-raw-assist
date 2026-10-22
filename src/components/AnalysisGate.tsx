@@ -9,10 +9,24 @@ type AnalysisGateProps = {
   errorMessage: string;
   busy: boolean;
   onStart: () => void;
+  /** Tauri 実行か。true のとき Python エンジン前提の文言を出さない。 */
+  native?: boolean;
+  /** 「フォルダ未設定」画面から現像元フォルダを選ぶ（ネイティブダイアログ）。 */
+  onPickFolder?: () => void;
 };
 
-export function AnalysisGate({ engineStatus, analysisState, progress, errorMessage, busy, onStart }: AnalysisGateProps) {
+export function AnalysisGate({ engineStatus, analysisState, progress, errorMessage, busy, onStart, native = false, onPickFolder }: AnalysisGateProps) {
   if (engineStatus === "offline") {
+    if (native) {
+      return (
+        <section className="analysis-gate screen-enter" aria-label="現像エンジンの状態">
+          <span className="gate-mark offline">!</span>
+          <h2>現像エンジンを利用できません</h2>
+          <p>アプリを再起動してください。解決しない場合は、アプリを入れ直してください。</p>
+          <p className="gate-note">画像が外部へ送信されることはありません。</p>
+        </section>
+      );
+    }
     return (
       <section className="analysis-gate screen-enter" aria-label="ローカルRAWエンジンの状態">
         <span className="gate-mark offline">!</span>
@@ -22,6 +36,22 @@ export function AnalysisGate({ engineStatus, analysisState, progress, errorMessa
           この画面を再読み込みしてください。
         </p>
         <p className="gate-note">画像が外部へ送信されることはありません。</p>
+      </section>
+    );
+  }
+
+  if (analysisState === "unconfigured") {
+    return (
+      <section className="analysis-gate screen-enter" aria-label="現像元フォルダの設定">
+        <span className="gate-mark">◱</span>
+        <h2>まず現像元フォルダを選んでください</h2>
+        <p>
+          撮影したJPGとARWが入っているフォルダ（例: <code>100MSDCF</code>）を選ぶと、解析を始められます。
+        </p>
+        <button className="primary-action gate-action" onClick={onPickFolder} disabled={busy || !onPickFolder}>
+          {busy ? "開始しています…" : "フォルダを選ぶ"}
+        </button>
+        <p className="gate-note">元のJPG / ARWは変更されません。</p>
       </section>
     );
   }
@@ -71,9 +101,12 @@ export function AnalysisGate({ engineStatus, analysisState, progress, errorMessa
         <span className="gate-mark">✦</span>
         <h2>まず写真を解析します</h2>
         <p>
-          撮影フォルダのJPGとARWを読み取り、似たカットのグループ分け・ピント・白飛び・黒つぶれの採点までを行います。
+          {native
+            ? "撮影フォルダのJPGとARWを読み取り、似たカットのグループ分けを行います（ピント・白飛びなどの採点は今のところ未対応です）。"
+            : "撮影フォルダのJPGとARWを読み取り、似たカットのグループ分け・ピント・白飛び・黒つぶれの採点までを行います。"}
           初回は数十秒かかります。
         </p>
+        {errorMessage && <p className="gate-note">前回の解析で問題が起きました: {errorMessage}</p>}
         <button className="primary-action gate-action" onClick={onStart} disabled={busy}>
           {busy ? "開始しています…" : "解析を開始"}
         </button>
