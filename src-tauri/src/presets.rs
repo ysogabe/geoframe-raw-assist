@@ -81,8 +81,8 @@ const PRESETS: [PresetDef; 11] = [
         name: "sunset_glow",
         label: "夕景・マジックアワー",
         description: "夕焼けの暖色を強め空の階調を守る",
-        // 実効 (−0.7EV, lift 48) = C1' 標準 + 8。旧 −0.1EV は写像の ΔEV と二重になるので 0（設計書 §7.2）。
-        numbers: [0.0, 12.0, 8.0, 60.0, 1.0, 1.05, 1.07, 1.03],
+        // 実効 (−0.7EV, lift 44) = C1' 標準 + 4（#81 run2: 中間調を CI 既定 ±0.03 に収める）。旧 −0.1EV は写像の ΔEV と二重になるので 0（設計書 §7.2）。
+        numbers: [0.0, 12.0, 4.0, 60.0, 1.0, 1.05, 1.07, 1.03],
         noise_reduction: "light",
     },
     PresetDef {

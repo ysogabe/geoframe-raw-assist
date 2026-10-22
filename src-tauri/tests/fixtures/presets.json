@@ -95,7 +95,7 @@
         "highlight_recovery": 60.0,
         "noise_reduction": "light",
         "saturation": 1.07,
-        "shadow_lift": 8.0,
+        "shadow_lift": 4.0,
         "sharpness": 1.03,
         "wb_temp": 12.0
       },

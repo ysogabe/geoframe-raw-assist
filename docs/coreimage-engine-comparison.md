@@ -1138,5 +1138,6 @@ K を 8bit JPEG から取った参考の内訳では、真に説明できない�
   `d_base`・11 プリセット・救済系の `<preset>_hr0`・追加の候補（案 C の hr 30、`landscape_clear` の弱め、`sunset_glow` hr 70、`highlight_rescue` hr 100）・
   rawpy の legacy プリセット（参考）を現像し、設計書 §7.4 の 1〜7 と §2.2 の等価性（条件 9）を判定、§8 のシートを出す。
 - CLI 0.6.0 で `highlight_recovery` を `exposure` / `shadow_lift` への区分線形の写像（60 → C1'、90 → 強め）に置き換えた。等価性は DSC07415 で tiff16 のバイト一致。
-- 2026-10-22 時点で、空の 10 カット・日中・室内のサンプルが読めず（ボリューム未マウント）、計測は夜景 3 カットのスモークまで。
-  結果と再開手順は [再調整レポート](coreimage-preset-retune-report.md)。
+- 結果（2026-10-22、空 10 + 日中 3 + 室内 2 + 夜景 3 カット、反復 2 回）: 条件 1〜5・7〜9 は合格、条件 6 は誤差レベルの不一致のみ。
+  救済系 3 種は空の白飛び（`sky_bright` の clip8 中央値）を 45% から 0〜3% に減らし、中間調は CI 既定とほぼ同じ（`backlit_rescue` は設計どおり +0.09）。
+  反復で `sunset_glow` の `shadow_lift` を 8 → 4 にした。詳細は [再調整レポート](coreimage-preset-retune-report.md)。

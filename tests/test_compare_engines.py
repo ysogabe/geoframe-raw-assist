@@ -1930,7 +1930,7 @@ class PresetsModeTests(unittest.TestCase):
         eff = {p["name"]: ce.effective_exposure_lift(p["adjustments"]) for p in self.presets}
         self.assertEqual(eff["highlight_rescue"], (-1.0, 55.0))  # = C1' 強め（設計書 §11-4）
         self.assertEqual(eff["backlit_rescue"], (-0.7, 70.0))
-        self.assertEqual(eff["sunset_glow"], (-0.7, 48.0))
+        self.assertEqual(eff["sunset_glow"], (-0.7, 44.0))  # run2 で lift 8 → 4
         self.assertEqual(eff["neutral_recovery"], (0.0, 15.0))
         self.assertEqual(ce.effective_exposure_lift({"exposure": 0.0, "shadow_lift": 50.0, "highlight_recovery": 90.0}), (-1.0, 100.0))
 
@@ -2021,6 +2021,18 @@ class PresetsModeTests(unittest.TestCase):
         # P_hr0 の白飛びが 1% 未満なら hr の寄与は n/a
         na = ce.preset_capture_checks("DSC04473", "preview", self._metrics(clip_hr0=0.005), 100, self.presets)
         self.assertIsNone(next(c for c in na if c["check"] == "hr_clip8_lt_hr0")["pass"])
+
+    def test_dbase_checks_mid_exempt_and_low_clip(self):
+        # 中間調が d_base から +0.09: backlit_rescue だけは中間調を問わない（被写体向けの lift）
+        checks = ce.preset_capture_checks("DSC04473", "preview", self._metrics(mid=0.55, mid_hr0=0.55), 100, self.presets)
+        by = {(c["preset"], c["check"]): c for c in checks if c["condition"] in (5, 6)}
+        self.assertTrue(by[("backlit_rescue", "dbase_clip8_and_mid")]["pass"])
+        self.assertFalse(by[("highlight_rescue", "dbase_clip8_and_mid")]["pass"])
+        # d_base の白飛びが 1% 未満なら条件 5 と条件 6 の clip8 の方向は n/a
+        low = ce.preset_capture_checks("DSC04872", "preview", self._metrics(clip_p=0.00001, clip_base=0.00002), 100, self.presets)
+        for c in low:
+            if c["check"] in ("dbase_clip8_and_mid", "direction_clip8_any"):
+                self.assertIsNone(c["pass"], (c["preset"], c["check"]))
 
     def test_check_summary_rules(self):
         checks = []

@@ -5615,6 +5615,8 @@ PRESET_DIRECTIONS: dict[str, tuple[tuple[str, int], ...]] = {
 PRESET_MONO_SAT_MAX = 0.01
 #: §7.4 の 1: P_hr0 の白飛びがこれ未満のカットは「hr の寄与」を n/a にする。
 PRESET_CLIP_MIN = 0.01
+# 条件 5 で中間調の幅（±MID_P50_TOL）を問わないプリセット。被写体を持ち上げる設計（設計書 §7.4・§11 #3）。
+PRESET_MID_EXEMPT = frozenset({"backlit_rescue"})
 #: §7.4 の 2・3・5 の割合（9/10・9/10・8/10）。
 PRESET_MID_FRACTION = 0.9
 PRESET_FG_FRACTION = 0.9
@@ -5800,8 +5802,15 @@ def preset_capture_checks(
         cb = _num(base.get("clip8_any"))
         mb, _ = _roi_value(base, "mid_p50", "p50_luma")
         md = m - mb
-        ok = (c < cb and abs(md) <= MID_P50_TOL) if all(math.isfinite(v) for v in (c, cb, md)) else None
-        add(5, "dbase_clip8_and_mid", name, md, f"clip8 < d_base かつ |mid_p50 − d_base| ≤ {MID_P50_TOL}", ok,
+        # backlit_rescue は被写体向けの lift 30 で中間調を上げる設計（オーナー判断 #3）なので中間調の幅は問わない。
+        # d_base の clip8 が PRESET_CLIP_MIN 未満のカットは救う白飛びが無いので n/a（条件 1 と同じ）。
+        mid_free = name in PRESET_MID_EXEMPT
+        if not all(math.isfinite(v) for v in (c, cb, md)) or cb < PRESET_CLIP_MIN:
+            ok = None
+        else:
+            ok = c < cb and (mid_free or abs(md) <= MID_P50_TOL)
+        rule = "clip8 < d_base（中間調は問わない）" if mid_free else f"clip8 < d_base かつ |mid_p50 − d_base| ≤ {MID_P50_TOL}"
+        add(5, "dbase_clip8_and_mid", name, md, f"{rule}（d_base ≥ {PRESET_CLIP_MIN} のとき）", ok,
             clip8=c, clip8_base=cb)
     # 6: 個性の方向（d_base 比）
     for name, decl in PRESET_DIRECTIONS.items():
@@ -5814,6 +5823,10 @@ def preset_capture_checks(
                 add(6, f"direction_{key}_zero", name, v, f"≤ {PRESET_MONO_SAT_MAX}", v <= PRESET_MONO_SAT_MAX if math.isfinite(v) else None)
                 continue
             delta = v - vb
+            if key == "clip8_any" and not (math.isfinite(vb) and vb >= PRESET_CLIP_MIN):
+                # d_base がほぼ白飛びしていないカットは減らす余地が無いので n/a（条件 1・5 と同じ）。
+                add(6, f"direction_{key}", name, delta, f"−（d_base ≥ {PRESET_CLIP_MIN} のとき）", None)
+                continue
             add(6, f"direction_{key}", name, delta, "+" if sign > 0 else "−",
                 direction_match(float(sign), delta) if math.isfinite(delta) else None)
     # 7: ノイズ（実効 lift ≥ 40 × ISO ≥ 1600）
