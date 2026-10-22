@@ -21,6 +21,7 @@ mod adjustments;
 mod analysis;
 mod coreimage;
 mod export;
+mod exif_inherit;
 mod presets;
 mod source_folder;
 
@@ -898,8 +899,8 @@ fn main() {
         .register_asynchronous_uri_scheme_protocol("geoframe", analysis::source_jpg_protocol)
         .invoke_handler(tauri::generate_handler![
             setup_status,
-            // Core Image プレビュー現像（Issue #72 / #73）。GEOFRAME_PREVIEW_ENGINE=rawpy で切り戻し。
-            coreimage::preview_engine,
+            // Core Image プレビュー・原寸現像（Issue #108）。
+            coreimage::develop_full_coreimage,
             coreimage::develop_preview_coreimage,
             // 「エンジン準備完了」の判定（Issue #109）。Python の /api/health の代わり。
             coreimage::engine_info,

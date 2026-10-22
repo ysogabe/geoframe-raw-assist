@@ -136,7 +136,7 @@ export function OperationPanel({
           // まだ現像していなければ見せられるのは現像前だけ。
           initial: developed ? initial : "before",
           preview: Boolean(developed?.preview),
-          // 長辺はエンジンで違う（rawpy 1600 / Core Image 2400）ので結果の寸法から渡す。
+          // 長辺はプレビューと本現像で違うので結果の寸法から渡す。
           previewEdge: developed?.preview ? Math.max(developed.width, developed.height) : undefined,
           title: id,
         };

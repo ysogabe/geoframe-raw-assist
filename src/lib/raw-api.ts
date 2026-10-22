@@ -1,25 +1,16 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
-  Adjustments,
   Analysis,
   AnalysisProgress,
   AnalysisResponse,
   AnalyzeResponse,
   CaptureId,
-  DevelopedResult,
   ExportItem,
   ExportResponse,
   PresetInfo,
-  PresetName,
   SourceFolderErrorReason,
   SourceFolderInfo,
 } from "./types";
-
-/**
- * 【#108 で削除】Python エンジンのベースURL。残っている利用者は原寸現像 `developRaw`
- * （/api/raw-develop）だけ。#108 で原寸現像を Core Image に移したら、この定数ごと消す。
- */
-export const LOCAL_RAW_API = "http://127.0.0.1:8788";
 
 /**
  * サムネイルなどのローカル絶対パス（`$APPDATA/thumbnails/...`）を asset プロトコルの URL にする。
@@ -113,48 +104,6 @@ export function normalizeAnalysisResponse(raw: unknown): AnalysisResponse {
 export async function startAnalyze(force = false): Promise<AnalyzeResponse> {
   const status = await invoke<AnalyzeResponse["status"]>("start_analysis", { force });
   return { status };
-}
-
-export type DevelopOptions = {
-  adjustments?: Partial<Adjustments>;
-  preview?: boolean;
-  force?: boolean;
-  maxEdge?: number;
-};
-
-/**
- * 【#108 で削除】Python の原寸現像（POST /api/raw-develop）。この fetch がフロントに残る唯一の
- * Python HTTP 経路で、#108 が `develop_full_coreimage`（invoke）に置き換えて関数ごと消す。
- */
-export async function developRaw(
-  captureId: CaptureId,
-  preset: PresetName,
-  options: DevelopOptions = {},
-): Promise<DevelopedResult> {
-  const body: Record<string, unknown> = { capture_id: captureId, preset };
-  if (options.adjustments && Object.keys(options.adjustments).length > 0) body.adjustments = options.adjustments;
-  if (options.preview) body.preview = true;
-  if (options.force) body.force = true;
-  if (typeof options.maxEdge === "number") body.max_edge = options.maxEdge;
-  const response = await fetch(`${LOCAL_RAW_API}/api/raw-develop`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  let payload: unknown = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
-        ? (payload as { error: string }).error
-        : "RAW現像に失敗しました。";
-    throw new Error(message);
-  }
-  return payload as DevelopedResult;
 }
 
 export async function exportSelection(batchName: string, items: ExportItem[]): Promise<ExportResponse> {

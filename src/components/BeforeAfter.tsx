@@ -63,8 +63,7 @@ export function BeforeAfter({
   // ここは `merged` ではなくガードで書く（変数経由だと result の型が絞られない）。
   const beforeCaptureId = isMergedResult(result) ? captureId : result.capture_id;
   const canToggle = Boolean(view && onChangeView);
-  // Core Image プレビュー（#72）。書き出し（本現像）は従来どおり rawpy なので見え方の差を明示する。
-  // 合成結果は engine を持たない（常に rawpy）。ガードで書くのは result の型を絞るため。
+  // プレビュー・本現像とも Core Image。合成結果には engine がないので型を絞る。
   const coreImage = !isMergedResult(result) && result.engine === "coreimage";
   const highlightNote = coreImage && !isMergedResult(result) ? formatHighlightRecoveryEffect(result.highlight_recovery_effect) : null;
 
@@ -102,7 +101,7 @@ export function BeforeAfter({
             </span>
           )}
           {result.preview && <span className="preview-tag">プレビュー品質</span>}
-          {coreImage && <span className="preview-tag">Core Image プレビュー</span>}
+          {coreImage && <span className="preview-tag">Core Image {result.preview ? "プレビュー" : "本現像"}</span>}
         </div>
         <span>{result.preset_label}</span>
       </div>
@@ -157,9 +156,6 @@ export function BeforeAfter({
           {/* highlight_recovery は CLI 0.6.0（#81）で露出と暗部の持ち上げに写像して加算される。
               スライダーの値と実際に描いた値がずれるので、hr > 0 のときだけ実効値を出す。 */}
           {highlightNote && <p className="engine-note">{highlightNote}</p>}
-          <p className="engine-note">
-            書き出し（本現像）は従来エンジン（rawpy）で行うため、このプレビューと見え方が異なる場合があります。
-          </p>
         </>
       )}
 

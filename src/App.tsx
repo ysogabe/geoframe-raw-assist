@@ -21,7 +21,6 @@ import {
   type PhotoExportVariant,
 } from "./lib/app-state";
 import {
-  developRaw,
   exportSelection,
   getAnalysis,
   getPresets,
@@ -45,16 +44,13 @@ import { OperationPanel } from "./components/OperationPanel";
 import { ExportPanel, type ExportRow } from "./components/ExportPanel";
 import { FullSizeViewer } from "./components/FullSizeViewer";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { isTauri } from "@tauri-apps/api/core";
 import {
   coreImageErrorMessage,
-  coreImageErrorOf,
   developPreviewCoreImage,
+  developFullCoreImage,
   engineInfoLabel,
   getEngineInfo,
-  previewEngine,
   resolveAdjustments,
-  shouldFallbackToRawpy,
   toDevelopedResult,
 } from "./lib/coreimage-api";
 
@@ -112,12 +108,6 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // ---- プレビュー現像のエンジン（#72）。起動時に 1 回だけ問い合わせて覚えておく --------
-  // 【#108 で削除】Python へのプレビューフォールバック（previewEngine / shouldFallbackToRawpy）と一緒に消す。
-  useEffect(() => {
-    void previewEngine();
   }, []);
 
   // ---- 解析状況の取得と 1 秒ポーリング ------------------------------------
@@ -442,41 +432,15 @@ export default function Home() {
     const scrollToComparison = () =>
       window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
 
-    // Tauri のプレビューは Core Image（Rust → Swift CLI）で現像する（#72 §2.6）。
-    // ブラウザモード（isTauri() === false）と本現像（full）、切り戻しフラグ
-    // GEOFRAME_PREVIEW_ENGINE=rawpy のときは、このブロックに入らず従来どおり Python で現像する。
-    let fallbackCode: string | undefined;
-    if (mode === "preview" && isTauri() && (await previewEngine()) === "coreimage") {
-      try {
-        const ciResult = await developPreviewCoreImage(captureId, resolveAdjustments(preset, state.overrides));
-        dispatch({ type: "develop/ok", mode, result: toDevelopedResult(ciResult, preset), generation });
-        scrollToComparison();
-        return;
-      } catch (error) {
-        // BUSY / 不正リクエスト / ARW が見つからない等は Python でも解決しない（または不具合を隠す）ので表示する。
-        if (!shouldFallbackToRawpy(error)) {
-          dispatch({ type: "develop/fail", message: coreImageErrorMessage(error) });
-          return;
-        }
-        // インフラ側・現像元フォルダ解決の失敗だけ、従来の Python プレビューで救う。
-        fallbackCode = coreImageErrorOf(error)?.code;
-      }
-    }
-
     try {
-      const result = await developRaw(captureId, preset.name, {
-        adjustments: state.overrides,
-        preview: mode === "preview",
-        maxEdge: mode === "preview" ? undefined : 6000,
-      });
-      dispatch({ type: "develop/ok", mode, result, generation, fallbackCode });
+      const adjustments = resolveAdjustments(preset, state.overrides);
+      const result = mode === "preview"
+        ? toDevelopedResult(await developPreviewCoreImage(captureId, adjustments), preset)
+        : await developFullCoreImage(captureId, adjustments, preset);
+      dispatch({ type: "develop/ok", mode, result, generation });
       scrollToComparison();
     } catch (error) {
-      const message = messageOf(error, "RAW現像に失敗しました");
-      dispatch({
-        type: "develop/fail",
-        message: fallbackCode ? `Core Image（${fallbackCode}）と rawpy の両方で現像に失敗しました: ${message}` : message,
-      });
+      dispatch({ type: "develop/fail", message: coreImageErrorMessage(error) });
     }
   }
 

@@ -409,6 +409,41 @@ mod tests {
         );
     }
     #[test]
+    fn accepts_recipe_written_by_full_develop() {
+        let f = Fixture::new();
+        // Swift の実応答と同じく request のない CLI モックを使い、Rust develop が
+        // 実際に保存した full JPEG / レシピをそのまま書き出しへ渡す。
+        let developed = crate::coreimage::tests::full_for_export_test(&f.data);
+        let original = fs::read(&developed.output_path).unwrap();
+        let recipe: Value =
+            serde_json::from_slice(&fs::read(&developed.provenance_path).unwrap()).unwrap();
+        assert_eq!(recipe["mode"], "full");
+        assert_eq!(recipe["request"]["mode"], "full");
+        assert_eq!(
+            recipe["request"]["input"],
+            json!(f.root.join("DSC00001.ARW"))
+        );
+        let mut item = f.item("developed");
+        item.developed_filename = Some(
+            Path::new(&developed.output_path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+        );
+        let response = export_batch(&f.data, "actual-full", vec![item]).unwrap();
+        assert_eq!(
+            fs::read(response["files"][0].as_str().unwrap()).unwrap(),
+            original
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(response["manifest_path"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(manifest["items"][0]["recipe"], recipe);
+    }
+
+    #[test]
     fn manifest_baseline_shape_hash_and_byte_copy() {
         let f = Fixture::new();
         f.save(f.recipe());
