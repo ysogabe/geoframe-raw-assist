@@ -10,22 +10,20 @@ Python 廃止前の参照実装を固定する。数値の意味・許容差は
 リポジトリルートで実行する（外部入力が必要）。
 
 ```sh
-npm run setup:raw
 .venv/bin/python scripts/freeze_baseline.py
 .venv/bin/python scripts/freeze_baseline.py --audit-only
-npm run test:raw
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 この環境では既定の `python3` が 3.15.0 で、依存に対応する wheel が
-揃っていなかったため、Python 3.14 を指定して同じ setup スクリプトを使用した。
+揃っていなかったため、Python 3.14 を指定して仮想環境を直接作成した。
 `node_modules` は不要。
 
 ```sh
 mkdir -p work/python314-bin
 ln -sf /opt/homebrew/bin/python3.14 work/python314-bin/python3
 /opt/homebrew/bin/python3.14 -m venv --clear .venv
-PATH="$PWD/work/python314-bin:$PATH" npm run setup:raw
-.venv/bin/python scripts/freeze_baseline.py
+PATH="$PWD/work/python314-bin:$PATH" .venv/bin/python scripts/freeze_baseline.py
 ```
 
 既存 `.venv` を作り直す `--clear` は環境を作り直す場合だけ使用する。
@@ -158,7 +156,7 @@ privacy audit: PASS (9 JSON, 102 GPS tags type/count-only, 17 metadata-free synt
 検証結果:
 
 ```text
-$ npm run test:raw
+$ .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 Ran 867 tests in 82.725s
 OK (skipped=1)
 
@@ -173,7 +171,7 @@ OK
 ```sh
 .venv/bin/python scripts/freeze_baseline.py --sections exif bracket
 .venv/bin/python scripts/freeze_baseline.py --audit-only
-npm run test:raw
+.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 du -sh tests/fixtures/baseline
 ```
 
@@ -193,7 +191,7 @@ privacy audit: PASS (9 JSON, 102 GPS tags type/count-only, 17 metadata-free synt
 $ .venv/bin/python scripts/freeze_baseline.py --audit-only
 privacy audit: PASS (9 JSON, 102 GPS tags type/count-only, 17 metadata-free synthetic PNG)
 
-$ npm run test:raw
+$ .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 Ran 869 tests in 30.629s
 OK (skipped=1)
 

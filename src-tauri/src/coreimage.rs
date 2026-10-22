@@ -1296,7 +1296,7 @@ impl DevelopSlot {
     pub(crate) fn acquire(&self) -> Result<SlotGuard<'_>, CoreImageError> {
         let limit = self.max_waiting.saturating_add(1);
         self.pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < limit).then_some(n + 1)
             })
             .map_err(|_| {
