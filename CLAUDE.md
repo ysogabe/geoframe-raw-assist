@@ -18,13 +18,14 @@
 - フロント単体テスト: `npm test`（= `vitest run`、reducer など純粋関数。node 環境）
 - デスクトップ（Tauri）ビルド: `env -u CI npm run tauri:build`
   - 環境に `CI=1` が設定されており、そのままだと tauri CLI が `--ci 1` エラーになるため `CI` を必ず外す。
-- ローカル実行: `npm run dev:raw`（RAW エンジン http://127.0.0.1:8788 + vite http://localhost:1420）
-- Python テスト: `npm run test:raw`
+- ローカル実行: `env -u CI npm run tauri:dev`（Python サーバは使わない。単一アプリ化 ADR 0003）
+- Rust テスト: `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）／ Swift: `swift test --package-path native/coreimage-cli`
+- Python（`scripts/` の評価用と移行期間の参照実装のみ。#117 で削除予定）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`
 
 ## 環境の注意
 
 - macOS + zsh。`timeout` コマンドは無い（`gtimeout` かコマンド自身のタイムアウトを使う）。zsh は unquoted 変数を word-split しない。
-- 画面表示の検証はブラウザ（vite dev）で行う。デスクトップアプリの確認は `tauri:build` 後の .app を起動して行う。
+- 画面表示の検証は Tauri（`tauri:dev`、または `tauri:build` 後の .app）で行う。ブラウザ（vite 単体）では動かない。
 
 ## orchestrator-qa スキルの OMP ハーネス対応
 
