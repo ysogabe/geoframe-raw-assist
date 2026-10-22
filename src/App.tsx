@@ -66,6 +66,8 @@ import {
   coreImageErrorMessage,
   coreImageErrorOf,
   developPreviewCoreImage,
+  engineInfoLabel,
+  getEngineInfo,
   previewEngine,
   resolveAdjustments,
   shouldFallbackToRawpy,
@@ -119,6 +121,21 @@ export default function Home() {
   // ブラウザモード（isTauri() === false）では従来どおり即座に開始する。
   const setupStage = setupState?.stage;
   useEffect(() => {
+    // Tauri は Python の /api/health ではなく engine_info（Rust）で ready にする（#109）。
+    // Python のブートストラップを待たない（sidecar は同梱済みで、Python が無くても動く）。
+    if (isTauri()) {
+      let cancelled = false;
+      getEngineInfo()
+        .then((info) => {
+          if (!cancelled) dispatch({ type: "engine/ok", label: engineInfoLabel(info) });
+        })
+        .catch(() => {
+          if (!cancelled) dispatch({ type: "health/fail" });
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
     const waitingForBootstrap =
       isTauri() && (setupStage === undefined || setupStage === "creating-venv" || setupStage === "installing-deps");
     if (waitingForBootstrap) return;
@@ -298,7 +315,7 @@ export default function Home() {
   const changedKeys = changedAdjustmentKeys(state);
   const groupsToShow = useMemo(() => visibleGroups(state), [state]);
   const developedIds = useMemo(() => developedGroupIds(state), [state]);
-  const engineVersion = health ? `rawpy ${health.rawpy_version}` : "";
+  const engineVersion = state.engineLabel ?? (health ? `rawpy ${health.rawpy_version}` : "");
   // ブラケット合成の導線は bracket グループ（または exposure_bracket の理由付き）にだけ出す。
   const isBracket = group ? isBracketGroup(group) : false;
   const mergeFrames = useMemo(() => (group ? mergeFramesOf(state, group) : []), [state, group]);

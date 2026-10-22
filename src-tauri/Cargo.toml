@@ -22,3 +22,5 @@ signal-hook = "0.4.4"
 # Core Image 試験現像（src/coreimage.rs）: capture_id の検証とキャッシュ名の安定ハッシュ。
 regex = "1"
 sha2 = "0.10"
+# root_key_for（Python local_raw/config.py と同じ sha1 先頭 8 桁）。
+sha1 = "0.10"

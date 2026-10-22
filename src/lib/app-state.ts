@@ -163,6 +163,8 @@ export type State = {
   screen: Screen;
   engineStatus: EngineStatus;
   health: HealthResponse | null;
+  /** Tauri の engine_info（#109）で得たエンジン表示用の文字列。ブラウザ経路では null。 */
+  engineLabel: string | null;
   /**
    * プリセット一覧（#98）。health から切り離して持つ。Python エンジンが止まっていても
    * Tauri では Rust の get_presets から埋まり、プリセット選択 UI が表示できる。
@@ -254,6 +256,7 @@ export const initialState: State = {
   screen: "suggestions",
   engineStatus: "checking",
   health: null,
+  engineLabel: null,
   presets: [],
   presetsSource: "none",
   analysisState: "unknown",
@@ -301,6 +304,8 @@ export const initialState: State = {
 export type Action =
   | { type: "health/ok"; health: HealthResponse }
   | { type: "health/fail" }
+  /** Tauri: engine_info が成功した（Python の /api/health の代わり, #109）。 */
+  | { type: "engine/ok"; label: string }
   /**
    * プリセット一覧の到着（#98）。Tauri 起動時の get_presets は source: "rust"。
    * ブラウザモード・get_presets 失敗時は health/ok が health.presets を source: "health" で取り込む。
@@ -498,6 +503,8 @@ export function reducer(state: State, action: Action): State {
         "health",
       );
 
+    case "engine/ok":
+      return { ...state, engineStatus: "ready", engineLabel: action.label };
     case "health/fail":
       // プリセット一覧は health と独立なので残す（#98）。
       return { ...state, engineStatus: "offline" };
@@ -577,6 +584,7 @@ export function reducer(state: State, action: Action): State {
       return {
         ...initialState,
         health: state.health,
+        engineLabel: state.engineLabel,
         engineStatus: state.engineStatus,
         presets: state.presets,
         presetsSource: state.presetsSource,

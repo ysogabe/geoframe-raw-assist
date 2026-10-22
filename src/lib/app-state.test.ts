@@ -672,6 +672,21 @@ describe("presets/loaded（#98）", () => {
     expect(activePreset(next)).not.toBeNull();
   });
 
+  it("engine/ok で engineStatus が ready になり、表示ラベルを持つ（health は触らない）", () => {
+    const next = reducer(initialState, { type: "engine/ok", label: "Core Image 0.6.0 / macOS 15.1" });
+    expect(next.engineStatus).toBe("ready");
+    expect(next.engineLabel).toBe("Core Image 0.6.0 / macOS 15.1");
+    expect(next.health).toBeNull();
+  });
+
+  it("engine/ok の後に health/fail が来ても engineLabel は残り、source/changed でも保たれる", () => {
+    const ready = reducer(initialState, { type: "engine/ok", label: "L" });
+    expect(reducer(ready, { type: "health/fail" }).engineLabel).toBe("L");
+    const switched = reducer(ready, { type: "source/changed", info: folder("/n"), message: "m" });
+    expect(switched.engineLabel).toBe("L");
+    expect(switched.engineStatus).toBe("ready");
+  });
+
   it("ブラウザモード: health/ok が health.presets を取り込む", () => {
     const next = reducer(initialState, { type: "health/ok", health: HEALTH });
     expect(next.presets).toBe(HEALTH.presets);

@@ -44,6 +44,22 @@ export type CoreImagePreviewResult = {
 /** Rust 側 `CoreImageError`。CLI の error.code / message もそのまま入る。 */
 export type CoreImageError = { code: string; message: string };
 
+/** Rust 側 `EngineInfo`（engine_info コマンド, Issue #109）とフィールド名を一致させること。 */
+export type EngineInfo = { cli_version: string; macos_version: string; sidecar_resolved: boolean };
+
+/**
+ * Core Image エンジンの稼働確認。Python の /api/health の代わりに「エンジン準備完了」を知るのに使う。
+ * sidecar が見つからない / `--version` が失敗したときは CoreImageError を throw する。
+ */
+export async function getEngineInfo(): Promise<EngineInfo> {
+  return await invoke<EngineInfo>("engine_info");
+}
+
+/** トップバーのエンジン表示（「Core Image <cli version> / macOS <version>」）。 */
+export function engineInfoLabel(info: Pick<EngineInfo, "cli_version" | "macos_version">): string {
+  return `Core Image ${info.cli_version} / macOS ${info.macos_version}`;
+}
+
 let enginePromise: Promise<DevelopEngine> | null = null;
 
 /**
