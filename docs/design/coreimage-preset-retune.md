@@ -309,5 +309,13 @@ T1 と T3 は worktree を分けて並行、T2 は値が確定してから。CLI
 | 6 | プレビューと書き出しの差 | **受容**。フィクスチャは §6 のとおり 2 本に分割する |
 | 2・4・5・7〜12 | その他 | 推奨どおり進める: 完了条件は §7.4 に改訂、`highlight_rescue` は 0 / 0 / hr 90（hr 100 もシートに並べる）、フィクスチャ分割、実効値の UI 表示を入れる（T5）、CLI 0.6.0・`ignored` 空配列・`CACHE_KEY_SCHEMA` 不変、目視は §8 の 6 組、原寸の偽色は目視のみ、`sunset_glow` は hr 60 で出し 70 を並べる |
 
-実装時の補足（2026-10-22）: サンプルのボリュームが未マウントで §7.3 の計測・§8 のシートは未完。プリセット値は §7.2 の初期案で実装した。
-状況と再開手順は [再調整レポート](../coreimage-preset-retune-report.md)。
+実装時の補足（2026-10-22）: 計測（run1〜run3）で `sunset_glow` の `shadow_lift` を 8 → 4 に改めた（§7.2）。他は §7.2 の初期案のまま確定。
+結果は [再調整レポート](../coreimage-preset-retune-report.md)。
+
+### 目視（§8）のオーナー判断（2026-10-22 確定）
+
+- 夜景の組（DSC07415 nightscape / DSC07407 shadow_rescue）: 新プリセット（CI）の列が好ましい。
+- 救済系（highlight / backlit / sunset）・室内高 ISO（shadow_rescue / indoor_warm / nightscape）: 新プリセットの値で確定。
+  `highlight_rescue` は hr 90（100 にしない）、`sunset_glow` は hr 60（70 にしない）。
+- 既定の組（案 C）: **採らない**。`neutral_recovery` / `landscape_clear` は hr 0 のまま。空の白飛びが気になる写真は救済系プリセットで扱う。
+- `landscape_clear` の強さ: **今の値のまま**（contrast 1.10 / saturation 1.08 / sharpness 1.15）。弱めた版（1.06 / 1.05 / 1.08）は平坦部のノイズ指標が下がるが、全体表示で差がほぼ見えない。拡大時の粒が問題になったら別 Issue で見直す。
