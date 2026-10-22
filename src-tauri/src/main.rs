@@ -5,6 +5,7 @@
 
 mod adjustments;
 mod analysis;
+mod candidates;
 mod coreimage;
 mod exif_inherit;
 mod export;

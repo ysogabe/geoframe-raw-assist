@@ -26,5 +26,5 @@ sha1 = "0.10"
 # 解析 lite（src/analysis.rs。Issue #110）: EXIF 読み取り・1/8 スケール JPEG デコード・サムネイル。
 kamadak-exif = "0.6"
 jpeg-decoder = { version = "0.3", default-features = false }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
