@@ -1,20 +1,7 @@
-//! 解析 lite（Issue #110 PR(1)。設計書 `docs/design/single-app-implementation-plan.md` §3.3）。
-//!
-//! Python `local_raw/analysis.py` / `source_files.py` から **採点を除いて** 移植する。範囲は
-//! 走査・EXIF 要約・長辺 640 の JPEG サムネイル・グループ化と kind 判定・RAW 推薦（EXIF 由来の分だけ）。
-//!
-//! - 出力 JSON はフロントの `Analysis` 型（`src/lib/types.ts`）とキー名を合わせる。ただし
-//!   `analysis_version` は **3**、`scored: false` を足す（採点は N-C2。Python の v2 キャッシュは読まない）。
-//! - 採点由来の値の決め方（UI が嘘を出さないための取り決め）: `sharpness_raw` / `sharpness_score` /
-//!   `highlight_clip_ratio` / `shadow_clip_ratio` / `mean_luma` / `overall_score` は 0。
-//!   `recommended_capture_id` は時刻順の先頭、`confidence` は 0.5、`recommendation_reasons` は空。
-//!   `raw.reason_codes` は EXIF 由来の `high_iso` / `exposure_bracket` だけ。`summary.needs_review` は 0。
-//! - GPS・撮影地の情報は **読まない**（EXIF のタグを名指しで読むだけで、GPS IFD には触れない）。
-//! - キャッシュ: `$APPDATA/analysis/{root_key}.json`。サムネイル: `$APPDATA/thumbnails/{root_key}-{capture_id}.jpg`。
-//!   `photos[*].thumb` は **サムネイルの絶対パス**（フロントは `convertFileSrc` に渡す。asset scope は
-//!   `tauri.conf.json` の `$APPDATA/thumbnails/**`）。
-//! - 元 JPG の配信は自前の URI scheme `geoframe`（`geoframe://localhost/source-jpg/DSC12345.JPG`）。
-//!   asset protocol の scope は実行時に「許可の取り消し」ができないため案 2 にした（`source_jpg_protocol`）。
+//! JPEG の採点・グループ化・推薦（Python `local_raw/analysis.py` の Rust 移植）。
+//! 採点は未回転の 1/8 DCT デコード RGB、サムネイルだけ EXIF の向きを適用する。
+//! analysis_version は 3、scored は true。未採点キャッシュは再利用しない。
+//! EXIF は必要なタグだけを読み、位置情報は扱わない。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,6 +25,8 @@ pub const ANALYSIS_VERSION: u32 = 3;
 const MAX_WORKERS: usize = 6;
 const THUMB_MAX_EDGE: u32 = 640;
 const THUMB_QUALITY: u8 = 80;
+const HIGHLIGHT_LEVEL: u8 = 250;
+const SHADOW_LEVEL: u8 = 5;
 
 // --- grouping --------------------------------------------------------------------
 const GROUP_GAP_SECONDS: f64 = 60.0;
@@ -47,12 +36,18 @@ const BRACKET_MIN_DISTINCT_BIAS: usize = 2;
 const BRACKET_MIN_SPAN_EV: f64 = 0.6;
 const BRACKET_SPAN_EPSILON: f64 = 1e-6;
 
-// --- RAW recommendation（EXIF 由来の分だけ） ----------------------------------------
+// --- RAW recommendation ----------------------------------------
+const RAW_STRONG_ISO: i64 = 1600;
+const RAW_STRONG_NIGHT_LUMA: f64 = 60.0;
+const RAW_STRONG_HIGHLIGHT: f64 = 0.04;
+const RAW_RECOMMENDED_HIGHLIGHT: f64 = 0.015;
+const RAW_RECOMMENDED_SHADOW: f64 = 0.20;
 const RAW_RECOMMENDED_ISO: i64 = 800;
+const RAW_MAYBE_HIGHLIGHT: f64 = 0.005;
+const RAW_MAYBE_SHADOW: f64 = 0.10;
 const RAW_MAYBE_EXPOSURE_BIAS: f64 = -0.7;
 
-/// lite の `confidence`（Python の `CONFIDENCE_FLOOR`）。
-const LITE_CONFIDENCE: f64 = 0.5;
+const NEEDS_REVIEW_CONFIDENCE: f64 = 0.6;
 
 // ---------------------------------------------------------------------------
 // 走査（local_raw/source_files.py）
@@ -198,6 +193,7 @@ pub struct PhotoRecord {
     pub orientation: u16,
     pub width: u32,
     pub height: u32,
+    pub metrics: Metrics,
 }
 
 /// EXIF の日時文字列を読む（Python `_parse_datetime` と同じ 4 形式）。
@@ -261,6 +257,7 @@ pub(crate) fn read_exif(path: &Path, capture_id: &str, width: u32, height: u32) 
         orientation: 1,
         width,
         height,
+        metrics: Metrics::default(),
     };
     let Ok(file) = fs::File::open(path) else {
         return record;
@@ -290,16 +287,18 @@ pub(crate) fn read_exif(path: &Path, capture_id: &str, width: u32, height: u32) 
 // デコード + サムネイル
 // ---------------------------------------------------------------------------
 
-/// 長辺 640 を保てる最小のスケール（1/1・1/2・1/4・1/8）で JPEG をデコードし、
+/// PIL draft と同じ画像寸法 // 8 を要求して JPEG を DCT 縮小デコードし、
 /// `(元の幅, 元の高さ, スケール後の RGB 画像)` を返す。libjpeg 系の DCT スケールなので
-/// 24MP でも全画素のデコードより数倍速い（PIL の `draft` 相当）。
+/// 24MP でも全画素のデコードより数倍速い。PIL と出力寸法は同じだが、画素は一致しない。
+/// jpeg-decoder 0.3.2 は 1x1 IDCT を切り捨て、全成分に同じ DCT スケールを適用する。
+/// 比較結果と許容差からの逸脱は docs/analysis-scoring-validation.md を参照。
 fn decode_scaled(path: &Path) -> Result<(u32, u32, image::RgbImage), String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(file));
     decoder.read_info().map_err(|e| e.to_string())?;
     let info = decoder.info().ok_or("JPEG ヘッダを読めません")?;
     let (width, height) = (u32::from(info.width), u32::from(info.height));
-    decoder.scale(THUMB_MAX_EDGE as u16, THUMB_MAX_EDGE as u16).map_err(|e| e.to_string())?;
+    decoder.scale((width / 8).max(1) as u16, (height / 8).max(1) as u16).map_err(|e| e.to_string())?;
     let pixels = decoder.decode().map_err(|e| e.to_string())?;
     let scaled = decoder.info().ok_or("JPEG ヘッダを読めません")?;
     let (sw, sh) = (u32::from(scaled.width), u32::from(scaled.height));
@@ -366,15 +365,165 @@ fn process_photo(
             return Ok(None);
         }
     };
-    let record = read_exif(path, capture_id, width, height);
+    let mut record = read_exif(path, capture_id, width, height);
+    record.metrics = score_array(&image);
     let bytes = encode_thumbnail(image, record.orientation)
         .map_err(|e| CoreImageError::new("THUMBNAIL_FAILED", format!("サムネイルを作れません: {capture_id}: {e}")))?;
     let destination = thumbnail_path(thumbs_dir, root_key, capture_id);
     let temporary = destination.with_extension("jpg.tmp");
-    fs::write(&temporary, &bytes)
-        .and_then(|()| fs::rename(&temporary, &destination))
-        .map_err(|e| CoreImageError::new("THUMBNAIL_FAILED", format!("サムネイルを書けません: {}: {e}", destination.display())))?;
+    fs::write(&temporary, &bytes).and_then(|()| fs::rename(&temporary, &destination)).map_err(|e| {
+        CoreImageError::new("THUMBNAIL_FAILED", format!("サムネイルを書けません: {}: {e}", destination.display()))
+    })?;
     Ok(Some(record))
+}
+
+/// Python の score_array と同じ uint8 RGB → uint8 GRAY → float64 Laplacian。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Metrics {
+    pub sharpness_raw: f64,
+    pub highlight_clip_ratio: f64,
+    pub shadow_clip_ratio: f64,
+    pub mean_luma: f64,
+}
+
+fn score_array(rgb: &image::RgbImage) -> Metrics {
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    if w == 0 || h == 0 {
+        return Metrics::default();
+    }
+    // OpenCV RGB2GRAY の 15bit 固定小数点係数 + CV_DESCALE の四捨五入。
+    let gray: Vec<i32> = rgb
+        .pixels()
+        .map(|p| (9798 * i32::from(p[0]) + 19235 * i32::from(p[1]) + 3735 * i32::from(p[2]) + 16384) >> 15)
+        .collect();
+    // ksize=1 の十字カーネル [0,1,0;1,-4,1;0,1,0]、BORDER_REFLECT_101。
+    // 長さ 1 の軸は OpenCV と同じく唯一の画素を参照する。
+    let reflect = |i: usize, len: usize, forward: bool| -> usize {
+        if len == 1 {
+            0
+        } else if forward {
+            if i + 1 == len {
+                len - 2
+            } else {
+                i + 1
+            }
+        } else if i == 0 {
+            1
+        } else {
+            i - 1
+        }
+    };
+    let mut sum = 0.0;
+    let mut squares = 0.0;
+    for y in 0..h {
+        for x in 0..w {
+            let lap = gray[y * w + reflect(x, w, false)]
+                + gray[y * w + reflect(x, w, true)]
+                + gray[reflect(y, h, false) * w + x]
+                + gray[reflect(y, h, true) * w + x]
+                - 4 * gray[y * w + x];
+            let lap = f64::from(lap);
+            sum += lap;
+            squares += lap * lap;
+        }
+    }
+    let n = (w * h) as f64;
+    Metrics {
+        // 整数 Laplacian の和と二乗和はこの画像寸法では f64 に正確に収まる。母分散。
+        sharpness_raw: (squares / n - (sum / n).powi(2)).max(0.0),
+        highlight_clip_ratio: rgb.pixels().filter(|p| p.0.iter().any(|&v| v >= HIGHLIGHT_LEVEL)).count() as f64 / n,
+        shadow_clip_ratio: rgb.pixels().filter(|p| p.0.iter().all(|&v| v <= SHADOW_LEVEL)).count() as f64 / n,
+        mean_luma: gray.iter().map(|&v| f64::from(v)).sum::<f64>() / n,
+    }
+}
+
+fn rank_scores(values: &[f64], higher_is_better: bool) -> Vec<f64> {
+    if values.len() < 2 {
+        return vec![1.0; values.len()];
+    }
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(
+        |&a, &b| {
+            if higher_is_better {
+                values[b].total_cmp(&values[a])
+            } else {
+                values[a].total_cmp(&values[b])
+            }
+        },
+    );
+    let mut scores = vec![0.0; values.len()];
+    let mut rank = 0;
+    for (position, &index) in order.iter().enumerate() {
+        if position > 0 && values[index] != values[order[position - 1]] {
+            rank = position;
+        }
+        scores[index] = (values.len() - 1 - rank) as f64 / (values.len() - 1) as f64;
+    }
+    scores
+}
+
+// Python round(value, digits) と同じ、二進浮動小数点値を十進桁へ ties-to-even で丸める。
+// value * 10^digits を先に丸めると 2.675 等で Python と異なるため文字列変換を使う。
+fn rounded(value: f64, digits: usize) -> f64 {
+    format!("{value:.digits$}").parse().expect("finite score")
+}
+
+struct Recommendation {
+    best: usize,
+    confidence: f64,
+    reasons: Vec<Value>,
+    overall: Vec<f64>,
+    sharpness: Vec<f64>,
+}
+
+fn recommend(records: &[PhotoRecord]) -> Recommendation {
+    let sharp: Vec<f64> = records.iter().map(|r| r.metrics.sharpness_raw).collect();
+    let highlight: Vec<f64> = records.iter().map(|r| r.metrics.highlight_clip_ratio).collect();
+    let sr = rank_scores(&sharp, true);
+    let hr = rank_scores(&highlight, false);
+    let weighted: Vec<f64> = sr.iter().zip(&hr).map(|(s, h)| 0.6 * s + 0.4 * h).collect();
+    let best = (0..records.len())
+        .min_by(|&a, &b| {
+            weighted[b].total_cmp(&weighted[a]).then_with(|| records[a].capture_id.cmp(&records[b].capture_id))
+        })
+        .unwrap_or(0);
+    let confidence = if records.len() < 2 {
+        1.0
+    } else {
+        let runner =
+            weighted.iter().enumerate().filter(|(i, _)| *i != best).map(|(_, &v)| v).fold(f64::NEG_INFINITY, f64::max);
+        0.5 + 0.5 * (weighted[best] - runner).min(1.0)
+    };
+    let mut reasons = Vec::new();
+    if records.len() == 1 {
+        reasons.push(json!({"code": "single_shot", "text": "このシーンで唯一の写真です。"}));
+    } else if !records.is_empty() {
+        if sr[best] >= 1.0 {
+            reasons.push(json!({"code": "sharpest", "text": "グループ内で最もシャープです。"}));
+        }
+        if hr[best] >= 1.0 {
+            reasons.push(json!({"code": "highlight_retained", "text": "グループ内で白飛びが最も少ない構図です。"}));
+        }
+        if reasons.is_empty() {
+            reasons.push(json!({"code": "balanced", "text": "シャープさと白飛びの少なさのバランスが最良です。"}));
+        }
+        if confidence < NEEDS_REVIEW_CONFIDENCE {
+            reasons
+                .push(json!({"code": "close_call", "text": "次点との差が小さいため、目視での確認をおすすめします。"}));
+        }
+    }
+    let low = sharp.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = sharp.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Recommendation {
+        best,
+        confidence: rounded(confidence, 3),
+        reasons,
+        overall: weighted.iter().map(|v| rounded(v * 100.0, 1)).collect(),
+        sharpness: sharp
+            .iter()
+            .map(|v| if high <= low { 100.0 } else { rounded((v - low) / (high - low) * 100.0, 1) })
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,7 +639,11 @@ fn finalize_group(records: Vec<PhotoRecord>, index: usize) -> Group {
 /// 時刻なしは最後尾、同時刻は capture_id 順（`_sort_key`）。
 pub fn group_photos(mut records: Vec<PhotoRecord>) -> Vec<Group> {
     records.sort_by(|a, b| {
-        (a.captured_at.is_none(), a.captured_at, &a.capture_id).cmp(&(b.captured_at.is_none(), b.captured_at, &b.capture_id))
+        (a.captured_at.is_none(), a.captured_at, &a.capture_id).cmp(&(
+            b.captured_at.is_none(),
+            b.captured_at,
+            &b.capture_id,
+        ))
     });
     let mut groups: Vec<Group> = Vec::new();
     let mut current: Vec<PhotoRecord> = Vec::new();
@@ -508,39 +661,61 @@ pub fn group_photos(mut records: Vec<PhotoRecord>) -> Vec<Group> {
 }
 
 // ---------------------------------------------------------------------------
-// RAW 推薦（EXIF 由来の分だけ）
+// RAW 推薦
 // ---------------------------------------------------------------------------
 
-fn raw_recommendation_lite(group_kind: &str, representative: &PhotoRecord) -> Value {
+fn raw_recommendation(group_kind: &str, representative: &PhotoRecord) -> Value {
     let iso = representative.iso.unwrap_or(0);
     let bias = representative.exposure_bias;
     let mut codes: Vec<&str> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
 
+    let m = representative.metrics;
+    let night = iso >= RAW_STRONG_ISO && m.mean_luma < RAW_STRONG_NIGHT_LUMA;
+    if night {
+        codes.push("night_scene");
+        reasons.push(format!("高感度(ISO {iso})の暗いシーンです。RAWならノイズと階調を作り直せます。"));
+    }
     if iso >= RAW_RECOMMENDED_ISO {
         codes.push("high_iso");
         reasons.push(format!("ISO {iso} と高感度のため、ノイズ低減の効果が大きい写真です。"));
+    }
+    if m.highlight_clip_ratio >= RAW_MAYBE_HIGHLIGHT {
+        codes.push("highlight_clipping");
+        reasons.push(format!(
+            "明るい部分の白飛びが {:.1}% あります。RAWなら階調を引き戻せます。",
+            m.highlight_clip_ratio * 100.0
+        ));
+    }
+    if m.shadow_clip_ratio >= RAW_MAYBE_SHADOW {
+        codes.push("deep_shadows");
+        reasons
+            .push(format!("暗部の黒つぶれが {:.1}% あります。RAWなら持ち上げられます。", m.shadow_clip_ratio * 100.0));
     }
     if group_kind == "bracket" {
         codes.push("exposure_bracket");
         reasons.push("露出を変えて撮影されています。RAWでの合成・選択に向いています。".to_string());
     }
     let low_bias = bias.is_some_and(|b| b <= RAW_MAYBE_EXPOSURE_BIAS);
-    let level = if iso >= RAW_RECOMMENDED_ISO {
+    let level = if night || m.highlight_clip_ratio >= RAW_STRONG_HIGHLIGHT {
+        "strong"
+    } else if m.highlight_clip_ratio >= RAW_RECOMMENDED_HIGHLIGHT
+        || m.shadow_clip_ratio >= RAW_RECOMMENDED_SHADOW
+        || iso >= RAW_RECOMMENDED_ISO
+    {
         "recommended"
-    } else if low_bias {
+    } else if m.highlight_clip_ratio >= RAW_MAYBE_HIGHLIGHT || m.shadow_clip_ratio >= RAW_MAYBE_SHADOW || low_bias {
         "maybe"
     } else {
         "none"
     };
-    if level == "maybe" && codes.is_empty() {
+    if level == "maybe" && low_bias && codes.is_empty() {
         if let Some(b) = bias {
             reasons.push(format!("露出を {b:+.1}EV 下げて撮影されています。RAWなら明るさを作り直せます。"));
         }
     }
     if level == "none" && reasons.is_empty() {
-        // Python の文言は白飛び・黒つぶれを測った結果を述べるが、lite は測っていないので言い換える。
-        reasons.push("撮影情報からは、RAW現像を特に勧める要素は見つかりませんでした（画像の採点は未実施）。".to_string());
+        reasons.push("白飛び・黒つぶれが少なく、JPEGのままで十分な写真です。".to_string());
     }
     let label = match level {
         "strong" => "RAW現像を強く推奨",
@@ -577,7 +752,7 @@ fn opt_f64(value: Option<f64>) -> Value {
     value.map_or(Value::Null, |v| json!(v))
 }
 
-fn photo_json(record: &PhotoRecord, thumb: &Path) -> Value {
+fn photo_json(record: &PhotoRecord, thumb: &Path, overall: f64, sharpness: f64) -> Value {
     json!({
         "capture_id": record.capture_id,
         "captured_at": record.captured_at.map(iso_string),
@@ -590,13 +765,12 @@ fn photo_json(record: &PhotoRecord, thumb: &Path) -> Value {
         "orientation": record.orientation,
         "width": record.width,
         "height": record.height,
-        // 採点は N-C2。lite は 0 固定（`scored: false` で判別できる）。
-        "sharpness_raw": 0,
-        "sharpness_score": 0,
-        "highlight_clip_ratio": 0,
-        "shadow_clip_ratio": 0,
-        "mean_luma": 0,
-        "overall_score": 0,
+        "sharpness_raw": rounded(record.metrics.sharpness_raw, 3),
+        "sharpness_score": sharpness,
+        "highlight_clip_ratio": rounded(record.metrics.highlight_clip_ratio, 5),
+        "shadow_clip_ratio": rounded(record.metrics.shadow_clip_ratio, 5),
+        "mean_luma": rounded(record.metrics.mean_luma, 2),
+        "overall_score": overall,
         "thumb": thumb.to_string_lossy(),
     })
 }
@@ -612,7 +786,10 @@ pub fn build_analysis(
     let scan = scan_pairs(root);
     progress.total.store(scan.jpgs.len(), Ordering::Relaxed);
     fs::create_dir_all(thumbs_dir).map_err(|e| {
-        CoreImageError::new("THUMBNAIL_FAILED", format!("サムネイルのフォルダを作れません: {}: {e}", thumbs_dir.display()))
+        CoreImageError::new(
+            "THUMBNAIL_FAILED",
+            format!("サムネイルのフォルダを作れません: {}: {e}", thumbs_dir.display()),
+        )
     })?;
 
     progress.set_stage("scoring");
@@ -623,7 +800,9 @@ pub fn build_analysis(
         for _ in 0..MAX_WORKERS.min(jobs.len().max(1)) {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some((id, path)) = jobs.get(index) else { break };
+                let Some((id, path)) = jobs.get(index) else {
+                    break;
+                };
                 let outcome = process_photo(path, id, thumbs_dir, root_key);
                 progress.done.fetch_add(1, Ordering::Relaxed);
                 results.lock().unwrap_or_else(|p| p.into_inner()).push(outcome);
@@ -642,16 +821,23 @@ pub fn build_analysis(
     let mut photos = Map::new();
     let mut group_infos = Vec::new();
     let mut raw_candidates = 0;
+    let mut needs_review = 0;
     for group in &groups {
-        // 採点しないので代表は時刻順の先頭。
-        let representative = &group.records[0];
-        let raw = raw_recommendation_lite(group.kind, representative);
+        let outcome = recommend(&group.records);
+        let representative = &group.records[outcome.best];
+        if outcome.confidence < NEEDS_REVIEW_CONFIDENCE {
+            needs_review += 1;
+        }
+        let raw = raw_recommendation(group.kind, representative);
         if matches!(raw["level"].as_str(), Some("recommended" | "strong")) {
             raw_candidates += 1;
         }
-        for record in &group.records {
+        for (index, record) in group.records.iter().enumerate() {
             let thumb = thumbnail_path(thumbs_dir, root_key, &record.capture_id);
-            photos.insert(record.capture_id.clone(), photo_json(record, &thumb));
+            photos.insert(
+                record.capture_id.clone(),
+                photo_json(record, &thumb, outcome.overall[index], outcome.sharpness[index]),
+            );
         }
         group_infos.push(json!({
             "id": group.id,
@@ -661,15 +847,15 @@ pub fn build_analysis(
             "end_at": group.end_at,
             "capture_ids": group.capture_ids,
             "recommended_capture_id": representative.capture_id,
-            "confidence": LITE_CONFIDENCE,
-            "recommendation_reasons": [],
+            "confidence": outcome.confidence,
+            "recommendation_reasons": outcome.reasons,
             "raw": raw,
         }));
     }
 
     Ok(json!({
         "analysis_version": ANALYSIS_VERSION,
-        "scored": false,
+        "scored": true,
         "generated_at": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
         "source": {
             "root": display_path(root),
@@ -678,7 +864,7 @@ pub fn build_analysis(
             "arw_only": scan.arw_only,
             "total_bytes": scan.total_bytes,
         },
-        "summary": { "groups": group_infos.len(), "raw_candidates": raw_candidates, "needs_review": 0 },
+        "summary": { "groups": group_infos.len(), "raw_candidates": raw_candidates, "needs_review": needs_review },
         "photos": photos,
         "groups": group_infos,
         "_source_signature": source_signature(root, &scan.names),
@@ -704,7 +890,9 @@ fn cache_path(app_data_dir: &Path, root_key: &str) -> PathBuf {
 }
 
 fn write_cache(path: &Path, payload: &Value) -> Result<(), CoreImageError> {
-    let fail = |e: std::io::Error| CoreImageError::new("CACHE_WRITE_FAILED", format!("解析結果を保存できません: {}: {e}", path.display()));
+    let fail = |e: std::io::Error| {
+        CoreImageError::new("CACHE_WRITE_FAILED", format!("解析結果を保存できません: {}: {e}", path.display()))
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(fail)?;
     }
@@ -720,6 +908,9 @@ pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<V
     let mut payload: Value = serde_json::from_str(&text).ok()?;
     let object = payload.as_object_mut()?;
     if object.get("analysis_version").and_then(Value::as_u64) != Some(u64::from(ANALYSIS_VERSION)) {
+        return None;
+    }
+    if object.get("scored").and_then(Value::as_bool) != Some(true) {
         return None;
     }
     let signature = object.remove(SIGNATURE_KEY)?;
@@ -955,6 +1146,7 @@ mod tests {
             orientation: 1,
             width: 6000,
             height: 4000,
+            metrics: Metrics { mean_luma: 100.0, ..Metrics::default() },
         }
     }
 
@@ -1071,19 +1263,19 @@ mod tests {
         assert_eq!(parse_datetime("garbage"), None);
     }
 
-    // --- RAW 推薦 lite ---
+    // --- RAW 推薦 ---
 
     #[test]
-    fn raw_recommendation_uses_only_exif() {
+    fn raw_recommendation_exif_and_bias() {
         let mut r = simple("DSC00001", "2025-06-07T10:00:00");
-        assert_eq!(raw_recommendation_lite("single", &r)["level"], "none");
+        assert_eq!(raw_recommendation("single", &r)["level"], "none");
         r.iso = Some(1600);
-        let high = raw_recommendation_lite("single", &r);
+        let high = raw_recommendation("single", &r);
         assert_eq!((high["level"].as_str(), high["reason_codes"].clone()), (Some("recommended"), json!(["high_iso"])));
         r.iso = Some(100);
         r.exposure_bias = Some(-1.0);
-        assert_eq!(raw_recommendation_lite("single", &r)["level"], "maybe");
-        let bracket = raw_recommendation_lite("bracket", &simple("DSC00001", "2025-06-07T10:00:00"));
+        assert_eq!(raw_recommendation("single", &r)["level"], "maybe");
+        let bracket = raw_recommendation("bracket", &simple("DSC00001", "2025-06-07T10:00:00"));
         assert_eq!(bracket["reason_codes"], json!(["exposure_bracket"]));
     }
 
@@ -1099,7 +1291,15 @@ mod tests {
     #[test]
     fn scan_counts_pairs_and_ignores_other_names() {
         let dir = temp_dir("scan");
-        for name in ["DSC00001.JPG", "DSC00001.ARW", "DSC00002.jpg", "DSC00003.arw", "DSC0004.JPG", "notes.txt", "DSC00005.JPG.bak"] {
+        for name in [
+            "DSC00001.JPG",
+            "DSC00001.ARW",
+            "DSC00002.jpg",
+            "DSC00003.arw",
+            "DSC0004.JPG",
+            "notes.txt",
+            "DSC00005.JPG.bak",
+        ] {
             fs::write(dir.join(name), b"x").unwrap();
         }
         let scan = scan_pairs(&dir);
@@ -1132,10 +1332,10 @@ mod tests {
     fn thumbnail_long_edge_is_640_and_orientation_applied() {
         let dir = temp_dir("thumb");
         let path = dir.join("DSC00001.JPG");
-        synthetic_jpeg(&path, 3000, 2000);
+        synthetic_jpeg(&path, 6000, 4000);
         let (w, h, image) = decode_scaled(&path).unwrap();
-        assert_eq!((w, h), (3000, 2000));
-        assert!(image.width() >= 640 && image.width() < 3000);
+        assert_eq!((w, h), (6000, 4000));
+        assert_eq!(image.dimensions(), (750, 500));
         let landscape = image::load_from_memory(&encode_thumbnail(image.clone(), 1).unwrap()).unwrap();
         assert_eq!((landscape.width(), landscape.height()), (640, 427));
         let portrait = image::load_from_memory(&encode_thumbnail(image, 6).unwrap()).unwrap();
@@ -1153,7 +1353,7 @@ mod tests {
         let record = process_photo(&small, "DSC00001", &thumbs, "abcd1234").unwrap().unwrap();
         assert_eq!((record.width, record.height, record.orientation), (200, 100, 1));
         let decoded = image::open(thumbs.join("abcd1234-DSC00001.jpg")).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (200, 100));
+        assert_eq!((decoded.width(), decoded.height()), (25, 13));
         let broken = dir.join("DSC00002.JPG");
         fs::write(&broken, b"not a jpeg").unwrap();
         assert!(process_photo(&broken, "DSC00002", &thumbs, "abcd1234").unwrap().is_none());
@@ -1173,20 +1373,243 @@ mod tests {
         let key = root_key_for(&root);
         let payload = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap();
         assert_eq!(payload["analysis_version"], 3);
-        assert_eq!(payload["scored"], false);
+        assert_eq!(payload["scored"], true);
         assert_eq!(payload["source"]["pairs"], 2);
-        assert_eq!(payload["photos"]["DSC00001"]["sharpness_raw"], 0);
+        assert!(payload["photos"]["DSC00001"]["sharpness_raw"].as_f64().unwrap() > 0.0);
         assert_eq!(payload["photos"]["DSC00001"]["captured_at"], Value::Null);
         // 時刻なしなので 2 枚は別グループ。
         assert_eq!(payload["summary"]["groups"], 2);
-        assert_eq!(payload["groups"][0]["confidence"], 0.5);
+        assert_eq!(payload["groups"][0]["confidence"], 1.0);
         write_cache(&cache_path(&data, &key), &payload).unwrap();
         let cached = read_cached_analysis(&data, &root).expect("cache valid");
         assert!(cached.get(SIGNATURE_KEY).is_none());
+        for flag in [Some(json!(false)), None] {
+            let mut stale = payload.clone();
+            if let Some(flag) = flag {
+                stale["scored"] = flag;
+            } else {
+                stale.as_object_mut().unwrap().remove("scored");
+            }
+            write_cache(&cache_path(&data, &key), &stale).unwrap();
+            assert!(read_cached_analysis(&data, &root).is_none());
+        }
+        write_cache(&cache_path(&data, &key), &payload).unwrap();
         // ファイル名一覧が変わると無効。
         fs::write(root.join("DSC00003.JPG"), b"x").unwrap();
         assert!(read_cached_analysis(&data, &root).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_metrics_match_opencv() {
+        // [0,0,250] は 14bit 近似では 29、OpenCV の 15bit 係数では 28。
+        let blue = image::RgbImage::from_pixel(1, 1, image::Rgb([0, 0, 250]));
+        assert_eq!(score_array(&blue).mean_luma, 28.0);
+        let rgb = image::RgbImage::from_raw(3, 2, vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 5, 5, 5, 250, 0, 0, 0, 5, 6])
+            .unwrap();
+        let m = score_array(&rgb);
+        assert_eq!(m.highlight_clip_ratio, 4.0 / 6.0);
+        assert_eq!(m.shadow_clip_ratio, 1.0 / 6.0);
+        assert_eq!(m.mean_luma, 56.5);
+        assert!((m.sharpness_raw - 42263.0).abs() < 1e-8);
+        let ramp = image::RgbImage::from_fn(3, 2, |x, y| image::Rgb([(y * 30 + x * 10) as u8; 3]));
+        let m = score_array(&ramp);
+        assert_eq!(m.mean_luma, 25.0);
+        assert!((m.sharpness_raw - 3866.6666666666665).abs() < 1e-8);
+        let line = image::RgbImage::from_raw(2, 1, vec![0, 0, 0, 255, 255, 255]).unwrap();
+        assert_eq!(score_array(&line).sharpness_raw, 260100.0);
+        assert_eq!(score_array(&image::RgbImage::from_pixel(1, 1, image::Rgb([5; 3]))).sharpness_raw, 0.0);
+        assert_eq!(score_array(&image::RgbImage::from_pixel(1, 1, image::Rgb([5; 3]))).shadow_clip_ratio, 1.0);
+    }
+
+    #[test]
+    fn rank_ties_and_recommendation_are_deterministic() {
+        assert_eq!(rank_scores(&[4.0, 4.0, 1.0], true), vec![1.0, 1.0, 0.0]);
+        assert_eq!(rank_scores(&[4.0, 4.0, 1.0], false), vec![0.5, 0.5, 1.0]);
+        assert_eq!(rank_scores(&[], true), Vec::<f64>::new());
+        assert_eq!(rank_scores(&[4.0], true), vec![1.0]);
+        let mut records = vec![simple("DSC00002", "2025-06-07T10:00:00"), simple("DSC00001", "2025-06-07T10:00:00")];
+        let tie = recommend(&records);
+        assert_eq!((tie.best, tie.confidence), (1, 0.5));
+        assert_eq!(tie.sharpness, vec![100.0, 100.0]);
+        assert_eq!(tie.overall, vec![100.0, 100.0]);
+        assert_eq!(tie.reasons.last().unwrap()["code"], "close_call");
+        records[0].metrics.sharpness_raw = 10.0;
+        records[0].metrics.highlight_clip_ratio = 0.1;
+        let selected = recommend(&records);
+        assert_eq!((selected.best, selected.confidence), (0, 0.6));
+        assert_eq!(selected.overall, vec![60.0, 40.0]);
+        assert_eq!(selected.sharpness, vec![100.0, 0.0]);
+        assert_eq!(selected.reasons, vec![json!({"code":"sharpest","text":"グループ内で最もシャープです。"})]);
+        let mut crowded = vec![records[0].clone(); 4];
+        for (i,r) in crowded.iter_mut().enumerate() {
+            r.capture_id = format!("DSC0000{i}");
+            r.metrics.sharpness_raw = (3-i) as f64;
+            r.metrics.highlight_clip_ratio = (3-i) as f64 * 0.01;
+        }
+        let close = recommend(&crowded);
+        assert_eq!((close.best,close.confidence),(0,0.533));
+        assert_eq!(close.reasons.last().unwrap()["code"],"close_call");
+        for (r,highlight) in crowded.iter_mut().zip([0.04,0.02,0.01,0.03]) {
+            r.metrics.highlight_clip_ratio = highlight;
+        }
+        let balanced = recommend(&crowded);
+        assert_eq!((balanced.best,balanced.confidence),(1,0.533));
+        assert_eq!(balanced.reasons[0]["code"],"balanced");
+        assert_eq!(balanced.sharpness,vec![100.0,66.7,33.3,0.0]);
+        let single = recommend(&records[..1]);
+        assert_eq!(single.confidence, 1.0);
+        assert_eq!(single.reasons[0]["code"], "single_shot");
+        assert_eq!(rounded(2.675, 2), 2.67);
+        assert_eq!(rounded(2.5, 0), 2.0);
+    }
+
+    #[test]
+    fn raw_thresholds_and_reason_order() {
+        let mut r = simple("DSC00001", "2025-06-07T10:00:00");
+        for (highlight, shadow, level) in [
+            (0.004999, 0.09999, "none"),
+            (0.005, 0.0, "maybe"),
+            (0.015, 0.0, "recommended"),
+            (0.04, 0.0, "strong"),
+            (0.0, 0.10, "maybe"),
+            (0.0, 0.20, "recommended"),
+        ] {
+            r.metrics.highlight_clip_ratio = highlight;
+            r.metrics.shadow_clip_ratio = shadow;
+            assert_eq!(raw_recommendation("single", &r)["level"], level);
+        }
+        r.iso = Some(1600);
+        r.metrics.mean_luma = 59.999;
+        r.metrics.highlight_clip_ratio = 0.04;
+        r.metrics.shadow_clip_ratio = 0.20;
+        let raw = raw_recommendation("bracket", &r);
+        assert_eq!(raw["level"], "strong");
+        assert_eq!(
+            raw["reason_codes"],
+            json!(["night_scene", "high_iso", "highlight_clipping", "deep_shadows", "exposure_bracket"])
+        );
+        r.metrics = Metrics { mean_luma: 60.0, ..Metrics::default() };
+        assert_eq!(raw_recommendation("single", &r)["level"], "recommended");
+    }
+
+    /// 実画像と Python/Pillow が必要。入力は読み取り専用、派生画像は一時フォルダのみ。
+    #[test]
+    #[ignore]
+    fn compare_scoring_baseline() {
+        let root = PathBuf::from(std::env::var("GEOFRAME_ANALYSIS_DIR").expect("GEOFRAME_ANALYSIS_DIR"));
+        let python = std::env::var("GEOFRAME_ANALYSIS_PYTHON").expect("GEOFRAME_ANALYSIS_PYTHON (Pillow required)");
+        let baseline: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/baseline/analysis.json")).unwrap();
+        let dir = temp_dir("scoring-baseline");
+        let actual = build_analysis(&root, &dir, &root_key_for(&root), &Progress::default()).unwrap();
+        assert_eq!(actual["photos"].as_object().unwrap().len(), 11);
+        let keys = ["sharpness_raw", "highlight_clip_ratio", "shadow_clip_ratio", "mean_luma"];
+        let mut max_errors = [0.0_f64; 4];
+        let mut max_relative = 0.0_f64;
+        let mut max_normalized_errors = [0.0_f64;2];
+        let mut within_target = [0;3];
+        let mut total_diff = 0_u64;
+        let mut total_channels = 0_u64;
+        let mut max_channel = 0_i16;
+        let mut changed = 0_u64;
+        for (id, expected) in baseline["photos"].as_object().unwrap() {
+            let path = root.join(format!("{id}.JPG"));
+            let (_, _, rust_rgb) = decode_scaled(&path).unwrap();
+            let output = std::process::Command::new(&python).arg("-c").arg(
+                "import sys,struct; from PIL import Image; im=Image.open(sys.argv[1]); w,h=im.size; im.draft('RGB',(max(1,w//8),max(1,h//8))); im=im.convert('RGB'); sys.stdout.buffer.write(struct.pack('<II',*im.size)+im.tobytes())"
+            ).arg(path).output().unwrap();
+            assert!(output.status.success(), "Pillow decode failed");
+            let w = u32::from_le_bytes(output.stdout[..4].try_into().unwrap());
+            let h = u32::from_le_bytes(output.stdout[4..8].try_into().unwrap());
+            assert_eq!(rust_rgb.dimensions(), (w, h));
+            let pil = image::RgbImage::from_raw(w, h, output.stdout[8..].to_vec()).unwrap();
+            for (&a, &b) in rust_rgb.as_raw().iter().zip(pil.as_raw()) {
+                let d = (i16::from(a) - i16::from(b)).abs();
+                total_diff += d as u64;
+                total_channels += 1;
+                changed += u64::from(d != 0);
+                max_channel = max_channel.max(d);
+            }
+            for (i,key) in ["sharpness_score","overall_score"].iter().enumerate() {
+                max_normalized_errors[i] = max_normalized_errors[i].max((actual["photos"][id][key].as_f64().unwrap()-expected[key].as_f64().unwrap()).abs());
+            }
+            let pil_metrics = score_array(&pil);
+            let pil_values = [
+                rounded(pil_metrics.sharpness_raw, 3),
+                rounded(pil_metrics.highlight_clip_ratio, 5),
+                rounded(pil_metrics.shadow_clip_ratio, 5),
+                rounded(pil_metrics.mean_luma, 2),
+            ];
+            for (i, key) in keys.iter().enumerate() {
+                let expected_value = expected[key].as_f64().unwrap();
+                // 同一 PIL 画素なら cv2 と各桁まで一致することを固定する。
+                assert!((pil_values[i] - expected_value).abs() < 1e-9, "PIL pixel scoring: {id} {key}");
+                let error = (actual["photos"][id][key].as_f64().unwrap() - expected_value).abs();
+                max_errors[i] = max_errors[i].max(error);
+                if i == 0 {
+                    let relative = error / expected_value.abs().max(1e-12);
+                    max_relative = max_relative.max(relative);
+                    within_target[0] += usize::from(relative <= 1e-3);
+                } else if i < 3 {
+                    within_target[i] += usize::from(error <= 1e-4);
+                }
+            }
+        }
+        let mut matches = [0; 3];
+        for expected in baseline["groups"].as_array().unwrap() {
+            let group = actual["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["capture_ids"] == expected["capture_ids"])
+                .expect("same group");
+            for (i, (a, b)) in [
+                (group["recommended_capture_id"].clone(), expected["recommended_capture_id"].clone()),
+                (group["raw"]["level"].clone(), expected["raw"]["level"].clone()),
+                (group["raw"]["reason_codes"].clone(), expected["raw"]["reason_codes"].clone()),
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(a, b);
+                matches[i] += 1;
+            }
+            assert_eq!(group["recommendation_reasons"], expected["recommendation_reasons"]);
+            assert_eq!(group["confidence"], expected["confidence"]);
+            assert_eq!(group["raw"]["reasons"], expected["raw"]["reasons"]);
+        }
+        assert_eq!(actual["summary"], baseline["summary"]);
+        eprintln!(
+            "11 photos: max absolute errors {keys:?} = {max_errors:?}; sharpness max relative = {max_relative:.9}"
+        );
+        eprintln!("recommendation matches [capture_id, raw.level, reason_codes] = {matches:?}");
+        eprintln!("RGB decode: dimensions identical; max channel difference={max_channel}; mean absolute difference={:.9}; changed channels={changed}/{total_channels}",total_diff as f64 / total_channels as f64);
+        eprintln!("max absolute errors [sharpness_score, overall_score] = {max_normalized_errors:?}");
+        eprintln!("strict numeric target met: {}", max_relative <= 1e-3 && max_errors[1] <= 1e-4 && max_errors[2] <= 1e-4);
+        // Issue #114 のデコーダ差の例外。厳密一致とは呼ばず、計測済みの誤差上限を固定する。
+        // Pillow 画素での採点・推薦・理由・信頼度は上で厳密に検査する。
+        assert!(max_relative <= 0.0013);
+        assert!(max_errors[1] <= 1e-4 && max_errors[2] <= 0.018 && max_errors[3] <= 0.51);
+        assert!(max_normalized_errors[0] <= 0.1 && max_normalized_errors[1] == 0.0);
+        eprintln!("within strict target [sharpness, highlight, shadow] = {within_target:?}/11");
+        // 色差やアップサンプリングを含まない 1 ブロックの JPEG で DC 丸め差を切り分ける。
+        let dc = std::process::Command::new(&python).arg("-c").arg(
+            "import io,sys; from PIL import Image; b=io.BytesIO(); Image.new('L',(8,8),127).save(b,format='JPEG',quality=90); sys.stdout.buffer.write(b.getvalue())"
+        ).output().unwrap();
+        assert!(dc.status.success());
+        let dc_path = dir.join("dc-rounding.jpg");
+        fs::write(&dc_path,dc.stdout).unwrap();
+        let (_,_,dc_rgb) = decode_scaled(&dc_path).unwrap();
+        assert_eq!(dc_rgb.dimensions(),(1,1));
+        assert_eq!(dc_rgb.get_pixel(0,0).0,[126;3]);
+        let pil_dc = std::process::Command::new(&python).arg("-c").arg(
+            "import sys; from PIL import Image; im=Image.open(sys.argv[1]); im.draft('RGB',(1,1)); print(im.convert('RGB').getpixel((0,0))[0])"
+        ).arg(dc_path).output().unwrap();
+        assert!(pil_dc.status.success());
+        assert_eq!(String::from_utf8(pil_dc.stdout).unwrap().trim(),"127");
+        eprintln!("DC-only grayscale JPEG: Pillow=127, jpeg-decoder=126 (1/8 IDCT rounding)");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     // --- 元 JPG の配信 ---
