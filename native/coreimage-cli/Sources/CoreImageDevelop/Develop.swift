@@ -41,8 +41,8 @@ public struct Applied: Encodable {
     public let local_tone_map_supported: Bool
     public let orientation: UInt32
     public let working_color_space: String
-    public let color_space: String
-    public let bit_depth: Int
+    public var color_space: String
+    public var bit_depth: Int
     public let orientation_handling: String
 }
 
@@ -78,6 +78,9 @@ public struct SuccessResponse: Encodable {
     /// `--batch` のときだけ値を持つ（CLI 0.5.0、Issue #82）。受け付けた順の番号（1 始まり）。
     /// 単発呼び出しでは nil のままで、キー自体を出さない。
     public var sequence: Int? = nil
+    /// `--batch` の `op: render` のときだけ値を持つ（CLI 0.7.0、Issue #116）。通常の応答にはキー自体を出さない。
+    public var op: String? = nil
+    public var handle: String? = nil
 }
 
 /// `adjustments` をどう解釈したか（応答のトップレベル `adjustments_applied`。設計書 §4.2）。
@@ -272,66 +275,16 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
     try PathValidator.validate(request)
     let t0 = DispatchTime.now()
 
-    guard let filter = CIRAWFilter(imageURL: request.input) else {
-        throw DevelopError(.unsupportedRaw, "Core Image cannot decode this RAW file")
-    }
-    let tCreated = DispatchTime.now()
-
-    // decoderVersion は最初に設定する。設定すると他のパラメータが既定値へ戻る
-    // （実測: sharpnessAmount=0 → decoderVersion 設定 → 1.0 に戻った）。
-    let supported = filter.supportedDecoderVersions.map(\.rawValue)
-    let decoderVersion: String
-    if let requested = request.decoderVersion {
-        guard supported.contains(requested) else {
-            throw DevelopError(.unsupportedDecoderVersion, "decoder_version \(requested) is not supported for this file (supported: \(supported.joined(separator: ", ")))")
-        }
-        decoderVersion = requested
-    } else {
-        guard let latest = supported.max(by: { (Int($0) ?? 0) < (Int($1) ?? 0) }) else {
-            throw DevelopError(.unsupportedRaw, "no decoder version is available for this file")
-        }
-        decoderVersion = latest
-    }
-    filter.decoderVersion = CIRAWDecoderVersion(rawValue: decoderVersion)
-
-    let native = filter.nativeSize
-    let longEdge = max(native.width, native.height)
-    guard longEdge > 0 else {
-        throw DevelopError(.unsupportedRaw, "RAW file reports an empty native size")
-    }
-    var scale: Float = 1.0
-    if let maxEdge = request.maxEdge {
-        scale = min(1.0, Float(Double(maxEdge) / Double(longEdge)))
-    }
-    filter.scaleFactor = scale
-    filter.isDraftModeEnabled = false
-
-    applyProfile(request.settings, to: filter)
-
-    // adjustments 指定時だけ、設計書 §3.2 の手順 3〜6 と 8 を挟む。無ければ 0.2.0 と同じ処理（素通し）。
-    var adjustmentsPlan: AdjustmentsDecoderPlan?
-    var guards: [String] = []
-    // highlight_recovery の寄与を exposure / shadow_lift に加算した実効値（#81、設計書 §2・§3）。
-    // 以降のデコード段・後段はこの実効値だけを見る（hr 0 は恒等）。
-    let resolved = request.adjustments.map(HighlightRecoveryMapping.resolve)
-    if let adjustments = resolved?.adjustments {
-        let defaults = readDefaults(filter)
-        let plan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
-        adjustmentsPlan = plan
-        guards.append(contentsOf: plan.guards)
-        applyOverrides(request.settings, to: filter)
-        // 白点ガード: 白点ガード ＞ 明示の settings.* ＞ adjustments の写像 ＞ profile（§4.2 の優先順位）。
-        if WhiteDotGuard.needsGuard(
-            luminanceNoiseReduction: filter.luminanceNoiseReductionAmount,
-            sharpness: filter.sharpnessAmount,
-            scaleFactor: filter.scaleFactor
-        ) {
-            filter.sharpnessAmount = max(filter.sharpnessAmount, WhiteDotGuard.sharpnessFloor)
-            guards.append(WhiteDotGuard.name)
-        }
-    } else {
-        applyOverrides(request.settings, to: filter)
-    }
+    let configured = try configureRAWFilter(
+        input: request.input, maxEdge: request.maxEdge, decoderVersion: request.decoderVersion,
+        settings: request.settings, adjustments: request.adjustments
+    )
+    let filter = configured.filter
+    let native = configured.native
+    let tCreated = configured.created
+    let resolved = configured.resolved
+    let adjustmentsPlan = configured.plan
+    let guards = configured.guards
 
     // 診断モード: linearSpaceFilter は outputImage の取得より前に設定する（diagnostics 指定時のみ）。
     if let linear = request.diagnostics?.linearSpaceFilter {
@@ -356,39 +309,9 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
     }
     var adjustmentsApplied: AdjustmentsApplied?
     if let adjustments = resolved?.adjustments, let effect = resolved?.effect, let plan = adjustmentsPlan {
-        let decodedExtent = decoded.extent.integral
-        let longEdge = Int(max(decodedExtent.width, decodedExtent.height))
-        let iso = isoSpeed(from: filter.properties)
-        let base = captureSharpenBase(longEdge: longEdge, iso: iso.map(Double.init))
-        let params = PostChainParameters(
-            // 実効 lift は合成時に [0, 100] へクランプ済み。後段カーネルへ渡す [0, 1] も明示的に止める。
-            lift: min(1.0, max(0.0, adjustments.shadowLift / 100.0)),
-            brightness: adjustments.brightness,
-            contrast: adjustments.contrast,
-            saturation: adjustments.saturation,
-            usmSigma: base.sigma,
-            usmGain: usmGainForCoreImage(sharpness: adjustments.sharpness, base: base),
-            usmCoring: base.coring
-        )
-        image = try PostChain.apply(image, params)
-        adjustmentsApplied = AdjustmentsApplied(
-            defaults: plan.defaults.encodable,
-            post: AdjustmentsApplied.Post(
-                shadow_lift: params.lift,
-                brightness: params.brightness,
-                contrast: params.contrast,
-                saturation: params.saturation,
-                usm: AdjustmentsApplied.USM(
-                    sigma: params.usmSigma, gain: params.usmGain, coring: params.usmCoring, long_edge: longEdge, iso: iso
-                ),
-                wb: AdjustmentsApplied.WB(
-                    k0: plan.defaults.neutralTemperature, mired_shift: plan.miredShift, mired_per_unit: WhiteBalanceMapping.miredPerUnit
-                ),
-                noise_reduction: adjustments.noiseReduction.rawValue
-            ),
-            highlight_recovery: AdjustmentsApplied.HighlightRecovery(effect),
-            ignored: Adjustments.ignoredKeys,
-            guards: guards
+        (image, adjustmentsApplied) = try applyAdjustmentsPost(
+            to: image, decodedExtent: decoded.extent, iso: isoSpeed(from: filter.properties),
+            adjustments: adjustments, effect: effect, plan: plan, guards: guards
         )
     }
     guard isUsableExtent(image.extent) else {
@@ -448,14 +371,32 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
         ))
     }
 
-    let properties = filter.properties
-    let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
-    let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
-    let iso = isoSpeed(from: properties)
-    let sourceOrientation = filter.orientation.rawValue
+    let applied = makeApplied(filter, profile: request.settings.profile, format: request.format, colorSpaceName: colorSpaceName)
+    let source = makeSourceInfo(filter, native: native)
 
-    let applied = Applied(
-        profile: request.settings.profile.rawValue,
+    return SuccessResponse(
+        cli_version: cliVersion,
+        macos_version: macOSVersionString,
+        decoder_version: filter.decoderVersion.rawValue,
+        input: request.input.path,
+        output: request.output.path,
+        mode: request.mode.rawValue,
+        format: request.format.rawValue,
+        width: outputWidth,
+        height: outputHeight,
+        elapsed_ms: ElapsedMS(decode: millis(t0, t1), render_encode: millis(t1, t2), total: millis(t0, t2)),
+        applied: applied,
+        source: source,
+        adjustments_applied: adjustmentsApplied,
+        diagnostics: diagnosticsReport
+    )
+}
+
+/// filter から読み戻した値の応答（`applied`）。`develop` と `op: decode` が共有する。
+func makeApplied(_ filter: CIRAWFilter, profile: Profile, format: OutputFormat, colorSpaceName: String) -> Applied {
+    let sourceOrientation = filter.orientation.rawValue
+    return Applied(
+        profile: profile.rawValue,
         decoder_version: filter.decoderVersion.rawValue,
         scale_factor: readable(filter.scaleFactor),
         exposure: readable(filter.exposure),
@@ -481,32 +422,148 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
         orientation: sourceOrientation,
         working_color_space: "extended linear sRGB (RGBAh)",
         color_space: colorSpaceName,
-        bit_depth: request.format == .jpeg ? 8 : 16,
+        bit_depth: format == .jpeg ? 8 : 16,
         orientation_handling: "CIRAWFilter applies the source EXIF orientation (\(sourceOrientation)) to outputImage; pixels are written upright and the output Orientation tag is 1 (no second rotation)"
     )
+}
 
-    return SuccessResponse(
-        cli_version: cliVersion,
-        macos_version: macOSVersionString,
-        decoder_version: filter.decoderVersion.rawValue,
-        input: request.input.path,
-        output: request.output.path,
-        mode: request.mode.rawValue,
-        format: request.format.rawValue,
-        width: outputWidth,
-        height: outputHeight,
-        elapsed_ms: ElapsedMS(decode: millis(t0, t1), render_encode: millis(t1, t2), total: millis(t0, t2)),
-        applied: applied,
-        source: SourceInfo(
-            camera_model: tiff?[kCGImagePropertyTIFFModel as String] as? String,
-            lens_model: exif?[kCGImagePropertyExifLensModel as String] as? String,
-            iso: iso,
-            native_width: Int(native.width),
-            native_height: Int(native.height),
-            orientation: sourceOrientation
+func makeSourceInfo(_ filter: CIRAWFilter, native: CGSize) -> SourceInfo {
+    let properties = filter.properties
+    let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
+    let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
+    return SourceInfo(
+        camera_model: tiff?[kCGImagePropertyTIFFModel as String] as? String,
+        lens_model: exif?[kCGImagePropertyExifLensModel as String] as? String,
+        iso: isoSpeed(from: properties),
+        native_width: Int(native.width),
+        native_height: Int(native.height),
+        orientation: filter.orientation.rawValue
+    )
+}
+
+/// 後段チェーン（PostChain）を掛け、`adjustments_applied` を組み立てる（`develop` と `op: render` が共有する）。
+/// `decodedExtent` は CIRAWFilter.outputImage の extent（USM の長辺の根拠）、`iso` は撮影 ISO。
+/// `adjustments` は hr の寄与を合成済みの実効値。
+func applyAdjustmentsPost(
+    to image: CIImage, decodedExtent rawExtent: CGRect, iso: Int?,
+    adjustments: Adjustments, effect: HighlightRecoveryEffect, plan: AdjustmentsDecoderPlan, guards: [String]
+) throws -> (CIImage, AdjustmentsApplied) {
+    let decodedExtent = rawExtent.integral
+    let longEdge = Int(max(decodedExtent.width, decodedExtent.height))
+    let base = captureSharpenBase(longEdge: longEdge, iso: iso.map(Double.init))
+    let params = PostChainParameters(
+        // 実効 lift は合成時に [0, 100] へクランプ済み。後段カーネルへ渡す [0, 1] も明示的に止める。
+        lift: min(1.0, max(0.0, adjustments.shadowLift / 100.0)),
+        brightness: adjustments.brightness,
+        contrast: adjustments.contrast,
+        saturation: adjustments.saturation,
+        usmSigma: base.sigma,
+        usmGain: usmGainForCoreImage(sharpness: adjustments.sharpness, base: base),
+        usmCoring: base.coring
+    )
+    let processed = try PostChain.apply(image, params)
+    let applied = AdjustmentsApplied(
+        defaults: plan.defaults.encodable,
+        post: AdjustmentsApplied.Post(
+            shadow_lift: params.lift,
+            brightness: params.brightness,
+            contrast: params.contrast,
+            saturation: params.saturation,
+            usm: AdjustmentsApplied.USM(
+                sigma: params.usmSigma, gain: params.usmGain, coring: params.usmCoring, long_edge: longEdge, iso: iso
+            ),
+            wb: AdjustmentsApplied.WB(
+                k0: plan.defaults.neutralTemperature, mired_shift: plan.miredShift, mired_per_unit: WhiteBalanceMapping.miredPerUnit
+            ),
+            noise_reduction: adjustments.noiseReduction.rawValue
         ),
-        adjustments_applied: adjustmentsApplied,
-        diagnostics: diagnosticsReport
+        highlight_recovery: AdjustmentsApplied.HighlightRecovery(effect),
+        ignored: Adjustments.ignoredKeys,
+        guards: guards
+    )
+    return (processed, applied)
+}
+
+/// `configureRAWFilter` の結果。
+struct ConfiguredRAWFilter {
+    let filter: CIRAWFilter
+    let native: CGSize
+    /// `CIRAWFilter(imageURL:)` を作り終えた時刻（計測フック用）。
+    let created: DispatchTime
+    /// hr の寄与を合成した adjustments（`adjustments` 指定時のみ）。
+    let resolved: (adjustments: Adjustments, effect: HighlightRecoveryEffect)?
+    let plan: AdjustmentsDecoderPlan?
+    let guards: [String]
+}
+
+/// CIRAWFilter を作り、decoderVersion → scaleFactor → profile → adjustments のデコード段 → 個別上書き → 白点ガード
+/// の順に設定する（`develop` と `--batch` の `op: decode` が共有する。順序は変えないこと）。
+func configureRAWFilter(
+    input: URL, maxEdge: Int?, decoderVersion requestedDecoderVersion: String?, settings: Settings, adjustments: Adjustments?
+) throws -> ConfiguredRAWFilter {
+    guard let filter = CIRAWFilter(imageURL: input) else {
+        throw DevelopError(.unsupportedRaw, "Core Image cannot decode this RAW file")
+    }
+    let tCreated = DispatchTime.now()
+
+    // decoderVersion は最初に設定する。設定すると他のパラメータが既定値へ戻る
+    // （実測: sharpnessAmount=0 → decoderVersion 設定 → 1.0 に戻った）。
+    let supported = filter.supportedDecoderVersions.map(\.rawValue)
+    let decoderVersion: String
+    if let requested = requestedDecoderVersion {
+        guard supported.contains(requested) else {
+            throw DevelopError(.unsupportedDecoderVersion, "decoder_version \(requested) is not supported for this file (supported: \(supported.joined(separator: ", ")))")
+        }
+        decoderVersion = requested
+    } else {
+        guard let latest = supported.max(by: { (Int($0) ?? 0) < (Int($1) ?? 0) }) else {
+            throw DevelopError(.unsupportedRaw, "no decoder version is available for this file")
+        }
+        decoderVersion = latest
+    }
+    filter.decoderVersion = CIRAWDecoderVersion(rawValue: decoderVersion)
+
+    let native = filter.nativeSize
+    let longEdge = max(native.width, native.height)
+    guard longEdge > 0 else {
+        throw DevelopError(.unsupportedRaw, "RAW file reports an empty native size")
+    }
+    var scale: Float = 1.0
+    if let maxEdge = maxEdge {
+        scale = min(1.0, Float(Double(maxEdge) / Double(longEdge)))
+    }
+    filter.scaleFactor = scale
+    filter.isDraftModeEnabled = false
+
+    applyProfile(settings, to: filter)
+
+    // adjustments 指定時だけ、設計書 §3.2 の手順 3〜6 と 8 を挟む。無ければ 0.2.0 と同じ処理（素通し）。
+    var adjustmentsPlan: AdjustmentsDecoderPlan?
+    var guards: [String] = []
+    // highlight_recovery の寄与を exposure / shadow_lift に加算した実効値（#81、設計書 §2・§3）。
+    // 以降のデコード段・後段はこの実効値だけを見る（hr 0 は恒等）。
+    let resolved = adjustments.map(HighlightRecoveryMapping.resolve)
+    if let adjustments = resolved?.adjustments {
+        let defaults = readDefaults(filter)
+        let plan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
+        adjustmentsPlan = plan
+        guards.append(contentsOf: plan.guards)
+        applyOverrides(settings, to: filter)
+        // 白点ガード: 白点ガード ＞ 明示の settings.* ＞ adjustments の写像 ＞ profile（§4.2 の優先順位）。
+        if WhiteDotGuard.needsGuard(
+            luminanceNoiseReduction: filter.luminanceNoiseReductionAmount,
+            sharpness: filter.sharpnessAmount,
+            scaleFactor: filter.scaleFactor
+        ) {
+            filter.sharpnessAmount = max(filter.sharpnessAmount, WhiteDotGuard.sharpnessFloor)
+            guards.append(WhiteDotGuard.name)
+        }
+    } else {
+        applyOverrides(settings, to: filter)
+    }
+
+    return ConfiguredRAWFilter(
+        filter: filter, native: native, created: tCreated, resolved: resolved, plan: adjustmentsPlan, guards: guards
     )
 }
 

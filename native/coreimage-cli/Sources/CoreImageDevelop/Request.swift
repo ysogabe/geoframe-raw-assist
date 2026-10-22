@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.6.0"
+public let cliVersion = "0.7.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {
@@ -14,6 +14,9 @@ public enum ErrorCode: String, Encodable {
     case renderFailed = "RENDER_FAILED"
     case writeFailed = "WRITE_FAILED"
     case internalError = "INTERNAL_ERROR"
+    /// `--batch` の `op: render` で、ハンドルが未知・解放済み・LRU で捨てられた（CLI 0.7.0、Issue #116）。
+    /// 呼び出し側は `op: decode` をやり直す。
+    case handleNotFound = "HANDLE_NOT_FOUND"
 }
 
 public struct DevelopError: Error, Equatable {
@@ -147,6 +150,43 @@ public enum RequestParser {
         let input = try absolutePath(dict, "input")
         let output = try absolutePath(dict, "output")
 
+        let (mode, maxEdge) = try parseModeAndMaxEdge(dict)
+
+        let (format, jpegQuality, outputColorSpace) = try parseOutputSpec(dict, output: output)
+
+        let decoderVersion = try parseDecoderVersion(dict)
+
+        let settings = try parseSettings(dict["settings"])
+        let adjustments = try parseAdjustments(dict["adjustments"])
+        if adjustments != nil {
+            try validateAdjustmentsAgainstSettings(dict["settings"], settings)
+        }
+        let diagnostics = try parseDiagnostics(dict["diagnostics"])
+
+        guard input.pathExtension.lowercased() == "arw" else {
+            throw DevelopError(.invalidRequest, "input must be a Sony .ARW file")
+        }
+        if input.standardizedFileURL.path == output.standardizedFileURL.path {
+            throw DevelopError(.invalidRequest, "input and output must be different paths")
+        }
+        if let dump = diagnostics?.dumpFloat {
+            if dump.path.path == input.standardizedFileURL.path {
+                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from input")
+            }
+            if dump.path.path == output.standardizedFileURL.path {
+                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from output")
+            }
+        }
+
+        return DevelopRequest(
+            input: input, output: output, mode: mode, maxEdge: maxEdge, format: format,
+            jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings,
+            adjustments: adjustments, diagnostics: diagnostics
+        )
+    }
+
+    /// `mode`（必須）と `max_edge`（preview のみ。省略時 2400）。
+    static func parseModeAndMaxEdge(_ dict: [String: Any]) throws -> (Mode, Int?) {
         guard let modeRaw = dict["mode"] as? String, let mode = Mode(rawValue: modeRaw) else {
             throw DevelopError(.invalidRequest, "mode must be \"preview\" or \"full\"")
         }
@@ -164,7 +204,11 @@ public enum RequestParser {
         } else if let raw = dict["max_edge"], !(raw is NSNull) {
             throw DevelopError(.invalidRequest, "max_edge is only allowed with mode \"preview\"")
         }
+        return (mode, maxEdge)
+    }
 
+    /// `format` / `jpeg_quality` / `output_color_space` と出力拡張子の整合。
+    static func parseOutputSpec(_ dict: [String: Any], output: URL) throws -> (OutputFormat, Double?, OutputColorSpace?) {
         var format = OutputFormat.jpeg
         if let raw = dict["format"], !(raw is NSNull) {
             guard let string = raw as? String, let value = OutputFormat(rawValue: string) else {
@@ -210,7 +254,10 @@ public enum RequestParser {
         } else if let raw = dict["output_color_space"], !(raw is NSNull) {
             throw DevelopError(.invalidRequest, "output_color_space is only allowed with format \"tiff16\" (jpeg is always sRGB)")
         }
+        return (format, jpegQuality, outputColorSpace)
+    }
 
+    static func parseDecoderVersion(_ dict: [String: Any]) throws -> String? {
         var decoderVersion: String?
         if let raw = dict["decoder_version"], !(raw is NSNull) {
             guard let string = raw as? String, allowedDecoderVersions.contains(string) else {
@@ -218,34 +265,7 @@ public enum RequestParser {
             }
             decoderVersion = string
         }
-
-        let settings = try parseSettings(dict["settings"])
-        let adjustments = try parseAdjustments(dict["adjustments"])
-        if adjustments != nil {
-            try validateAdjustmentsAgainstSettings(dict["settings"], settings)
-        }
-        let diagnostics = try parseDiagnostics(dict["diagnostics"])
-
-        guard input.pathExtension.lowercased() == "arw" else {
-            throw DevelopError(.invalidRequest, "input must be a Sony .ARW file")
-        }
-        if input.standardizedFileURL.path == output.standardizedFileURL.path {
-            throw DevelopError(.invalidRequest, "input and output must be different paths")
-        }
-        if let dump = diagnostics?.dumpFloat {
-            if dump.path.path == input.standardizedFileURL.path {
-                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from input")
-            }
-            if dump.path.path == output.standardizedFileURL.path {
-                throw DevelopError(.invalidRequest, "diagnostics.dump_float.path must differ from output")
-            }
-        }
-
-        return DevelopRequest(
-            input: input, output: output, mode: mode, maxEdge: maxEdge, format: format,
-            jpegQuality: jpegQuality, outputColorSpace: outputColorSpace, decoderVersion: decoderVersion, settings: settings,
-            adjustments: adjustments, diagnostics: diagnostics
-        )
+        return decoderVersion
     }
 
     static func parseSettings(_ raw: Any?) throws -> Settings {
@@ -403,7 +423,16 @@ public enum RequestParser {
 /// ファイルシステムに対する事前検証（読むだけ。書き込みはしない）。
 public enum PathValidator {
     public static func validate(_ request: DevelopRequest, fileManager: FileManager = .default) throws {
-        let inputPath = request.input.path
+        try validateInput(request.input, fileManager: fileManager)
+        try validateOutput(request.output, input: request.input, fileManager: fileManager)
+        if let dump = request.diagnostics?.dumpFloat {
+            try validateDump(dump.path, input: request.input, output: request.output, fileManager: fileManager)
+        }
+    }
+
+    /// 入力 RAW の存在・読み取り可否（`--batch` の `op: decode` も使う）。
+    public static func validateInput(_ input: URL, fileManager: FileManager = .default) throws {
+        let inputPath = input.path
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: inputPath, isDirectory: &isDirectory) else {
             throw DevelopError(.inputNotFound, "input does not exist: \(inputPath)")
@@ -414,28 +443,28 @@ public enum PathValidator {
         guard fileManager.isReadableFile(atPath: inputPath) else {
             throw DevelopError(.inputNotReadable, "input is not readable: \(inputPath)")
         }
+    }
 
-        let parent = request.output.deletingLastPathComponent().path
+    /// 出力先の検証（親ディレクトリの存在、既存ディレクトリ・入力と同一実体の拒否）。`op: render` も使う。
+    public static func validateOutput(_ output: URL, input: URL, fileManager: FileManager = .default) throws {
+        let parent = output.deletingLastPathComponent().path
         var parentIsDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: parent, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue else {
             throw DevelopError(.outputDirNotFound, "output directory does not exist: \(parent)")
         }
 
         var outputIsDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: request.output.path, isDirectory: &outputIsDirectory) {
+        if fileManager.fileExists(atPath: output.path, isDirectory: &outputIsDirectory) {
             if outputIsDirectory.boolValue {
-                throw DevelopError(.invalidRequest, "output is an existing directory: \(request.output.path)")
+                throw DevelopError(.invalidRequest, "output is an existing directory: \(output.path)")
             }
             // シンボリックリンク・ハードリンク・大文字小文字違いで同じ実体を指していないか。
-            if sameFile(request.input, request.output, fileManager: fileManager) {
+            if sameFile(input, output, fileManager: fileManager) {
                 throw DevelopError(.invalidRequest, "input and output refer to the same file")
             }
         }
-        if request.input.resolvingSymlinksInPath().path == request.output.resolvingSymlinksInPath().path {
+        if input.resolvingSymlinksInPath().path == output.resolvingSymlinksInPath().path {
             throw DevelopError(.invalidRequest, "input and output refer to the same file")
-        }
-        if let dump = request.diagnostics?.dumpFloat {
-            try validateDump(dump.path, input: request.input, output: request.output, fileManager: fileManager)
         }
     }
 

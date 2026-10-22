@@ -589,9 +589,49 @@ mod batch {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use serde_json::Value;
+    use serde_json::{Map, Value};
 
     use super::{is_cli_error_response, CoreImageError};
+
+    /// `op: render` で、ハンドルが未知・解放済み・LRU で捨てられたときの `error.code`。
+    /// 受け取った側はもう一度 `decode` する（CLI 0.7.0、Issue #116）。
+    pub(super) const HANDLE_NOT_FOUND: &str = "HANDLE_NOT_FOUND";
+
+    /// `decode` の結果。`id` が以後の `render` / `release` に渡すハンドル。
+    #[derive(Debug)]
+    pub(super) struct DecodedHandle {
+        pub(super) id: String,
+        /// CLI の成功応答そのもの（`width` / `height` / `bytes` / `elapsed_ms` / `cache` など）。
+        pub(super) response: Value,
+    }
+
+    /// リクエスト（JSON オブジェクト）に `op`（と `handle`）を足した複製を作る。
+    /// 呼び出し側が `op` / `handle` を持っていたら食い違いを避けるため拒否する。
+    fn with_op(request: &Value, op: &str, handle: Option<&str>) -> Result<Value, CoreImageError> {
+        let Some(object) = request.as_object() else {
+            return Err(CoreImageError::new(
+                "INVALID_REQUEST",
+                format!("{op} のリクエストは JSON オブジェクトにしてください"),
+            ));
+        };
+        if object.contains_key("op") || (handle.is_some() && object.contains_key("handle")) {
+            return Err(CoreImageError::new(
+                "INVALID_REQUEST",
+                "op / handle はメソッドが付けます。リクエストに含めないでください",
+            ));
+        }
+        let mut object: Map<String, Value> = object.clone();
+        object.insert("op".into(), Value::String(op.into()));
+        if let Some(handle) = handle {
+            object.insert("handle".into(), Value::String(handle.into()));
+        }
+        Ok(Value::Object(object))
+    }
+
+    /// 失敗が「ハンドルが無い（捨てられた・解放済み・未知）」か。真なら `decode` からやり直す。
+    pub(super) fn is_handle_lost(error: &CoreImageError) -> bool {
+        error.code == HANDLE_NOT_FOUND
+    }
 
     /// stderr の末尾として保持する行数（エラーメッセージに添える）。
     const STDERR_TAIL_LINES: usize = 20;
@@ -780,6 +820,48 @@ mod batch {
                 "SIDECAR_BAD_RESPONSE",
                 "Core Image CLI の応答が成功でも失敗の形でもありません",
             ))
+        }
+
+        /// `op: decode`。デコード段だけを実行して CLI 内に保持し、ハンドルを返す。
+        ///
+        /// `request` は `input` / `mode` / `max_edge` / `decoder_version` / `settings` / `adjustments`
+        /// （`output` は取らない）。保持は CLI プロセスの中なので、セッションを閉じる（`finish` / drop / kill）と
+        /// すべて消える。個数・メモリの上限を超えると CLI が古い順に捨てる（`render` が
+        /// [`is_handle_lost`] のエラーになる）。
+        pub(super) fn decode(&mut self, request: &Value) -> Result<DecodedHandle, CoreImageError> {
+            let response = self.request(&with_op(request, "decode", None)?)?;
+            match response.get("handle").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => Ok(DecodedHandle {
+                    id: id.to_string(),
+                    response,
+                }),
+                _ => Err(CoreImageError::new(
+                    "SIDECAR_BAD_RESPONSE",
+                    "Core Image CLI の decode 応答に handle がありません",
+                )),
+            }
+        }
+
+        /// `op: render`。保持したデコード結果に後段（adjustments）だけを掛けて `output` へ書く。
+        /// `request` は `output` / `format` / `jpeg_quality` / `output_color_space` / `adjustments`。
+        /// adjustments のデコード段のキーが decode 時と違うと `INVALID_REQUEST`。
+        pub(super) fn render(
+            &mut self,
+            handle: &str,
+            request: &Value,
+        ) -> Result<Value, CoreImageError> {
+            self.request(&with_op(request, "render", Some(handle))?)
+        }
+
+        /// `op: release`。ハンドルを解放する。保持していたなら true、未知・解放済み・捨て済みなら false
+        /// （どちらもエラーにしない）。
+        pub(super) fn release(&mut self, handle: &str) -> Result<bool, CoreImageError> {
+            let response = self.request(&with_op(
+                &Value::Object(Map::new()),
+                "release",
+                Some(handle),
+            )?)?;
+            Ok(response.get("released") == Some(&Value::Bool(true)))
         }
 
         /// stdin を閉じ（EOF）、`timeout` 以内の終了を待つ。過ぎたら kill して `SIDECAR_TIMEOUT`。
@@ -2466,6 +2548,108 @@ exit 0"#,
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// decode / render / release を話す偽 CLI（ハンドルは `h<番号>`。`gone` を含む render は捨て済み扱い）。
+    fn decode_cache_mock(dir: &Path) -> PathBuf {
+        script_sidecar(
+            dir,
+            r#"[ "$1" = "--batch" ] || exit 9
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  case "$line" in
+    *'"op":"decode"'*) case "$line" in *adjustments*) printf '{"bytes":10,"cache":{"entries":1,"evicted":[]},"handle":"h%d","ok":true,"op":"decode","sequence":%d}\n' "$n" "$n" ;; *) printf '{"error":{"code":"INVALID_REQUEST","message":"decode requires adjustments"},"ok":false,"sequence":%d}\n' "$n" ;; esac ;;
+    *'"op":"render"'*gone*) printf '{"error":{"code":"HANDLE_NOT_FOUND","message":"evicted"},"ok":false,"sequence":%d}\n' "$n" ;;
+    *'"op":"render"'*) printf '{"echo":%s,"ok":true,"op":"render","sequence":%d}\n' "$line" "$n" ;;
+    *'"op":"release"'*gone*) printf '{"ok":true,"op":"release","released":false,"sequence":%d}\n' "$n" ;;
+    *'"op":"release"'*) printf '{"ok":true,"op":"release","released":true,"sequence":%d}\n' "$n" ;;
+    *) printf '{"ok":true,"sequence":%d}\n' "$n" ;;
+  esac
+done
+exit 0"#,
+        )
+    }
+
+    #[test]
+    fn batch_session_decode_render_release_send_ops_and_handle() {
+        let dir = TempDir::new("batch-decode-cache");
+        let mut session =
+            BatchSession::start(&decode_cache_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        let decoded = session
+            .decode(&json!({"input": "/x/a.ARW", "mode": "preview", "adjustments": {}}))
+            .unwrap();
+        assert_eq!(decoded.id, "h1");
+        assert_eq!(decoded.response["bytes"], json!(10));
+
+        let rendered = session
+            .render(
+                &decoded.id,
+                &json!({"output": "/x/o.tif", "format": "tiff16", "adjustments": {}}),
+            )
+            .unwrap();
+        // 偽 CLI は受け取った行をそのまま返す: op と handle が付き、元のキーも残っている。
+        assert_eq!(rendered["echo"]["op"], json!("render"));
+        assert_eq!(rendered["echo"]["handle"], json!("h1"));
+        assert_eq!(rendered["echo"]["output"], json!("/x/o.tif"));
+
+        assert!(session.release(&decoded.id).unwrap());
+        assert!(!session.release("gone").unwrap());
+        assert_eq!(session.sent(), 4);
+        assert!(session.finish().unwrap().success());
+    }
+
+    #[test]
+    fn batch_session_lost_handle_is_a_recoverable_error() {
+        let dir = TempDir::new("batch-handle-lost");
+        let mut session =
+            BatchSession::start(&decode_cache_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        let error = session
+            .render("gone", &json!({"output": "/x/o.tif", "adjustments": {}}))
+            .unwrap_err();
+        assert_eq!(error.code, "HANDLE_NOT_FOUND");
+        assert!(batch::is_handle_lost(&error));
+        // セッションは使い続けられる（呼び出し側は decode をやり直す）。
+        assert!(session.is_usable());
+        let decoded = session.decode(&json!({"adjustments": {}})).unwrap();
+        assert_eq!(decoded.id, "h2");
+        // 他のエラー（decode の検証失敗）はハンドル喪失ではない。
+        let error = session.decode(&json!({"mode": "preview"})).unwrap_err();
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert!(!batch::is_handle_lost(&error));
+        assert!(session.finish().unwrap().success());
+    }
+
+    #[test]
+    fn batch_session_op_methods_reject_bad_requests_without_sending() {
+        let dir = TempDir::new("batch-op-validation");
+        let mut session =
+            BatchSession::start(&decode_cache_mock(dir.path()), Duration::from_secs(10)).unwrap();
+        // オブジェクトでない / op・handle を自分で持っている → 送らずに INVALID_REQUEST
+        assert_eq!(
+            session.decode(&json!([1])).unwrap_err().code,
+            "INVALID_REQUEST"
+        );
+        assert_eq!(
+            session.decode(&json!({"op": "render"})).unwrap_err().code,
+            "INVALID_REQUEST"
+        );
+        assert_eq!(
+            session
+                .render("h1", &json!({"handle": "h2"}))
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+        assert_eq!(session.sent(), 0);
+        assert!(session.is_usable());
+        // 応答に handle が無ければ SIDECAR_BAD_RESPONSE（セッションは使える）
+        let dir2 = TempDir::new("batch-op-nohandle");
+        let mut plain =
+            BatchSession::start(&batch_mock(dir2.path()), Duration::from_secs(10)).unwrap();
+        let error = plain.decode(&json!({"adjustments": {}})).unwrap_err();
+        assert_eq!(error.code, "SIDECAR_BAD_RESPONSE");
+        assert!(plain.is_usable());
+    }
+
     #[test]
     fn batch_session_cli_error_keeps_session_usable() {
         let dir = TempDir::new("batch-cli-error");
@@ -2589,6 +2773,91 @@ exit 0"#,
         assert_eq!(error.code, "INPUT_NOT_FOUND");
         assert!(session.is_usable());
         assert_eq!(session.sent(), 2);
+        assert!(session.finish().unwrap().success());
+    }
+
+    /// 実 ARW を集める（`GEOFRAME_CI_TEST_ARW_ROOT`、無ければ既定の取り込み先）。無ければ空。
+    fn real_arws(limit: usize) -> Vec<PathBuf> {
+        let root = std::env::var(REAL_ROOT_ENV).unwrap_or_else(|_| REAL_ROOT_DEFAULT.to_string());
+        let mut found: Vec<PathBuf> = fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("arw"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort();
+        found.truncate(limit);
+        found
+    }
+
+    /// 実 CLI で decode → render（複数回）→ release。LRU で捨てられた後の `HANDLE_NOT_FOUND` と、
+    /// デコード段のキーが違うときの拒否も確かめる。実 ARW が無ければ skip。
+    #[test]
+    fn batch_session_decode_cache_with_built_sidecar_and_real_arw() {
+        let Some(sidecar) = built_sidecar() else {
+            eprintln!("skip: src-tauri/binaries/geoframe-ci-develop-* がありません");
+            return;
+        };
+        let Some(arw) = real_arws(1).into_iter().next() else {
+            eprintln!("skip: 実 ARW がありません（{REAL_ROOT_ENV} で指定）");
+            return;
+        };
+        let dir = TempDir::new("batch-decode-real");
+        let adjustments = |contrast: f64, exposure: f64| {
+            json!({
+                "exposure": exposure, "wb_temp": 0.0, "shadow_lift": 10.0, "highlight_recovery": 0.0,
+                "brightness": 1.0, "contrast": contrast, "saturation": 1.0, "sharpness": 1.0,
+                "noise_reduction": "light"
+            })
+        };
+        let decode_request = json!({
+            "input": arw, "mode": "preview", "max_edge": 640,
+            "settings": {"profile": "apple_default", "lens_correction": true},
+            "adjustments": adjustments(1.0, 0.0)
+        });
+        let render_request = |name: &str, contrast: f64, exposure: f64| {
+            json!({
+                "output": dir.path().join(name), "format": "tiff16", "output_color_space": "srgb",
+                "adjustments": adjustments(contrast, exposure)
+            })
+        };
+
+        let mut session = BatchSession::start(&sidecar, Duration::from_secs(60)).unwrap();
+        let decoded = session.decode(&decode_request).unwrap();
+        assert_eq!(decoded.response["op"], json!("decode"));
+        assert_eq!(decoded.response["cache"]["entries"], json!(1));
+        let mut sizes = Vec::new();
+        for (i, contrast) in [1.0, 1.15, 1.3].into_iter().enumerate() {
+            let name = format!("r{i}.tif");
+            let response = session
+                .render(&decoded.id, &render_request(&name, contrast, 0.0))
+                .unwrap();
+            assert_eq!(response["op"], json!("render"));
+            assert_eq!(response["handle"], json!(decoded.id));
+            assert_eq!(response["format"], json!("tiff16"));
+            sizes.push(fs::metadata(dir.path().join(&name)).unwrap().len());
+        }
+        assert!(sizes.iter().all(|&len| len > 1000));
+        // デコード段（exposure）が違う adjustments は黙って近似せず拒否
+        let error = session
+            .render(&decoded.id, &render_request("bad.tif", 1.0, 0.5))
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert!(!dir.path().join("bad.tif").exists());
+        assert!(session.release(&decoded.id).unwrap());
+        assert!(!session.release(&decoded.id).unwrap());
+        let error = session
+            .render(&decoded.id, &render_request("gone.tif", 1.0, 0.0))
+            .unwrap_err();
+        assert!(batch::is_handle_lost(&error), "{}", error.message);
+        assert!(session.is_usable());
         assert!(session.finish().unwrap().success());
     }
 
