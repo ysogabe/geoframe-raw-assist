@@ -23,7 +23,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPDATA/coreimage/**"
+          "$APPDATA/coreimage/**",
+          "$APPDATA/thumbnails/**"
         ]
       }
     }

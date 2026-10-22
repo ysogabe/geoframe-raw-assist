@@ -24,3 +24,8 @@ regex = "1"
 sha2 = "0.10"
 # root_key_for（Python local_raw/config.py と同じ sha1 先頭 8 桁）。
 sha1 = "0.10"
+# 解析 lite（src/analysis.rs。Issue #110）: EXIF 読み取り・1/8 スケール JPEG デコード・サムネイル。
+kamadak-exif = "0.6"
+jpeg-decoder = { version = "0.3", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

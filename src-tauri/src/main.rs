@@ -18,6 +18,7 @@
 //! panicking.
 
 mod adjustments;
+mod analysis;
 mod coreimage;
 mod presets;
 
@@ -890,6 +891,9 @@ fn main() {
     let app = tauri::Builder::default()
         .manage(RawEngineState(Mutex::new(None)))
         .manage(Mutex::new(SetupState::new("ready", "")))
+        .manage(analysis::AnalysisState::default())
+        // 元 JPG の配信（Issue #110）: geoframe://localhost/source-jpg/DSC12345.JPG
+        .register_asynchronous_uri_scheme_protocol("geoframe", analysis::source_jpg_protocol)
         .invoke_handler(tauri::generate_handler![
             setup_status,
             // Core Image プレビュー現像（Issue #72 / #73）。GEOFRAME_PREVIEW_ENGINE=rawpy で切り戻し。
@@ -898,7 +902,10 @@ fn main() {
             // 「エンジン準備完了」の判定（Issue #109）。Python の /api/health の代わり。
             coreimage::engine_info,
             // プリセット定義（Issue #80）。定義の正は Rust 側。Python の /api/health は移行期間中の予備。
-            presets::get_presets
+            presets::get_presets,
+            // 解析 lite（Issue #110）。採点は N-C2。
+            analysis::get_analysis,
+            analysis::start_analysis
         ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;
