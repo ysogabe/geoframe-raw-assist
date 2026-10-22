@@ -222,11 +222,8 @@ export const SOURCE_FOLDER_PERMISSION_HELP =
 export const SOURCE_FOLDER_NO_PAIRS =
   "このフォルダには DSC#####.JPG と DSC#####.ARW のペアが見つかりません。別のフォルダを選び直してください。";
 
-/** Python 側が未対応・停止しているときにフォルダ変更を試した場合。 */
-export const SOURCE_FOLDER_UNAVAILABLE = "現像対象フォルダの変更を準備中です。しばらくしてからお試しください。";
-
 /**
- * POST /api/source-folder の失敗をユーザー向けの文にする。
+ * 現像対象フォルダ変更の失敗をユーザー向けの文にする。
  * invalid / not_found / not_directory はサーバの文言がそのまま十分に具体的なので素通しする。
  */
 export function sourceFolderErrorMessage(

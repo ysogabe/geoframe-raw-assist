@@ -9,32 +9,17 @@ type AnalysisGateProps = {
   errorMessage: string;
   busy: boolean;
   onStart: () => void;
-  /** Tauri 実行か。true のとき Python エンジン前提の文言を出さない。 */
-  native?: boolean;
   /** 「フォルダ未設定」画面から現像元フォルダを選ぶ（ネイティブダイアログ）。 */
   onPickFolder?: () => void;
 };
 
-export function AnalysisGate({ engineStatus, analysisState, progress, errorMessage, busy, onStart, native = false, onPickFolder }: AnalysisGateProps) {
+export function AnalysisGate({ engineStatus, analysisState, progress, errorMessage, busy, onStart, onPickFolder }: AnalysisGateProps) {
   if (engineStatus === "offline") {
-    if (native) {
-      return (
-        <section className="analysis-gate screen-enter" aria-label="現像エンジンの状態">
-          <span className="gate-mark offline">!</span>
-          <h2>現像エンジンを利用できません</h2>
-          <p>アプリを再起動してください。解決しない場合は、アプリを入れ直してください。</p>
-          <p className="gate-note">画像が外部へ送信されることはありません。</p>
-        </section>
-      );
-    }
     return (
-      <section className="analysis-gate screen-enter" aria-label="ローカルRAWエンジンの状態">
+      <section className="analysis-gate screen-enter" aria-label="現像エンジンの状態">
         <span className="gate-mark offline">!</span>
-        <h2>ローカルRAWエンジンが停止しています</h2>
-        <p>
-          写真の解析と現像はこのMacの中だけで行います。ターミナルで <code>npm run dev:raw</code> を実行してから、
-          この画面を再読み込みしてください。
-        </p>
+        <h2>現像エンジンを利用できません</h2>
+        <p>アプリを再起動してください。解決しない場合は、アプリを入れ直してください。</p>
         <p className="gate-note">画像が外部へ送信されることはありません。</p>
       </section>
     );
@@ -101,9 +86,7 @@ export function AnalysisGate({ engineStatus, analysisState, progress, errorMessa
         <span className="gate-mark">✦</span>
         <h2>まず写真を解析します</h2>
         <p>
-          {native
-            ? "撮影フォルダのJPGとARWを読み取り、似たカットのグループ分けを行います（ピント・白飛びなどの採点は今のところ未対応です）。"
-            : "撮影フォルダのJPGとARWを読み取り、似たカットのグループ分け・ピント・白飛び・黒つぶれの採点までを行います。"}
+          撮影フォルダのJPGとARWを読み取り、似たカットのグループ分けを行います（ピント・白飛びなどの採点は今のところ未対応です）。
           初回は数十秒かかります。
         </p>
         {errorMessage && <p className="gate-note">前回の解析で問題が起きました: {errorMessage}</p>}
@@ -119,7 +102,7 @@ export function AnalysisGate({ engineStatus, analysisState, progress, errorMessa
     <section className="analysis-gate screen-enter" aria-label="解析状況の確認">
       <span className="gate-mark running" />
       <h2>解析状況を確認しています</h2>
-      <p>ローカルRAWエンジンに接続しています。しばらくお待ちください。</p>
+      <p>現像エンジンを確認しています。しばらくお待ちください。</p>
     </section>
   );
 }

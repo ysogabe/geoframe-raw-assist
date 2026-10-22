@@ -6,7 +6,6 @@ type SidebarProps = {
   analysis: Analysis | null;
   coverThumb: string | null;
   sourceFolder: SourceFolderInfo | null;
-  sourceFolderUnavailable: boolean;
   sourceFolderBusy: boolean;
   sourceFolderLocked: boolean;
   onApplySourceFolder: (path: string) => void;
@@ -17,7 +16,6 @@ export function Sidebar({
   analysis,
   coverThumb,
   sourceFolder,
-  sourceFolderUnavailable,
   sourceFolderBusy,
   sourceFolderLocked,
   onApplySourceFolder,
@@ -43,7 +41,6 @@ export function Sidebar({
 
       <SourceFolderPanel
         info={sourceFolder}
-        unavailable={sourceFolderUnavailable}
         fallbackSource={source}
         coverThumb={coverThumb}
         busy={sourceFolderBusy}

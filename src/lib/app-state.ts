@@ -8,10 +8,8 @@ import type {
   DevelopmentCandidate,
   DevelopmentCandidatesResponse,
   DevelopedResult,
-  DriveUploadState,
   ExportResponse,
   GroupInfo,
-  HealthResponse,
   ImportToPhotosResponse,
   MergedResult,
   PhotoInfo,
@@ -59,7 +57,7 @@ export type AcceptedMerged = {
   groupId: number;
   /**
    * 合成の先頭フレーム（= MergedResult.capture_ids[0] = ファイル名の先頭ID）。
-   * POST /api/export の capture_id はこれでなければサーバが 400 を返す。
+   * export_selection の capture_id はこれでなければサーバが 400 を返す。
    * 採用した瞬間に確定させ、表示カーソルの変化から完全に切り離す。
    */
   leadCaptureId: CaptureId;
@@ -154,42 +152,27 @@ export type ViewerGallery = {
 const DEFAULT_PRESET: PresetName = "neutral_recovery";
 
 /**
- * ブラケット合成に渡せるフレーム数（契約: POST /api/merge-bracket）。
+ * ブラケット合成に渡せるフレーム数（M2 まで隠している）。
  * 範囲外はサーバが HTTP 400 を返すため、UI 側も同じ範囲で実行を止める。
  */
 export const MERGE_MIN_FRAMES = 2;
 export const MERGE_MAX_FRAMES = 9;
 
-/** プリセット一覧の出どころ。"none" は未取得。 */
-export type PresetsSource = "none" | "health" | "rust";
-
 export type State = {
   screen: Screen;
   engineStatus: EngineStatus;
-  health: HealthResponse | null;
-  /** Tauri の engine_info（#109）で得たエンジン表示用の文字列。ブラウザ経路では null。 */
+  /** engine_info（#109）で得たエンジン表示用の文字列。未取得なら null。 */
   engineLabel: string | null;
-  /**
-   * プリセット一覧（#98）。health から切り離して持つ。Python エンジンが止まっていても
-   * Tauri では Rust の get_presets から埋まり、プリセット選択 UI が表示できる。
-   * UI は `health.presets` を直接読まず、必ずここを読むこと。
-   */
+  /** プリセット一覧（#98）。Rust の get_presets から埋まる。 */
   presets: PresetInfo[];
-  /**
-   * `presets` の出どころ。"rust"（Tauri の get_presets）が "health"（/api/health の presets）より優先する。
-   * 到着順に依存させないため、health が後から届いても rust の一覧は上書きしない。
-   */
-  presetsSource: PresetsSource;
   analysisState: AnalysisState;
   analysisProgress: AnalysisProgress | null;
   analysis: Analysis | null;
   analysisError: string;
   analyzeRequested: boolean;
-  /** 現像対象フォルダ。GET /api/source-folder が唯一の正で、analysis.source より優先する。 */
+  /** 現像対象フォルダ。get_source_folder が唯一の正で、analysis.source より優先する。 */
   sourceFolder: SourceFolderInfo | null;
-  /** エンドポイントが 404 / 接続不能だったとき。フォルダ変更UIを出さずに従来表示へ退避する。 */
-  sourceFolderUnavailable: boolean;
-  /** POST /api/source-folder の実行中。 */
+  /** set_source_folder の実行中。 */
   sourceFolderBusy: boolean;
   /**
    * 現像対象フォルダの世代。フォルダを切り替えるたびに 1 進む。
@@ -244,12 +227,6 @@ export type State = {
   exportResult: ExportResponse | null;
   importing: boolean;
   importResult: ImportToPhotosResponse | null;
-  /**
-   * Google Drive アップロードの状況（GET /api/drive-upload をそのまま保持する）。
-   * null は「まだ一度も取りに行っていない」。エンジン ready 後の初回取得と、
-   * running の間の 1 秒ポーリングで更新される。
-   */
-  driveUpload: DriveUploadState | null;
   /** 原寸ビューアで開いている写真の輪。null なら閉じている。 */
   viewer: ViewerGallery | null;
   notice: string;
@@ -259,17 +236,14 @@ export type State = {
 export const initialState: State = {
   screen: "suggestions",
   engineStatus: "checking",
-  health: null,
   engineLabel: null,
   presets: [],
-  presetsSource: "none",
   analysisState: "unknown",
   analysisProgress: null,
   analysis: null,
   analysisError: "",
   analyzeRequested: false,
   sourceFolder: null,
-  sourceFolderUnavailable: false,
   sourceFolderBusy: false,
   sourceFolderGeneration: 0,
   selectedGroupId: null,
@@ -299,29 +273,24 @@ export const initialState: State = {
   exportResult: null,
   importing: false,
   importResult: null,
-  driveUpload: null,
   viewer: null,
   notice: "",
   noticeTone: "info",
 };
 
 export type Action =
-  | { type: "health/ok"; health: HealthResponse }
-  | { type: "health/fail" }
-  /** Tauri: engine_info が成功した（Python の /api/health の代わり, #109）。 */
+  /** engine_info が成功した（#109）。engineStatus を ready にする唯一の経路。 */
   | { type: "engine/ok"; label: string }
-  /**
-   * プリセット一覧の到着（#98）。Tauri 起動時の get_presets は source: "rust"。
-   * ブラウザモード・get_presets 失敗時は health/ok が health.presets を source: "health" で取り込む。
-   */
-  | { type: "presets/loaded"; presets: PresetInfo[]; source: Exclude<PresetsSource, "none"> }
+  /** engine_info が失敗した（sidecar が見つからない等）。 */
+  | { type: "engine/fail" }
+  /** プリセット一覧の到着（#98）。Tauri 起動時の get_presets。 */
+  | { type: "presets/loaded"; presets: PresetInfo[] }
   | { type: "analysis/status"; response: AnalysisResponse }
   | { type: "analysis/requested" }
   /** 現像元フォルダが未設定（SOURCE_ROOT_NOT_CONFIGURED）。 */
   | { type: "analysis/unconfigured" }
   | { type: "analysis/error"; message: string }
   | { type: "source/loaded"; info: SourceFolderInfo }
-  | { type: "source/unavailable" }
   | { type: "source/applying" }
   | { type: "source/changed"; info: SourceFolderInfo; message: string; tone?: "info" | "error" }
   | { type: "source/failed"; message: string }
@@ -374,10 +343,6 @@ export type Action =
   | { type: "import/start" }
   | { type: "import/ok"; result: ImportToPhotosResponse }
   | { type: "import/fail"; message: string }
-  /** GET /api/drive-upload の取得結果。1 秒ポーリングで何度も届く。 */
-  | { type: "drive/poll"; response: DriveUploadState }
-  /** POST /api/drive-upload 自体が失敗した（400・接続不能）。 */
-  | { type: "drive/start-failed"; message: string }
   | { type: "viewer/open"; gallery: ViewerGallery }
   | { type: "viewer/close" }
   | { type: "notice/set"; message: string; tone?: "info" | "error" }
@@ -417,26 +382,20 @@ function suggestPreset(presets: PresetInfo[], group: GroupInfo | undefined): Pre
   return presetFor(presets, DEFAULT_PRESET) ? DEFAULT_PRESET : (presets[0]?.name ?? DEFAULT_PRESET);
 }
 
-const PRESETS_SOURCE_RANK: Record<PresetsSource, number> = { none: 0, health: 1, rust: 2 };
-
 /**
- * プリセット一覧を取り込む（#98）。health/ok と presets/loaded の共通処理。
+ * プリセット一覧を取り込む（#98）。
  *
- * - 出どころの優先度が今より低いもの（rust 取得済みのところへ届いた health）は無視する。
- *   これで get_presets と health のどちらが先に届いても、最終的に rust の一覧が残る。
  * - 空の一覧は無視する（既に持っている一覧を空で潰さない）。
  * - 選択中のプリセットが新しい一覧にもあれば、presetName も overrides も触らない。
- *   無いときだけ推薦し直し、別プリセット向けの候補を捨てる（従来の health/ok と同じ）。
+ *   無いときだけ推薦し直し、別プリセット向けの候補を捨てる。
  */
-function applyPresets(state: State, presets: PresetInfo[], source: Exclude<PresetsSource, "none">): State {
+function applyPresets(state: State, presets: PresetInfo[]): State {
   if (presets.length === 0) return state;
-  if (PRESETS_SOURCE_RANK[source] < PRESETS_SOURCE_RANK[state.presetsSource]) return state;
   const group = state.analysis?.groups.find((item) => item.id === state.selectedGroupId);
   const presetName = presetFor(presets, state.presetName) ? state.presetName : suggestPreset(presets, group);
   return {
     ...state,
     presets,
-    presetsSource: source,
     presetName,
     // プリセットが変わったら別プリセット向けの候補は捨てる（生成中の busy/captureId は触らない）。
     ...(presetName === state.presetName ? {} : clearedCandidateResult()),
@@ -501,22 +460,15 @@ function reconcileAccepted(
 
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
-    case "health/ok":
-      // health の presets はフォールバック扱い（rust の一覧を既に持っていれば applyPresets が無視する）。
-      return applyPresets(
-        { ...state, health: action.health, engineStatus: "ready" },
-        action.health.presets ?? [],
-        "health",
-      );
-
     case "engine/ok":
       return { ...state, engineStatus: "ready", engineLabel: action.label };
-    case "health/fail":
-      // プリセット一覧は health と独立なので残す（#98）。
+
+    case "engine/fail":
+      // プリセット一覧はエンジンと独立なので残す（#98）。
       return { ...state, engineStatus: "offline" };
 
     case "presets/loaded":
-      return applyPresets(state, action.presets, action.source);
+      return applyPresets(state, action.presets);
 
     case "analysis/status": {
       const response = action.response;
@@ -580,7 +532,6 @@ export function reducer(state: State, action: Action): State {
       return {
         ...state,
         sourceFolder: action.info,
-        sourceFolderUnavailable: false,
         sourceFolderBusy: false,
         // 保存済みのフォルダが後から読めなくなる（外部ボリュームの取り外し、macOS の
         // 許可取り消し）ことがある。サイドバーの短い注記だけでは対処が分からないため、
@@ -588,9 +539,6 @@ export function reducer(state: State, action: Action): State {
         notice: action.info.exists && !action.info.readable ? SOURCE_FOLDER_PERMISSION_HELP : state.notice,
         noticeTone: action.info.exists && !action.info.readable ? "error" : state.noticeTone,
       };
-
-    case "source/unavailable":
-      return { ...state, sourceFolderUnavailable: true, sourceFolderBusy: false };
 
     case "source/applying":
       return { ...state, sourceFolderBusy: true };
@@ -606,11 +554,9 @@ export function reducer(state: State, action: Action): State {
       // 止められないため、遅れて届く結果は sourceFolderGeneration で捨てる。
       return {
         ...initialState,
-        health: state.health,
         engineLabel: state.engineLabel,
         engineStatus: state.engineStatus,
         presets: state.presets,
-        presetsSource: state.presetsSource,
         presetName: state.presetName,
         sourceFolder: action.info,
         // **initialState の 0 に戻さない**。ここで進めた値が「今のフォルダ」の目印であり、
@@ -940,18 +886,9 @@ export function reducer(state: State, action: Action): State {
 
     case "export/batchName":
       // バッチ名が変わったら、前のバッチについての結果表示は意味を失う。
-      //
-      // ただし **driveUpload は落とさない**。サーバのジョブ状態はプロセス全体で単一
-      // スロットであり、この state はそこを写しているだけなので、null にすると
-      // 「running の間だけ回る」ポーリング（App.tsx）が止まり、実行中のアップロードが
-      // 画面から消えて二度と戻らない。別バッチの「63件アップロードしました」を出さない
-      // ための絞り込みは、ExportPanel 側の batch_name 照合が受け持つ。
       return { ...state, batchName: action.value, exportResult: null, importResult: null };
 
     case "export/start":
-      // exportResult / importResult と違い driveUpload は落とさない（理由は
-      // export/batchName のコメント: サーバ側で走り続けるジョブの写しなので、
-      // ここで消すとポーリングごと止まる）。
       return { ...state, exporting: true, exportResult: null, importResult: null };
 
     case "export/ok": {
@@ -992,14 +929,6 @@ export function reducer(state: State, action: Action): State {
 
     case "import/fail":
       return { ...state, importing: false, notice: action.message, noticeTone: "error" };
-
-    case "drive/poll":
-      // import/ok と違い通知トーストは出さない。ポーリングのたびに毎秒トーストが
-      // 出ると煩わしいため。成功・失敗の可視化は ExportPanel 側の常時表示に任せる。
-      return { ...state, driveUpload: action.response };
-
-    case "drive/start-failed":
-      return { ...state, driveUpload: null, notice: action.message, noticeTone: "error" };
 
     case "viewer/open":
       return { ...state, viewer: action.gallery };
@@ -1283,7 +1212,7 @@ export function defaultMergeFrames(group: GroupInfo): CaptureId[] {
  *
  * 選択は **グループID をキー** に持っており、再解析では詰め替えていない
  * （キーと構造を変えない約束のため）。IDが使い回されると、別のグループで選んだ
- * 撮影IDがそのまま残る。ここで返した配列は runMerge がそのまま /api/merge へ
+ * 撮影IDがそのまま残る。ここで返した配列は合成の実行側がそのまま
  * 送るので、絞らないと無関係な写真同士を合成しにいく。必ずグループ内に絞る。
  */
 export function mergeFramesOf(state: State, group: GroupInfo): CaptureId[] {

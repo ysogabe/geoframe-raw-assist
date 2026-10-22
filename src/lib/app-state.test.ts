@@ -17,7 +17,6 @@ import type {
   DevelopmentCandidate,
   DevelopmentCandidatesResponse,
   GroupInfo,
-  HealthResponse,
   MergedResult,
   PresetInfo,
   SourceFolderInfo,
@@ -43,17 +42,11 @@ function preset(name: string, adjustments: Partial<Adjustments> = {}): PresetInf
   return { name, label: name, description: "", adjustments: { ...BASE_ADJ, ...adjustments } };
 }
 
-const HEALTH: HealthResponse = {
-  status: "ready",
-  engine: "rawpy/LibRaw",
-  rawpy_version: "0",
-  lensfun: { available: false },
-  presets: [
-    preset("neutral_recovery"),
-    preset("shadow_rescue", { shadow_lift: 60 }),
-    preset("landscape_clear"),
-  ],
-};
+const PRESETS: PresetInfo[] = [
+  preset("neutral_recovery"),
+  preset("shadow_rescue", { shadow_lift: 60 }),
+  preset("landscape_clear"),
+];
 
 function group(id: number, captureIds: string[], overrides: Partial<GroupInfo> = {}): GroupInfo {
   return {
@@ -113,9 +106,7 @@ function run(state: State, ...actions: Action[]): State {
 
 const withEngine: State = {
   ...initialState,
-  health: HEALTH,
-  presets: HEALTH.presets,
-  presetsSource: "health",
+  presets: PRESETS,
   engineStatus: "ready",
   analysis: analysisOf([group(1, ["A1", "A2"]), group(2, ["B1", "B2", "B3"], { kind: "bracket" })]),
 };
@@ -371,17 +362,17 @@ describe("候補のクリア契機", () => {
     expect(next.overrides).toEqual({});
   });
 
-  it("health/ok でプリセットが存在しなくなったら候補を捨てる", () => {
+  it("presets/loaded でプリセットが存在しなくなったら候補を捨てる", () => {
     const shown: State = { ...stateShowingCandidates(), presetName: "gone_preset" };
-    const next = reducer(shown, { type: "health/ok", health: HEALTH });
+    const next = reducer(shown, { type: "presets/loaded", presets: PRESETS });
     expect(next.presetName).toBe("neutral_recovery");
     expect(next.developmentCandidates).toBeNull();
     expect(next.developmentCandidatesError).toBe("");
   });
 
-  it("health/ok でプリセットが変わらなければ候補は残る", () => {
+  it("presets/loaded でプリセットが変わらなければ候補は残る", () => {
     const shown = stateShowingCandidates();
-    const next = reducer(shown, { type: "health/ok", health: HEALTH });
+    const next = reducer(shown, { type: "presets/loaded", presets: PRESETS });
     expect(next.presetName).toBe("neutral_recovery");
     expect(next.developmentCandidates).toBe(shown.developmentCandidates);
     expect(next.engineStatus).toBe("ready");
@@ -422,7 +413,7 @@ describe("候補のクリア契機", () => {
 // ---------------------------------------------------------------------------
 
 describe("source/changed と世代", () => {
-  it("世代を 1 進め、選択・結果・採用を捨てて health / preset / sourceFolder を引き継ぐ", () => {
+  it("世代を 1 進め、選択・結果・採用を捨てて engine / preset / sourceFolder を引き継ぐ", () => {
     const before: State = {
       ...withEngine,
       presetName: "shadow_rescue",
@@ -434,7 +425,6 @@ describe("source/changed と世代", () => {
     };
     const next = reducer(before, { type: "source/changed", info: folder("/n"), message: "切替", tone: "error" });
     expect(next.sourceFolderGeneration).toBe(5);
-    expect(next.health).toBe(HEALTH);
     expect(next.engineStatus).toBe("ready");
     expect(next.presetName).toBe("shadow_rescue");
     expect(next.sourceFolder?.path).toBe("/n");
@@ -620,12 +610,12 @@ describe("merge 系", () => {
 
 describe("effectiveAdjustments / resolveAdjustments（調整値の解決は 1 か所）", () => {
   it("プリセット未取得なら null", () => {
-    expect(effectiveAdjustments({ ...initialState, health: null })).toBeNull();
+    expect(effectiveAdjustments({ ...initialState, presets: [] })).toBeNull();
   });
 
   it("選択中プリセットの既定値に overrides を重ね、resolveAdjustments と同じ値を返す", () => {
     const state: State = { ...withEngine, presetName: "shadow_rescue", overrides: { exposure: 0.7 } };
-    const shadow = HEALTH.presets.find((p) => p.name === "shadow_rescue")!;
+    const shadow = PRESETS.find((p) => p.name === "shadow_rescue")!;
     expect(effectiveAdjustments(state)).toEqual({ ...BASE_ADJ, shadow_lift: 60, exposure: 0.7 });
     expect(effectiveAdjustments(state)).toEqual(resolveAdjustments(shadow, state.overrides));
   });
@@ -637,7 +627,7 @@ describe("effectiveAdjustments / resolveAdjustments（調整値の解決は 1 �
 });
 
 // ---------------------------------------------------------------------------
-// プリセット一覧を health から切り離す（#98）
+// プリセット一覧（#98）
 // ---------------------------------------------------------------------------
 
 describe("presets/loaded（#98）", () => {
@@ -647,11 +637,9 @@ describe("presets/loaded（#98）", () => {
     preset("nightscape"),
   ];
 
-  it("health が無くてもプリセット一覧と既定の選択が決まる", () => {
-    const next = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+  it("エンジン確認より前でもプリセット一覧と既定の選択が決まる", () => {
+    const next = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS });
     expect(next.presets).toBe(RUST_PRESETS);
-    expect(next.presetsSource).toBe("rust");
-    expect(next.health).toBeNull();
     expect(next.presetName).toBe("neutral_recovery");
     expect(activePreset(next)?.adjustments.exposure).toBe(0.1);
     expect(effectiveAdjustments(next)).not.toBeNull();
@@ -659,66 +647,36 @@ describe("presets/loaded（#98）", () => {
 
   it("既定プリセットが一覧に無ければ先頭を選ぶ", () => {
     const presets = [preset("nightscape"), preset("landscape_clear")];
-    const next = reducer(initialState, { type: "presets/loaded", presets, source: "rust" });
+    const next = reducer(initialState, { type: "presets/loaded", presets });
     expect(next.presetName).toBe("nightscape");
   });
 
-  it("health/fail でもプリセット一覧と選択は残る", () => {
-    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
-    const next = reducer(loaded, { type: "health/fail" });
+  it("engine/fail でもプリセット一覧と選択は残る", () => {
+    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS });
+    const next = reducer(loaded, { type: "engine/fail" });
     expect(next.engineStatus).toBe("offline");
     expect(next.presets).toBe(RUST_PRESETS);
     expect(next.presetName).toBe("neutral_recovery");
     expect(activePreset(next)).not.toBeNull();
   });
 
-  it("engine/ok で engineStatus が ready になり、表示ラベルを持つ（health は触らない）", () => {
+  it("engine/ok で engineStatus が ready になり、表示ラベルを持つ", () => {
     const next = reducer(initialState, { type: "engine/ok", label: "Core Image 0.6.0 / macOS 15.1" });
     expect(next.engineStatus).toBe("ready");
     expect(next.engineLabel).toBe("Core Image 0.6.0 / macOS 15.1");
-    expect(next.health).toBeNull();
   });
 
-  it("engine/ok の後に health/fail が来ても engineLabel は残り、source/changed でも保たれる", () => {
+  it("engine/ok の後に engine/fail が来ても engineLabel は残り、source/changed でも保たれる", () => {
     const ready = reducer(initialState, { type: "engine/ok", label: "L" });
-    expect(reducer(ready, { type: "health/fail" }).engineLabel).toBe("L");
+    expect(reducer(ready, { type: "engine/fail" }).engineLabel).toBe("L");
     const switched = reducer(ready, { type: "source/changed", info: folder("/n"), message: "m" });
     expect(switched.engineLabel).toBe("L");
     expect(switched.engineStatus).toBe("ready");
   });
 
-  it("ブラウザモード: health/ok が health.presets を取り込む", () => {
-    const next = reducer(initialState, { type: "health/ok", health: HEALTH });
-    expect(next.presets).toBe(HEALTH.presets);
-    expect(next.presetsSource).toBe("health");
-    expect(next.engineStatus).toBe("ready");
-  });
-
-  it("rust → health の順に届いても rust の一覧が残る", () => {
-    const next = run(
-      initialState,
-      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
-      { type: "health/ok", health: HEALTH },
-    );
-    expect(next.presets).toBe(RUST_PRESETS);
-    expect(next.presetsSource).toBe("rust");
-    expect(next.health).toBe(HEALTH);
-    expect(next.engineStatus).toBe("ready");
-  });
-
-  it("health → rust の順に届くと rust の一覧で置き換わる", () => {
-    const next = run(
-      initialState,
-      { type: "health/ok", health: HEALTH },
-      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
-    );
-    expect(next.presets).toBe(RUST_PRESETS);
-    expect(next.presetsSource).toBe("rust");
-  });
-
   it("後から届いた一覧に選択中のプリセットがあれば presetName と overrides を保つ", () => {
     const state: State = { ...withEngine, presetName: "shadow_rescue", overrides: { exposure: 1 } };
-    const next = reducer(state, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const next = reducer(state, { type: "presets/loaded", presets: RUST_PRESETS });
     expect(next.presetName).toBe("shadow_rescue");
     expect(next.overrides).toEqual({ exposure: 1 });
     expect(effectiveAdjustments(next)?.shadow_lift).toBe(70);
@@ -727,7 +685,7 @@ describe("presets/loaded（#98）", () => {
 
   it("後から届いた一覧に選択中のプリセットが無ければ推薦し直し、候補を捨てる", () => {
     const shown: State = { ...stateShowingCandidates(), presetName: "landscape_clear" };
-    const next = reducer(shown, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const next = reducer(shown, { type: "presets/loaded", presets: RUST_PRESETS });
     expect(next.presetName).toBe("neutral_recovery");
     expect(next.developmentCandidates).toBeNull();
   });
@@ -740,22 +698,21 @@ describe("presets/loaded（#98）", () => {
     const next = run(
       state,
       { type: "screen/operation", groupId: 3 },
-      { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" },
+      { type: "presets/loaded", presets: RUST_PRESETS },
     );
     expect(next.presetName).toBe("shadow_rescue");
   });
 
   it("空の一覧は既存の一覧を潰さない", () => {
-    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
-    const next = reducer(loaded, { type: "presets/loaded", presets: [], source: "rust" });
+    const loaded = reducer(initialState, { type: "presets/loaded", presets: RUST_PRESETS });
+    const next = reducer(loaded, { type: "presets/loaded", presets: [] });
     expect(next).toBe(loaded);
   });
 
   it("source/changed でもプリセット一覧を引き継ぐ", () => {
-    const loaded = reducer(withEngine, { type: "presets/loaded", presets: RUST_PRESETS, source: "rust" });
+    const loaded = reducer(withEngine, { type: "presets/loaded", presets: RUST_PRESETS });
     const next = reducer(loaded, { type: "source/changed", info: folder("/other"), message: "" });
     expect(next.presets).toBe(RUST_PRESETS);
-    expect(next.presetsSource).toBe("rust");
   });
 });
 

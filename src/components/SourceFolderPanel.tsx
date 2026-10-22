@@ -1,19 +1,15 @@
-import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { assetUrl } from "../lib/raw-api";
 import { sourceFolderIssue } from "../lib/format";
-import { isTauri } from "../lib/setup";
 import type { AnalysisSource, SourceFolderInfo } from "../lib/types";
 
 type SourceFolderPanelProps = {
-  /** GET /api/source-folder の結果。未取得・未対応なら null。 */
+  /** get_source_folder の結果。未取得なら null。 */
   info: SourceFolderInfo | null;
-  /** エンドポイントが 404 / 接続不能。フォルダ変更UIは出さず、従来の表示だけを続ける。 */
-  unavailable: boolean;
   /** 直近の解析結果に含まれるフォルダ情報。info が無いときだけのフォールバック。 */
   fallbackSource: AnalysisSource | null;
   coverThumb: string | null;
-  /** POST 実行中。 */
+  /** set_source_folder 実行中。 */
   busy: boolean;
   /**
    * 解析実行中。サーバ側も analysis_running で弾くが、初回解析は数十秒かかるので
@@ -26,7 +22,6 @@ type SourceFolderPanelProps = {
 
 export function SourceFolderPanel({
   info,
-  unavailable,
   fallbackSource,
   coverThumb,
   busy,
@@ -34,8 +29,6 @@ export function SourceFolderPanel({
   onApply,
   onError,
 }: SourceFolderPanelProps) {
-  const [draftPath, setDraftPath] = useState("");
-
   const pathLabel = info ? info.display_path : (fallbackSource?.root ?? "未読み込み");
   const pairs = info ? info.pairs : (fallbackSource?.pairs ?? null);
   const missing = info
@@ -68,12 +61,6 @@ export function SourceFolderPanel({
     }
   }
 
-  function applyDraft() {
-    const trimmed = draftPath.trim();
-    if (!trimmed) return;
-    onApply(trimmed);
-  }
-
   return (
     <div className="sidebar-section">
       <p className="eyebrow">現像対象フォルダ</p>
@@ -103,43 +90,12 @@ export function SourceFolderPanel({
         </p>
       )}
 
-      {!unavailable &&
-        (isTauri() ? (
-          <button className="source-folder-button" onClick={() => void pickFolder()} disabled={disabled}>
-            <span aria-hidden="true">◱</span>
-            {busy ? "変更しています…" : "フォルダを選ぶ"}
-          </button>
-        ) : (
-          // ブラウザ実行（npm run dev / dev:raw）ではネイティブダイアログが使えない。
-          <div className="source-folder-form">
-            <label className="source-folder-label" htmlFor="source-folder-path">
-              フォルダの絶対パス
-            </label>
-            <input
-              id="source-folder-path"
-              className="source-folder-input"
-              type="text"
-              value={draftPath}
-              placeholder="/Users/…/100MSDCF"
-              spellCheck={false}
-              autoComplete="off"
-              disabled={disabled}
-              onChange={(event) => setDraftPath(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") applyDraft();
-              }}
-            />
-            <button
-              className="source-folder-button"
-              onClick={applyDraft}
-              disabled={disabled || draftPath.trim().length === 0}
-            >
-              {busy ? "変更しています…" : "適用"}
-            </button>
-          </div>
-        ))}
+      <button className="source-folder-button" onClick={() => void pickFolder()} disabled={disabled}>
+        <span aria-hidden="true">◱</span>
+        {busy ? "変更しています…" : "フォルダを選ぶ"}
+      </button>
 
-      {!unavailable && locked && <p className="source-folder-note">解析中は変更できません</p>}
+      {locked && <p className="source-folder-note">解析中は変更できません</p>}
     </div>
   );
 }
