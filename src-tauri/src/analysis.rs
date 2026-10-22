@@ -756,6 +756,11 @@ impl AnalysisState {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
+
+    /// 解析を実行中か（フォルダ変更の可否判定に使う。#109）。
+    pub fn is_running(&self) -> bool {
+        self.lock().running.is_some()
+    }
 }
 
 fn app_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, CoreImageError> {

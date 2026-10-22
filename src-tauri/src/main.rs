@@ -21,6 +21,7 @@ mod adjustments;
 mod analysis;
 mod coreimage;
 mod presets;
+mod source_folder;
 
 use std::env;
 use std::fs;
@@ -905,7 +906,9 @@ fn main() {
             presets::get_presets,
             // 解析 lite（Issue #110）。採点は N-C2。
             analysis::get_analysis,
-            analysis::start_analysis
+            analysis::start_analysis,
+            source_folder::get_source_folder,
+            source_folder::set_source_folder
         ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;
