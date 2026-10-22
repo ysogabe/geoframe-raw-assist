@@ -20,6 +20,7 @@
 mod adjustments;
 mod analysis;
 mod coreimage;
+mod export;
 mod presets;
 mod source_folder;
 
@@ -908,7 +909,9 @@ fn main() {
             analysis::get_analysis,
             analysis::start_analysis,
             source_folder::get_source_folder,
-            source_folder::set_source_folder
+            source_folder::set_source_folder,
+            export::export_selection,
+            export::reveal_export
         ])
         // Native folder picker for the source-folder setting. The frontend
         // calls `open({ directory: true })` from @tauri-apps/plugin-dialog;

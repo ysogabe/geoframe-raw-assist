@@ -248,7 +248,7 @@ fn field_ascii(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
 
 /// JPEG から EXIF 項目を読む。EXIF が無い・壊れている場合は項目が None の記録を返す
 /// （Python は PIL の `getexif()` が空になるだけで写真自体は残す）。
-fn read_exif(path: &Path, capture_id: &str, width: u32, height: u32) -> PhotoRecord {
+pub(crate) fn read_exif(path: &Path, capture_id: &str, width: u32, height: u32) -> PhotoRecord {
     let mut record = PhotoRecord {
         capture_id: capture_id.to_string(),
         captured_at: None,
@@ -714,7 +714,7 @@ fn write_cache(path: &Path, payload: &Value) -> Result<(), CoreImageError> {
 }
 
 /// キャッシュが有効（版・署名が一致し、サムネイルが揃っている）なら署名を除いて返す。
-fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
+pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
     let root_key = root_key_for(root);
     let text = fs::read_to_string(cache_path(app_data_dir, &root_key)).ok()?;
     let mut payload: Value = serde_json::from_str(&text).ok()?;
