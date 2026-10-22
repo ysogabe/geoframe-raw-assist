@@ -1,7 +1,9 @@
+import { useState } from "react";
+import { isTauri } from "../lib/setup";
 import type { PhotoExportVariant } from "../lib/app-state";
 import { isValidBatchName } from "../lib/app-state";
 import { rawPillClass } from "../lib/format";
-import { assetUrl } from "../lib/raw-api";
+import { assetUrl, revealExport } from "../lib/raw-api";
 import type {
   Analysis,
   CaptureId,
@@ -94,6 +96,7 @@ export function ExportPanel({
   onDriveUpload,
   onBack,
 }: ExportPanelProps) {
+  const [revealError, setRevealError] = useState<string | null>(null);
   const nameValid = isValidBatchName(batchName);
   const canExport = rows.length > 0 && nameValid && !exporting;
 
@@ -211,7 +214,7 @@ export function ExportPanel({
             </button>
           </div>
           <p className={`export-hint${batchName.length > 0 && !nameValid ? " invalid" : ""}`}>
-            半角英数字・ハイフン・アンダースコアのみ使えます。<code>outputs/export/{nameValid ? batchName : "<バッチ名>"}/</code> にコピーします。
+            半角英数字・ハイフン・アンダースコアのみ使えます。<code>{isTauri() ? "$APPDATA/export/" : "outputs/export/"}{nameValid ? batchName : "<バッチ名>"}/</code> にコピーします。
           </p>
         </div>
       )}
@@ -223,6 +226,11 @@ export function ExportPanel({
             <strong>{exportResult.files.length}件を書き出しました</strong>
           </div>
           <p className="export-dir">{exportResult.export_dir}</p>
+          {isTauri() && <button className="secondary-action" onClick={() => {
+            setRevealError(null);
+            void revealExport(exportResult.export_dir).catch((error: unknown) => setRevealError(String(error)));
+          }}>Finder で表示</button>}
+          {revealError && <p role="alert">{revealError}</p>}
           <ul className="export-files">
             {exportResult.files.map((file) => (
               <li key={file}>{file}</li>

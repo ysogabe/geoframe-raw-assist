@@ -261,6 +261,14 @@ export async function mergeBracket(
 }
 
 export async function exportSelection(batchName: string, items: ExportItem[]): Promise<ExportResponse> {
+  if (isTauri()) {
+    try {
+      return await invoke<ExportResponse>("export_selection", { batchName, items });
+    } catch (error) {
+      // Rust の String エラーも App の messageOf で理由を表示できるようにする。
+      throw typeof error === "string" ? new Error(error) : error;
+    }
+  }
   return (await postJson(
     "/api/export",
     { batch_name: batchName, items },
@@ -328,4 +336,9 @@ export async function startDriveUpload(batchName: string): Promise<DriveUploadSt
 
 export async function getDriveUploadState(): Promise<DriveUploadState> {
   return (await getJson("/api/drive-upload", "Google Drive アップロードの状況を取得できませんでした。")) as DriveUploadState;
+}
+
+/** 書き出したフォルダを Finder で表示する（Tauri 専用）。 */
+export async function revealExport(path: string): Promise<void> {
+  if (isTauri()) await invoke("reveal_export", { path });
 }

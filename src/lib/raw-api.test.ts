@@ -14,6 +14,8 @@ import { invoke } from "@tauri-apps/api/core";
 import fixture from "../../src-tauri/tests/fixtures/presets.json";
 import {
   assetUrl,
+  exportSelection,
+  revealExport,
   getAnalysis,
   isSourceRootNotConfigured,
   normalizeAnalysisResponse,
@@ -160,5 +162,38 @@ describe("解析・配信 URL（#110）", () => {
     expect(invoke).toHaveBeenCalledWith("start_analysis", { force: true });
     await startAnalyze();
     expect(invoke).toHaveBeenLastCalledWith("start_analysis", { force: false });
+  });
+});
+
+
+describe("書き出し Rust invoke", () => {
+  beforeEach(() => { vi.mocked(invoke).mockReset(); });
+  it("Tauri は引数と結果をそのまま受け渡す", async () => {
+    tauri.isTauri = true;
+    const items = [{ capture_id: "DSC00001", variant: "camera_jpg" as const }];
+    const result = { export_dir: "/data/export/batch", manifest_path: "/data/export/batch/manifest.json", files: [], skipped: [] };
+    vi.mocked(invoke).mockResolvedValue(result);
+    expect(await exportSelection("batch", items)).toEqual(result);
+    expect(invoke).toHaveBeenCalledWith("export_selection", { batchName: "batch", items });
+    await revealExport(result.export_dir);
+    expect(invoke).toHaveBeenLastCalledWith("reveal_export", { path: result.export_dir });
+  });
+  it("invoke の拒否を呼び出し元へ返す", async () => {
+    tauri.isTauri = true;
+    vi.mocked(invoke).mockRejectedValue("プレビューは書き出せません");
+    await expect(exportSelection("batch", [])).rejects.toThrow("プレビューは書き出せません");
+    await expect(revealExport("/outside")).rejects.toEqual("プレビューは書き出せません");
+  });
+  it("ブラウザは従来の HTTP エンドポイントを使う", async () => {
+    tauri.isTauri = false;
+    const result = { export_dir: "outputs/export/batch", manifest_path: "outputs/export/batch/manifest.json", files: [], skipped: [] };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(result), { status: 200 }));
+    try {
+      expect(await exportSelection("batch", [])).toEqual(result);
+      expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8788/api/export");
+      expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ batch_name: "batch", items: [] });
+      await revealExport("unused");
+      expect(invoke).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); }
   });
 });
