@@ -8,14 +8,14 @@
 npm install
 ```
 
-起動方法は2通りあります。
+デスクトップアプリとして起動・ビルドします。Python のセットアップやサーバー起動は不要です。
 
-1. **ブラウザで確認しながら開発する場合** — 先に `npm run setup:raw` でPython環境を作成してから `npm run dev:raw`。RAWエンジン（`http://127.0.0.1:8788`）を裏で起動したあと、Viteの開発サーバ（`http://localhost:1420/`）をフォアグラウンドで起動します。ブラウザで `http://localhost:1420/` を開いてください。
-2. **デスクトップアプリとして使う場合** — `npm run tauri:dev`。`npm run setup:raw` は不要です。`.venv` が無ければ起動時にTauriが自動でPython仮想環境の作成と依存ライブラリのインストールを行い（初回のみ、ネットワーク接続が必要・数分かかることがあります。進捗は画面に表示されます）、完了後にRAWエンジンを起動します。2回目以降は `.venv` が既にあるので即座に起動します。1コマンドでネイティブウィンドウが開き、Pythonエンジンの起動・終了もTauriが管理します（別ターミナルは不要です）。
+```bash
+env -u CI npm run tauri:dev
+env -u CI npm run tauri:build
+```
 
-画面右側に「rawpy 接続済み」と表示されたら準備完了です。
-
-配布用ビルドは `npm run tauri:build` で作成できますが、Python実行環境そのもの（`python3` コマンド）をアプリに同梱する仕組みはまだ未整備です（既知のギャップ）。ビルドしたアプリを実行するマシンにも `python3` が必要です（初回起動時に自動で `.venv` を作成します）。
+開発時は Core Image CLI の同梱バイナリを先にビルドしてください: `npm run build:coreimage`。
 
 DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります（2026-10-20 時点で 3 回連続成功し再現せず。Issue #76）。失敗したときは `src-tauri/target/release/bundle/macos/rw.*.dmg`（作りかけのイメージ）を消してから再実行してください。`.app` だけ必要なら `env -u CI npm run tauri:build -- --bundles app` で DMG を作らずにビルドできます。
 
@@ -34,7 +34,6 @@ DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります�
 フォルダは画面左のサイドバー「現像対象フォルダ」から変更できます。
 
 - **デスクトップアプリ** — 「フォルダを選ぶ」でmacOSのフォルダ選択ダイアログが開きます。
-- **ブラウザ（`npm run dev:raw`）** — ネイティブダイアログが使えないため、絶対パスを貼り付けて「適用」します。
 
 初期値は同梱の `sample/100MSDCF` です。`~/Pictures` や `~/Desktop`、SDカードなどの外部ボリュームを選ぶと、macOSが初回にアクセス許可を求めます。許可しないと読み取れず、画面には「写真が0枚」ではなく**許可を促すメッセージ**が出ます。「システム設定 > プライバシーとセキュリティ」で許可してから選び直してください。
 
@@ -72,7 +71,7 @@ DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります�
 画面を使わず1枚だけ現像する場合:
 
 ```bash
-npm run develop:raw -- DSC02943 --preset nightscape
+.venv/bin/python -m local_raw.engine --capture-id DSC02943 --preset nightscape
 ```
 
 ### 現像候補自動生成（代理評価）
@@ -172,7 +171,7 @@ outputs/
 
 デスクトップアプリ（Tauri）のプレビュー現像は、Python エンジンを経由せず、macOS 標準の Core Image（CIRAWFilter）で行います（Issue #65、#72、#73）。調整（Adjustments）の 9 キーも Core Image に対応づけてあります（`highlight_recovery` だけは当面効きません。代替は #81）。
 
-- 既定が Core Image です。プレビューには「Core Image プレビュー」のバッジと注記が出ます。CLI の起動失敗などインフラ側のエラー時は Python（rawpy）のプレビューにフォールバックします。ブラウザモード（`npm run dev:raw`）は Python のままです
+- 既定が Core Image です。プレビューには「Core Image プレビュー」のバッジと注記が出ます。CLI の起動失敗などインフラ側のエラー時は Python（rawpy）のプレビューにフォールバックします。ブラウザモード（旧 Python ブラウザ開発モード）は Python のままです
 - 切り戻し: 環境変数 `GEOFRAME_PREVIEW_ENGINE=rawpy` で起動すると、プレビューも Python（rawpy）になります（`GEOFRAME_PREVIEW_ENGINE=rawpy npm run tauri:dev`、ビルド済み `.app` は `open --env GEOFRAME_PREVIEW_ENGINE=rawpy "<アプリのパス>.app"`）
 - **書き出しと原寸（本現像）は当面 rawpy のままです。** プレビューと書き出しで、明るさ・色・ノイズなどの見た目が一致しない場合があります（移行完了までの既知の差。オーナー受容済み）
 
@@ -200,6 +199,6 @@ outputs/
 ```bash
 npm test           # フロント単体テスト（vitest。reducer など純粋関数）
 npm run build      # ビルド検証（vite build）
-npm run test:raw   # Python側（解析・現像・書き出し・フォルダ設定・レンズ補正・ブラケット合成）294件
+ .venv/bin/python -m unittest discover -s tests -p 'test_*.py'   # Python側（解析・現像・書き出し・フォルダ設定・レンズ補正・ブラケット合成）294件
 npm run lint
 ```

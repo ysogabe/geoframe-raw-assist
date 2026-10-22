@@ -7,9 +7,6 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:raw": "bash scripts/dev-raw.sh",
-    "setup:raw": "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-raw.txt",
-    "develop:raw": ".venv/bin/python -m local_raw.engine",
     "build": "vite build",
     "build:coreimage": "bash scripts/build-coreimage-cli.sh",
     "tauri": "tauri",
@@ -17,7 +14,6 @@
     "tauri:build": "tauri build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:raw": ".venv/bin/python -m unittest discover -s tests -p 'test_*.py'",
     "lint": "eslint ."
   },
   "dependencies": {
