@@ -267,7 +267,7 @@ ADR 0002 の速度・メモリ優位（CI 0.77〜2.15 s、RSS 約 290MB）も削
 #### 推奨: B3 を足場にして B1 へ
 
 - 足場 B3 で先に確認できること: `apple_default` フレームを Mertens に入れたときの見え方、露出差の保存、CI レンズ補正の幾何一致。これは #70 の長秒ブラケット評価と同じ作業なので、評価 PR の中で B3 相当のスクリプトを作る（`scripts/compare_engines.py` の拡張）のが効率的。
-- B1 の実装分割: (1) CLI バッチモード (C) で N フレームを同一 settings で現像し `CIImage` を保持。(2) 位置合わせ: まず MTB（Median Threshold Bitmap。中央値閾値ビットマップと排他的論理和による平行移動探索）を Swift で実装。現行の `ALIGN_MAX_SHIFT_RATIO = 0.02` と同じ上限を持たせる。(3) Mertens: 重み（コントラスト = ラプラシアンの絶対値、彩度 = RGB の標準偏差、露出適正 = ガウス（σ 0.2、中心 0.5））、ピラミッド段数は OpenCV の実装に合わせる【推測: 重みの定義・σ・段数は原論文と OpenCV の実装に基づく値で、このリポジトリ内で確認したものではない。実装時に OpenCV のソースで確認する】。OpenCV の出力と PSNR を測り目視で差が無いことを確認。(4) 後段と保存は #73 の実装を共有。(5) Rust 側で `merge_bracket` コマンド、`outputs/merged` 相当のディレクトリ分離（本合成 / プレビュー）、レシピ JSON、EXIF 継承（CLI は EXIF を書かない契約なので、Rust で先頭フレームのペア JPG から継承するか、CLI に `inherit_exif_from` を足す。GPS は書かない現行方針を維持）。
+- B1 の実装分割: (1) CLI バッチモード (C) で N フレームを同一 settings で現像し `CIImage` を保持。(2) 位置合わせ: まず MTB（Median Threshold Bitmap。中央値閾値ビットマップと排他的論理和による平行移動探索）を Swift で実装。現行の `ALIGN_MAX_SHIFT_RATIO = 0.02` と同じ上限を持たせる。(3) Mertens: 重み（コントラスト = ラプラシアンの絶対値、彩度 = RGB の標準偏差、露出適正 = ガウス（σ 0.2、中心 0.5））、ピラミッド段数は OpenCV の実装に合わせる【推測: 重みの定義・σ・段数は原論文と OpenCV の実装に基づく値で、このリポジトリ内で確認したものではない。実装時に OpenCV のソースで確認する】。OpenCV の出力と PSNR を測り目視で差が無いことを確認。(4) 後段と保存は #73 の実装を共有。(5) Rust 側で `merge_bracket` コマンド、`outputs/merged` 相当のディレクトリ分離（本合成 / プレビュー）、レシピ JSON、EXIF 継承（CLI は EXIF を書かない契約なので、Rust で先頭フレームのペア JPG から継承するか、CLI に `inherit_exif_from` を足す。GPS IFD はカメラ JPG からそのまま継承し、アプリが新たに書き込むことはしない。2026-10-22 オーナー確定、ADR 0003）。
 - 契約の維持: `MergedResult` の形（`aligned`、`lens_correction`、`exif_inherited`、`frames`、`params_hash`）、2〜9 枚、`_require_uniform_shapes`（向き混在の拒否）、ソート済み先頭 ID を基準フレーム・EXIF 継承元にする規則。
 
 ### 3.4 星景（星景向けの処理）

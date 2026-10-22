@@ -1,9 +1,9 @@
 # ADR 0003: Python を全廃し、現像エンジンを組み込んだ単一アプリにする
 
-- ステータス: 提案（2026-10-22。Issue #105 の判断材料。オーナー判断事項は §6）
+- ステータス: 承認（2026-10-22。Issue #105。オーナー判断は §6 で確定。実装の順序は [単一アプリの段階的実装プラン](../design/single-app-implementation-plan.md) が正）
 - 関連: Issue #105、[ADR 0002](0002-coreimage-engine-decision.md)（Core Image 採用と rawpy 取りやめ）、
   [4 機能の移行設計](../design/coreimage-feature-migration.md)、[小サイズレンダの計測](../coreimage-small-render-performance.md)（#102）、
-  `native/coreimage-cli/README.md`「バッチモード」（#82）
+  `native/coreimage-cli/README.md`「バッチモード」（#82）、[単一アプリの段階的実装プラン](../design/single-app-implementation-plan.md)
 - 表記: 【確認】はコードを読んで確かめた事実（ファイルと行を併記）。【推測】は見立て。【スパイク】は `work/spike-105/`（gitignore 済み、コミットしない）で動かして確かめたもの。
 
 ## 背景
@@ -34,9 +34,12 @@ ADR 0002 は rawpy の取りやめを決めたが、#90 は「Python 全体（an
 venv/pip の初回セットアップと localhost サーバを削除する」。** プロセス内リンク（§2 の案 B）は技術的に可能だと確かめたが（【スパイク】）、
 現時点で得るものが計測上ほぼ無く、失うもの（クラッシュ隔離・メモリ隔離・テスト分離）がある。
 
-規模の見立て（§3 の合計）: Rust 新規 約 4,300〜5,600 行（Drive を残すなら +800〜1,000）+ Swift 約 1,000〜1,500 行（合成モード・decode キャッシュ op）。
+規模の見立て（§3 の合計）: Rust 新規 約 4,300〜5,600 行（Drive は初版から外すので §3 の F は含めない）+ Swift 約 1,000〜1,500 行（合成モード・decode キャッシュ op）。
 Python 約 7,400 行（`local_raw/`、`wc -l`）と Rust 約 770 行（`main.rs` のセットアップ）を削る。クリティカルパスは「原寸現像・書き出しの CI 化 + EXIF 継承」（新規 Issue A）で、
 これが無いと他をいくら移しても本現像が Python に残る。
+
+進め方（§6 決定 6）: **全機能を移してから Python を外すのではなく、まず「Python 無しで起動から書き出しまで成立する最小のアプリ」（M0）を作り、そこへ機能を足す。**
+段階の定義・Issue の切り方・検証手順は実装プランに書く。本 ADR の §5 は方針の要約に留める。
 
 ## 2. 「単一アプリ」の解釈と Swift エンジンの組み込み方式
 
@@ -90,8 +93,8 @@ PSO の高速化は `--batch` の op 追加（#102 §5.3）で達成できるこ
 | `development_candidates.py`（1171 行）`/api/development-candidates` | Rust（#86 純関数 → #87 ループ）+ CLI に decode キャッシュ op | numpy / PIL / cv2（`:312` `connectedComponentsWithStats` 8 連結、`:353,:497` `GaussianBlur`。純 numpy フォールバックあり） → #86 で自前実装。代理レンダは rawpy half_size（`:218-265`）→ CLI op（#102 §5.3） | Rust 1,200〜1,500、Swift 300 | #86、#87、新規 B（CLI op） |
 | `bracket.py`（998 行）`/api/merge-bracket` | Swift CLI 合成モード + Rust コマンド | rawpy / cv2（`:308` `createAlignMTB`、`:352` `createMergeMertens`）→ Swift で MTB と Mertens を自前実装（設計書 §3.3） | Swift 700〜1,000、Rust 400 | #83、#84 |
 | `export.py`（463 行）`/api/export` | Rust | 標準ライブラリのみ（`shutil.copy2`、sha256、manifest JSON）。**契約変更あり**: 複製元が `outputs/developed`（リポジトリ相対、契約 §4）から `$APPDATA/coreimage/...` に変わり、manifest の相対パスの基準も変わる | 400〜500 | 新規 D |
-| `photos_import.py`（122 行）`/api/import-to-photos` | Rust（`Command::new("osascript")` 配列引数） | subprocess のみ。`scripts/photos_import.applescript` を `bundle.resources` に入れる。TCC の自動化許可が「ターミナル」ではなく **アプリ本体**に付く（`PERMISSION_HINT` の文言を変える） | 150 | 新規 D に含める |
-| `drive_upload.py`（881 行）`/api/drive-upload` GET/POST | Rust（残す場合） | 外部 import は遅延（`:316-345` `InstalledAppFlow` = ループバック OAuth、`:513-518` `files().create` resumable）。Rust: `oauth2` + `reqwest`（multipart/resumable は自前）か、`tiny_http` のループバック受け口。`drive_client_secret.json` は `PROJECT_ROOT/local_raw/`（`:60`）にあり、**バンドル後はリポジトリルートが無い**ので置き場所を変える。#62 / #17 の名前一致の重複判定は移植しない方がよい | 800〜1,000 | 新規 F（オーナー判断 §6 の後。#62 と同時） |
+| `photos_import.py`（122 行）`/api/import-to-photos` | Rust（`Command::new("osascript")` 配列引数） | subprocess のみ。`scripts/photos_import.applescript` を `bundle.resources` に入れる。TCC の自動化許可が「ターミナル」ではなく **アプリ本体**に付く（`PERMISSION_HINT` の文言を変える） | 150 | 新規 D の後半（実装プラン N-D2、M1） |
+| `drive_upload.py`（881 行）`/api/drive-upload` GET/POST | **初版から外す**（§6 決定 1）。UI・state・API 関数は M0 で削除、Python 本体は H で削除。将来 Rust で実装するなら: 外部 import は遅延（`:316-345` `InstalledAppFlow` = ループバック OAuth、`:513-518` `files().create` resumable）。Rust: `oauth2` + `reqwest`（multipart/resumable は自前）か、`tiny_http` のループバック受け口。`drive_client_secret.json` は `PROJECT_ROOT/local_raw/`（`:60`）にあり、**バンドル後はリポジトリルートが無い**ので置き場所を変える。#62 / #17 の名前一致の重複判定は移植しない方がよい | （将来）800〜1,000 | 新規 F（将来。#62 / #17 / #13 と統合） |
 | `config.py` / `paths.py` / `source_files.py`（520 行）`/api/source-folder` GET/POST | Rust。`read_source_root`（`coreimage.rs:155`）が既に `app_data_dir/config.json` を読む。書き込み側（検証・`root_key_for`・TCC 判定）を足す。`CONFIG_VERSION 1` の形式を保ち既存インストールを引き継ぐ | 標準ライブラリのみ | 300〜400 | 新規 E |
 | `presets.py`（182 行）`/api/health` | **移行済み**（#80/#98 `presets.rs`）。`/api/health` は廃止。`HealthResponse`（`src/lib/types.ts:106`、`engine: "rawpy/LibRaw"`）を消す | — | — | 新規 G（セットアップ削除）に含める |
 | `lens.py`（463 行） | **廃止**（CI のレンズ補正に置き換わり済み） | lensfunpy | — | #90 |
@@ -108,7 +111,8 @@ pin されている Pillow は 12.3.0（`requirements-raw.txt`）で版が違う
 
 つまり、このプロジェクトの「GPS・撮影地をアプリが**新たに**書き込まない」方針は守られており、同時に**カメラが書いた GPS は落とさず残す**のが現行挙動である。
 一方、#84 の本文（「GPS・MakerNote は書かない」）と設計書 §B1（`coreimage-feature-migration.md:270`「GPS は書かない現行方針を維持」）は現行と食い違う。
-**移植後の要件は「現行と同じ: カメラ JPG の EXIF を継承し、Orientation 1・寸法更新・MakerNote 破棄・Software 設定。GPS IFD はそのまま」とする。** 変える提案はしない（§6 へ）。
+**移植後の要件（§6 決定 5 で確定）: 「現行と同じ: カメラ JPG の EXIF を継承し、Orientation 1・寸法更新・MakerNote 破棄・Software 設定。GPS IFD はそのまま継承する（消さない）。アプリが新たに GPS を書くことはしない」。**
+#84 本文と設計書 §B1 の文言はこの要件に合わせて直す（「後続」1 項）。
 
 実装手段:
 
@@ -142,38 +146,36 @@ pin されている Pillow は 12.3.0（`requirements-raw.txt`）で版が違う
 3. `scripts/eval_cases/candidates_baseline.json` の Python 経路の出力（候補の adjustments と指標）を凍結し、Rust 実装の受け入れ基準に使う。
 4. ADR 0002 決定 4 の OS 更新回帰（`scripts/compare_engines.py`）は、rawpy を実行せず「保存した基準画像」と比較する形に変える（#90 に記載済み）。
 
-## 5. Issue の並べ替え案
+## 5. 段階の方針（詳細は実装プラン）
 
-依存の矢印は「→ の左が先」。新規 Issue の作成はメインが行う（ここではタイトルと範囲だけ）。
+Issue の順序・範囲・完了条件・並列化・検証手順は [単一アプリの段階的実装プラン](../design/single-app-implementation-plan.md) が正。ここでは方針だけを書く（2 か所に順序を書くと食い違うため、本節は更新しない）。
 
-```
-Wave 0  新規 0  Python 基準値の凍結（#86 フィクスチャ、candidates_baseline、compare_engines の基準画像、EXIF round-trip の実機サンプル）
-Wave 1  新規 A  原寸現像・書き出し JPEG の Core Image 化（develop_full コマンド、EXIF 継承、レシピ JSON、出力先 $APPDATA、DevelopedResult 契約）  ← クリティカルパス
-        #83 → #84   ブラケット合成（Swift 合成モード → Rust コマンド。EXIF 継承は新規 A の実装を共有）
-        #86 ‖ 新規 B（CLI: decode キャッシュ op）→ #87   PSO。#85 は閉じる
-        #88         暗所判定（#87 と同時でよい）。#57（代理 640px と原寸の撮影時シャープの差）は新規 A と #87 の依存に入れる
-Wave 2  新規 C  解析（analysis）・サムネイル・撮影フォルダ/サムネイルの asset scope を Rust へ
-        新規 D  書き出し（export）と「写真」取り込みを Rust へ（manifest の相対パス基準の変更を含む）
-        新規 E  現像元フォルダ設定（config）を Rust へ（CONFIG_VERSION 1 互換、TCC 判定）
-        新規 F  Drive アップロードを Rust へ（§6 でオーナーが「残す」なら。#62 / #17 と同時）
-Wave 3  新規 G  Python セットアップ処理の削除（main.rs:92-860、BootstrapGate / setup.ts、HealthResponse、raw-api.ts の fetch 全廃、ブラウザモードの扱い）
-        #90     rawpy の取りやめ（本来の範囲）→ 新規 H  Python 全削除（local_raw/、tests/test_*.py、requirements-raw.txt、setup:raw / dev:raw / test:raw、CLAUDE.md の検証手順）
-```
+- **M0 を先に出す**（§6 決定 6）。M0 = 「Python 無しで起動 → フォルダ選択 → 解析（EXIF とグループ化だけの lite 版）→ プレビュー → 原寸現像 → JPEG 書き出し（EXIF 継承・GPS 保持）」。
+  画面が `Analysis` 無しでは先へ進めない【確認: `src/App.tsx:825-835`】ので、解析を後回しにはできず、採点だけを後回しにする。
+- M0 の中身: 基準値の凍結（0）→ 原寸現像 + EXIF 継承（A）‖ フォルダ設定（E）‖ 解析 lite と配信（C の前半）→ 書き出し（D の前半）→ Python 切り離し（G）。
+  **G が終わった時点で `main.rs` の venv / pip / サーバ起動は無くなる。** `scripts/` 用の Python は開発者の手元に残る（§6 決定 4）。
+- M0 で隠すもの: ブラケット合成（M2 #83/#84）、現像候補（M3 #86/B/#87、#88・#57 併走、#85 は閉じる）、写真取り込み（M1）。Drive は削除（決定 1）。
+- M4 で Python 本体を消す（#90 + H）。`local_raw/bracket.py` と `development_candidates.py` は M2 / M3 の参照実装なので最後。契約文書（`API_CONTRACT.md`）の書き直しと CLAUDE.md の検証手順更新も M4。
+- #89（リニア出力）は任意のまま。
 
-- #89（リニア出力）は任意のまま。#85 は閉じる。
-- Wave 1 の 3 本（A・#83/#84・#86/B/#87）は worktree を分けて並行できる。Wave 2 は A の出力先・レシピの形が決まってから。
-- 新規 G までは Python を残したまま段階的に切り替えられる（各 Issue で「Tauri はコマンド、ブラウザモードは HTTP」を維持すればよい。`getPresets` の形）。
+## 6. オーナー判断（2026-10-22 確定）
 
-## 6. オーナーが決めること（製品判断）
+| # | 事項 | 決定 | 影響 |
+|---|---|---|---|
+| 1 | Google Drive アップロード | **初版から外す。** 将来対応の Issue（新規 F）に回す | M0（G）で UI・state・API 関数・型を削除。Python 本体は H で削除。#62 / #17 / #13 は F に統合 |
+| 2 | 「写真」アプリへの取り込み | **残す** | M1 で Rust（`osascript` 配列呼び出し）に移す。TCC の許可先がアプリ本体に変わるので初回の許可導線を用意する |
+| 3 | ブラウザ（vite dev + Python サーバ）だけで動く形 | **捨てる。Tauri アプリだけにする** | `isTauri()` 分岐は死にコード化し G で整理。検証は `tauri dev`（WebView）と `.app`。CLAUDE.md の「画面表示の検証はブラウザ」を改める（実装プラン §6） |
+| 4 | `scripts/` の Python 評価スクリプト（compare_engines / evaluate_*） | **開発用に残す** | `requirements-raw.txt` → `requirements-dev.txt`（H）。ユーザーには配布しない。M0 で Python 起動を外した後も開発者の手元の venv で動かす |
+| 5 | EXIF の GPS | **消さない。カメラ JPG の GPS IFD をそのまま継承する現行の動作を保つ。アプリが新たに GPS を書くことはしない** | §3.1 の要件で確定。#84 本文と設計書 §B1（`coreimage-feature-migration.md:270`）の「GPS は書かない」は現行と食い違っているので直す |
+| 6 | 進め方 | **最優先は「Python 無しの単一アプリとして動作させる」こと。初版に現行の全機能は要らない。まず動かし、その上で機能を足す** | §5 の M0 先行。詳細は実装プラン |
 
-| 事項 | 推奨 | 理由 |
+設計側で決めたこと（オーナー判断は不要と判断。異議があれば Issue で）:
+
+| 事項 | 決定 | 理由 |
 |---|---|---|
-| Drive アップロードを残すか | **残すなら Rust 移植は最後（新規 F）、#62 の設計と同時に** | 881 行で外部 OAuth・ネットワーク・秘密情報の置き場所が絡み、最も重い。#62 / #17 の既知の欠陥を移植するのは無駄 |
-| 「写真」への取り込みを残すか | **残す**（150 行、osascript 配列呼び出しのみ） | 軽い。ただし TCC の許可先がアプリ本体に変わり、初回に許可ダイアログが出る |
-| ブラウザ（vite dev）での動作を捨ててよいか | **捨てる**（Python サーバが無くなると `raw-api.ts` の HTTP 経路は全て動かなくなる） | 代替は `tauri dev`（WebView での HMR）。プロジェクト CLAUDE.md の「画面表示の検証はブラウザ（vite dev）で行う」を改める。reducer 等の `npm test` は影響なし |
-| `scripts/` の Python（compare_engines / evaluate_*）を開発用に残すか | **残す**（アプリ外の開発ツール。`requirements-dev.txt` に分離） | ADR 0002 決定 4 の OS 更新回帰はこのハーネス前提。ユーザーには配布しないので「Python 廃止」の目的と矛盾しない |
-| EXIF の GPS: 現行どおり**カメラの GPS IFD を継承**し続けるか、#84 / 設計書の文言どおり落とすか | **現行どおり継承**（挙動を変えない）。文言の方を直す | §3.1。変えるなら書き出し JPEG から撮影地が消えるという利用上の変化になる |
-| サムネイルの形式（WebP q80 → JPEG）を変えてよいか | 変えてよい（内部形式。asset プロトコル配信になる） | Rust の WebP lossy 書き出しは `webp` crate（libwebp 同梱）が要る |
+| サムネイルの形式 | WebP q80 → **JPEG** に変える | 内部形式で asset プロトコル配信になる。Rust の WebP lossy 書き出しは `webp` crate（libwebp 同梱）が要る |
+| 書き出し先 | リポジトリ相対 `outputs/export/` → **`$APPDATA/export/<batch>/`**（M0）。ユーザー指定フォルダは任意の後続 | バンドル後にリポジトリルートが無い（`local_raw/export.py:27`） |
+| 既定の現像元フォルダ | 無し（「フォルダ未設定」状態を新設） | `sample/100MSDCF` はこの checkout にもバンドルにも無い（`local_raw/config.py:32`） |
 
 ## 7. リスクと未確認事項
 
@@ -191,6 +193,7 @@ Wave 3  新規 G  Python セットアップ処理の削除（main.rs:92-860、Bo
 
 ## 後続（この ADR の採用時にメインが行うこと）
 
-1. §5 の新規 Issue 0 / A〜H を立て、#85 を「#87 へ統合」で閉じる。
-2. #84 本文と設計書 §B1 の GPS の文言を §3.1 の事実に合わせて直す（§6 の判断後）。
+1. 実装プラン §2〜§4 の新規 Issue（N-00 / N-A / N-E / N-C1 / N-D1 / N-G1 / N-G2 / N-C2 / N-D2 / N-B / N-H / N-DOC / N-F）を立て、M0 のマイルストーンを作る。#85 を「#87 へ統合」で閉じる。#105 は Issue 群を立てたら閉じる。
+2. #84 本文と設計書 §B1（`coreimage-feature-migration.md:270`）の GPS の文言を §3.1・§6 決定 5 に合わせて直す（「GPS IFD は継承する。MakerNote は破棄」）。
 3. ADR 0002 の「置き換えに進む条件」の Adjustments の行に新規 A を紐づける。
+4. Drive 関連の既存 Issue（#62 / #17 / #13）に「初版の対象外。N-F に統合」を書く。
