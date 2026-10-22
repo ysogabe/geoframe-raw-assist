@@ -1,9 +1,8 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { isTauri } from "./setup";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import type { Adjustments, CaptureId, DevelopedResult, DevelopEngine, HighlightRecoveryEffect, PresetInfo } from "./types";
 
 /**
- * Core Image プレビュー現像（Issue #72 / #73）。Python エンジンを経由せず、Tauri(Rust) が
+ * Core Image プレビュー現像（Issue #72 / #73）。Tauri(Rust) が
  * Swift CLI `geoframe-ci-develop` を直接呼ぶ。Rust 側は src-tauri/src/coreimage.rs。
  * 設計: docs/design/coreimage-preview-adjustments.md §2.6・§2.7・§4.3・§4.4。
  *
@@ -48,7 +47,7 @@ export type CoreImageError = { code: string; message: string };
 export type EngineInfo = { cli_version: string; macos_version: string; sidecar_resolved: boolean };
 
 /**
- * Core Image エンジンの稼働確認。Python の /api/health の代わりに「エンジン準備完了」を知るのに使う。
+ * Core Image エンジンの稼働確認。「エンジン準備完了」（`engineStatus`）はこれだけで決める。
  * sidecar が見つからない / `--version` が失敗したときは CoreImageError を throw する。
  */
 export async function getEngineInfo(): Promise<EngineInfo> {

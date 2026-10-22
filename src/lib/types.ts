@@ -31,8 +31,7 @@ export type CaptureId = string;
 /**
  * プリセット名。
  * union 型は意図的に廃止した（Python 側との二重定義を避けるため）。
- * 実際の一覧は動的に取得する（Tauri では Rust の `get_presets`、ブラウザモードと取得失敗時は
- * GET /api/health の `presets`。raw-api.ts の `getPresets`。Issue #80）。
+ * 実際の一覧は動的に取得する（Rust の `get_presets`。raw-api.ts の `getPresets`。Issue #80）。
  */
 export type PresetName = string;
 
@@ -83,7 +82,7 @@ export type AdjustmentRange = {
 };
 
 // ---------------------------------------------------------------------------
-// GET /api/health
+// プリセット（Tauri `get_presets`）
 // ---------------------------------------------------------------------------
 
 /** プリセット定義。adjustments はUIスライダーの初期値になる。 */
@@ -94,25 +93,8 @@ export type PresetInfo = {
   adjustments: Adjustments;
 };
 
-export type LensfunInfo = {
-  available: boolean;
-  /**
-   * lensfunpy.lensfun_version を "0.3.4.0" 形式に整形した文字列。
-   * lensfun にDBスナップショット固有の版番号APIは無いため optional。
-   */
-  db_version?: string;
-};
-
-export type HealthResponse = {
-  status: "ready";
-  engine: "rawpy/LibRaw";
-  rawpy_version: string;
-  lensfun: LensfunInfo;
-  presets: PresetInfo[];
-};
-
 // ---------------------------------------------------------------------------
-// 分析 — GET /api/analysis, POST /api/analyze
+// 分析 — get_analysis, start_analysis
 // ---------------------------------------------------------------------------
 
 /** 解析の進行ステージ。 */
@@ -244,7 +226,7 @@ export type AnalyzeResponse = {
 };
 
 // ---------------------------------------------------------------------------
-// POST /api/raw-develop
+// 現像結果（DevelopedResult）
 // ---------------------------------------------------------------------------
 
 export type RawDevelopRequest = {
@@ -324,7 +306,7 @@ export type HighlightRecoveryEffect = {
 export type DevelopEngine = "rawpy" | "coreimage";
 
 // ---------------------------------------------------------------------------
-// POST /api/development-candidates — RAW縮小デコード代理による現像候補
+// 現像候補（M3 まで隠している）— RAW縮小デコード代理による現像候補
 // ---------------------------------------------------------------------------
 
 export type DevelopmentCandidateStyle = "natural" | "stars" | "foreground" | "low_noise" | "social";
@@ -411,11 +393,11 @@ export type DevelopmentCandidatesResponse = {
 };
 
 // ---------------------------------------------------------------------------
-// POST /api/export
+// 書き出し — export_selection
 // ---------------------------------------------------------------------------
 
 /**
- * 書き出しの種別。"merged" はブラケット合成の結果（POST /api/merge-bracket、
+ * 書き出しの種別。"merged" はブラケット合成の結果（M2 まで隠している。
  * 本ファイル末尾の追加セクション）を指す。
  */
 export type ExportVariant = "camera_jpg" | "developed" | "merged";
@@ -448,7 +430,7 @@ export type ExportResponse = {
 };
 
 // ---------------------------------------------------------------------------
-// POST /api/import-to-photos
+// 「写真」アプリへの取り込み（M1 の #115 まで隠している）
 // ---------------------------------------------------------------------------
 
 export type ImportToPhotosRequest = {
@@ -470,72 +452,6 @@ export type ImportToPhotosError = {
 };
 
 export type ImportToPhotosResponse = ImportToPhotosOk | ImportToPhotosError;
-
-// ---------------------------------------------------------------------------
-// POST /api/drive-upload, GET /api/drive-upload
-// ---------------------------------------------------------------------------
-
-export type DriveUploadStartResponse = {
-  status: "started" | "already_running";
-};
-
-/** 進行ステージ。将来値が増えうるので string との union にしてある。 */
-export type DriveUploadStage =
-  | "authenticating"
-  | "waiting_for_consent"
-  | "resolving_folder"
-  | "uploading"
-  | (string & {});
-
-export type DriveUploadProgress = {
-  stage: DriveUploadStage;
-  done: number;
-  total: number;
-  bytes_done: number;
-  bytes_total: number;
-  skipped: string[];
-};
-
-/** エラー分類。将来値が増えうるので string との union にしてある。 */
-export type DriveUploadErrorKind =
-  | "auth_revoked"
-  | "quota"
-  | "rate_limit"
-  | "dependencies_missing"
-  | "network"
-  | "consent_timeout"
-  | "unknown"
-  | (string & {});
-
-export type DriveUploadIdle = {
-  status: "idle";
-  /** false は local_raw/drive_client_secret.json が未配置・不正な場合。 */
-  configured: boolean;
-};
-
-export type DriveUploadRunning = {
-  status: "running";
-  batch_name: string;
-  progress: DriveUploadProgress;
-};
-
-export type DriveUploadDone = {
-  status: "done";
-  batch_name: string;
-  uploaded: number;
-  total: number;
-  skipped: string[];
-  folder_url: string;
-};
-
-export type DriveUploadError = {
-  status: "error";
-  batch_name: string;
-  error: string;
-  error_kind: DriveUploadErrorKind;
-};
-
-export type DriveUploadState = DriveUploadIdle | DriveUploadRunning | DriveUploadDone | DriveUploadError;
 
 // ---------------------------------------------------------------------------
 // マニフェスト（outputs/export/<batch>/manifest.json、プラン §3）
@@ -583,7 +499,7 @@ export type ExportManifest = {
 };
 
 // ---------------------------------------------------------------------------
-// 現像対象フォルダ — GET /api/source-folder, POST /api/source-folder
+// 現像対象フォルダ — get_source_folder, set_source_folder
 //
 // 本セクションは凍結（2026-08-10）後の追加分である。既存の契約型には一切手を
 // 触れていない。Python 側の実装と対になっており、変更する場合は両方を同時に
@@ -592,7 +508,7 @@ export type ExportManifest = {
 
 /**
  * 現在の現像対象フォルダの情報。GET / POST いずれも成功時はこの形を返す。
- * `pairs` などの枚数は保存時点でのスキャン結果であり、`GET /api/analysis` の
+ * `pairs` などの枚数は保存時点でのスキャン結果であり、`get_analysis` の
  * `AnalysisSource` とは取得タイミングが違うため一致しないことがある。
  * フォルダそのものの正は常にこちら側。
  */
@@ -618,7 +534,7 @@ export type SourceFolderRequest = {
 };
 
 /**
- * POST /api/source-folder が HTTP 400 で返す失敗理由。
+ * set_source_folder が返す失敗理由。
  * `permission_denied` は「写真が無い」ではなく macOS のアクセス許可の問題なので、
  * UI では必ず専用の案内（システム設定 > プライバシーとセキュリティ）を出すこと。
  * 将来の追加に備え string との union にしてある。
@@ -631,13 +547,13 @@ export type SourceFolderErrorReason =
   | "analysis_running"
   | (string & {});
 
-/** POST /api/source-folder の失敗レスポンス（HTTP 400）。 */
+/** set_source_folder の失敗レスポンス。 */
 export type SourceFolderErrorResponse = ErrorResponse & {
   reason: SourceFolderErrorReason;
 };
 
 // ---------------------------------------------------------------------------
-// POST /api/merge-bracket — ブラケット合成
+// ブラケット合成（M2 まで隠している）
 //
 // 本セクションは凍結（2026-08-10）後の追加分である。既存の契約型に手を入れたのは
 // ExportVariant / ExportItem の 2 箇所だけで、いずれも合成結果を書き出せるように
@@ -670,7 +586,7 @@ export type MergeBracketRequest = {
 export type MergedResult = {
   /**
    * 合成に使ったフレーム。サーバ側で撮影IDの昇順に正規化される（リクエストで送った順ではない）。
-   * POST /api/export の `variant: "merged"` では合成ファイル名の先頭IDと一致させるため、
+   * export_selection の `variant: "merged"` では合成ファイル名の先頭IDと一致させるため、
    * `capture_id` に `capture_ids[0]` を渡さなければならない。
    */
   capture_ids: CaptureId[];

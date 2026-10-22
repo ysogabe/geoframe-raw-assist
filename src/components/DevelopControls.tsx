@@ -1,13 +1,11 @@
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
 import type { Adjustments, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
-import type { DevelopmentCandidate, DevelopmentCandidatesResponse, StarSceneInfo } from "../lib/types";
-import { DevelopmentCandidates } from "./DevelopmentCandidates";
 
 type DevelopControlsProps = {
   engineStatus: EngineStatus;
   engineVersion: string;
-  /** プリセット一覧（state.presets）。health とは独立に届く（#98）。 */
+  /** プリセット一覧（state.presets）。 */
   presets: PresetInfo[];
   presetName: PresetName;
   adjustments: Adjustments | null;
@@ -26,16 +24,6 @@ type DevelopControlsProps = {
   elapsedLabel: string;
   hasPreview: boolean;
   hasFull: boolean;
-  /** ブラケット合成の実行中。重いRAWデコードを同時に走らせないため現像側も止める。 */
-  mergeBusy: boolean;
-  /** RAW縮小デコード代理評価による候補生成の状態。候補選択は現像を開始しない。 */
-  developmentCandidates: DevelopmentCandidate[];
-  developmentRejected: DevelopmentCandidatesResponse["rejected"];
-  developmentStarScene: StarSceneInfo | null;
-  developmentCandidatesBusy: boolean;
-  developmentCandidatesError: string;
-  onGenerateCandidates: () => void;
-  onApplyCandidate: (candidate: DevelopmentCandidate) => void;
 };
 
 export function DevelopControls({
@@ -55,17 +43,9 @@ export function DevelopControls({
   elapsedLabel,
   hasPreview,
   hasFull,
-  mergeBusy,
-  developmentCandidates,
-  developmentRejected,
-  developmentStarScene,
-  developmentCandidatesBusy,
-  developmentCandidatesError,
-  onGenerateCandidates,
-  onApplyCandidate,
 }: DevelopControlsProps) {
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
-  const busy = developMode !== null || mergeBusy || developmentCandidatesBusy;
+  const busy = developMode !== null;
   const disabled = engineStatus !== "ready" || !adjustments;
 
   return (
@@ -75,7 +55,7 @@ export function DevelopControls({
           <label htmlFor="raw-preset">現像プリセット</label>
           <span className={`engine-badge ${engineStatus}`}>
             <i />
-            {engineStatus === "ready" ? `${engineVersion} 接続済み` : engineStatus === "checking" ? "確認中" : "ローカルエンジン停止中"}
+            {engineStatus === "ready" ? `${engineVersion} 接続済み` : engineStatus === "checking" ? "確認中" : "エンジン停止中"}
           </span>
         </div>
         <select
@@ -148,16 +128,7 @@ export function DevelopControls({
           </div>
         )}
 
-        <DevelopmentCandidates
-          candidates={developmentCandidates}
-          rejected={developmentRejected}
-          starScene={developmentStarScene}
-          busy={developmentCandidatesBusy}
-          error={developmentCandidatesError}
-          disabled={disabled || mergeBusy || developMode !== null}
-          onGenerate={onGenerateCandidates}
-          onApply={onApplyCandidate}
-        />
+        {/* 現像候補（DevelopmentCandidates）は M3 まで隠す。戻すときはここに <DevelopmentCandidates /> を差し込む。 */}
 
         <div className="develop-actions">
           <button className="secondary-action" onClick={() => onDevelop("preview")} disabled={disabled || busy}>

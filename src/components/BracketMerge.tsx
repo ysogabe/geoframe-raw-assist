@@ -156,7 +156,7 @@ export function BracketMerge({
       {blockReason ? (
         <p className="bracket-block" role="status">{blockReason}</p>
       ) : engineStatus !== "ready" ? (
-        <p className="bracket-block" role="status">ローカルRAWエンジンが停止中です。合成は実行できません。</p>
+        <p className="bracket-block" role="status">現像エンジンが停止中です。合成は実行できません。</p>
       ) : (
         <p className="develop-hint">
           フレーム数ぶんのRAWを読むため、合成プレビューでも数秒、本合成は数十秒かかります。書き出しに使えるのは本合成の結果だけです。
