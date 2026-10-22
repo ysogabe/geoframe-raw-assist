@@ -133,9 +133,30 @@ public struct AdjustmentsApplied: Encodable {
         public let noise_reduction: String
     }
 
+    /// `highlight_recovery` の写像と合成の結果（CLI 0.6.0、Issue #81）。
+    /// `effective_exposure` はデコード段（`applied.exposure`）、`effective_shadow_lift`（0..100）÷ 100 が `post.shadow_lift`。
+    public struct HighlightRecovery: Encodable {
+        public let value: Double
+        public let exposure_delta: Double
+        public let shadow_lift_delta: Double
+        public let effective_exposure: Double
+        public let effective_shadow_lift: Double
+        public let shadow_lift_clamped: Bool
+
+        init(_ effect: HighlightRecoveryEffect) {
+            value = effect.value
+            exposure_delta = effect.exposureDelta
+            shadow_lift_delta = effect.shadowLiftDelta
+            effective_exposure = effect.effectiveExposure
+            effective_shadow_lift = effect.effectiveShadowLift
+            shadow_lift_clamped = effect.shadowLiftClamped
+        }
+    }
+
     public let defaults: Defaults
     public let post: Post
-    /// 受理したが効かせなかったキー（現状 `highlight_recovery` 固定。代替は #81）。
+    public let highlight_recovery: HighlightRecovery
+    /// 受理したが効かせなかったキー。0.6.0（#81）で空配列になった（フィールドは契約として残す）。
     public let ignored: [String]
     /// 発動したガード（例: `white_dot_sharpness_floor`）。
     public let guards: [String]
@@ -290,7 +311,10 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
     // adjustments 指定時だけ、設計書 §3.2 の手順 3〜6 と 8 を挟む。無ければ 0.2.0 と同じ処理（素通し）。
     var adjustmentsPlan: AdjustmentsDecoderPlan?
     var guards: [String] = []
-    if let adjustments = request.adjustments {
+    // highlight_recovery の寄与を exposure / shadow_lift に加算した実効値（#81、設計書 §2・§3）。
+    // 以降のデコード段・後段はこの実効値だけを見る（hr 0 は恒等）。
+    let resolved = request.adjustments.map(HighlightRecoveryMapping.resolve)
+    if let adjustments = resolved?.adjustments {
         let defaults = readDefaults(filter)
         let plan = applyAdjustmentsDecoder(adjustments, defaults: defaults, to: filter)
         adjustmentsPlan = plan
@@ -331,13 +355,14 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
         (image, postFilterReports) = try DiagnosticsPipeline.applyPostFilters(decoded, postFilters)
     }
     var adjustmentsApplied: AdjustmentsApplied?
-    if let adjustments = request.adjustments, let plan = adjustmentsPlan {
+    if let adjustments = resolved?.adjustments, let effect = resolved?.effect, let plan = adjustmentsPlan {
         let decodedExtent = decoded.extent.integral
         let longEdge = Int(max(decodedExtent.width, decodedExtent.height))
         let iso = isoSpeed(from: filter.properties)
         let base = captureSharpenBase(longEdge: longEdge, iso: iso.map(Double.init))
         let params = PostChainParameters(
-            lift: adjustments.shadowLift / 100.0,
+            // 実効 lift は合成時に [0, 100] へクランプ済み。後段カーネルへ渡す [0, 1] も明示的に止める。
+            lift: min(1.0, max(0.0, adjustments.shadowLift / 100.0)),
             brightness: adjustments.brightness,
             contrast: adjustments.contrast,
             saturation: adjustments.saturation,
@@ -361,6 +386,7 @@ public func develop(_ request: DevelopRequest, context sharedContext: CIContext?
                 ),
                 noise_reduction: adjustments.noiseReduction.rawValue
             ),
+            highlight_recovery: AdjustmentsApplied.HighlightRecovery(effect),
             ignored: Adjustments.ignoredKeys,
             guards: guards
         )
@@ -538,7 +564,8 @@ func isUsableExtent(_ extent: CGRect) -> Bool {
 
 /// adjustments のデコード段（exposure / wb_temp / sharpness ≤ 1 / noise_reduction）を filter へ書く（§3.3）。
 /// 既定値と同じになる指定（wb_temp 0、sharpness 1.0、noise_reduction light）は filter に書かない
-/// （Float ↔ K の往復などで「変えていないのに画が変わる」ことを避けるため）。highlight_recovery は no-op。
+/// （Float ↔ K の往復などで「変えていないのに画が変わる」ことを避けるため）。
+/// `adjustments` は hr の寄与を合成済みの実効値（`HighlightRecoveryMapping.resolve`）を渡すこと。
 func applyAdjustmentsDecoder(_ adjustments: Adjustments, defaults: DecoderDefaults, to filter: CIRAWFilter) -> AdjustmentsDecoderPlan {
     // exposure: CIRAWFilter.exposure（EV、1:1）。settings.exposure_ev とは排他なので profile 側は 0。
     filter.exposure = Float(adjustments.exposure)
@@ -571,7 +598,7 @@ func applyAdjustmentsDecoder(_ adjustments: Adjustments, defaults: DecoderDefaul
     if let luminance = nr.luminance { filter.luminanceNoiseReductionAmount = Float(luminance) }
     if let color = nr.color { filter.colorNoiseReductionAmount = Float(color) }
 
-    // highlight_recovery: 受理するが効かせない（オーナー判断 2。代替は #81）。
+    // highlight_recovery: ここでは見ない（呼び出し側で exposure / shadow_lift に合成済み。#81）。
     return AdjustmentsDecoderPlan(defaults: defaults, miredShift: miredShift, guards: guards)
 }
 

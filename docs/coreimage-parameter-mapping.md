@@ -68,7 +68,7 @@ CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVAL
 | `brightness` / `contrast` / `saturation` | 同じ `geoframe_tone` で rawpy と同じ式（乗算 / 0.5 ピボット / Rec.709 輝度基準）を sRGB ガンマ空間で適用 | 後段 | `post.brightness` 等 |
 | `sharpness` | **ハイブリッド**: s ≤ 1 は `sharpnessAmount = 既定 × s`（USM なし）。s > 1 は `sharpnessAmount` を既定のまま、輝度 USM（自前 Metal カーネル）で増分だけ足す（`sigma, baseGain, coring = captureSharpenParams(長辺, ISO)`、`gain = min(1.2, baseGain × (s−1) × 1.5) × isoMult`）。rawpy の撮影時シャープ（基準 gain）は掛けない（二重がけ回避） | デコード + 後段 | `sharpness_amount`、`post.usm.*` |
 | `noise_reduction` | `off` = 輝度 0 / 色 0、`light` = 既定のまま、`full` = 輝度 `max(既定, min(0.5, max(既定+0.3, 0.3)))`（既定が 0.5 を超える高 ISO では既定のまま。full を light より弱くしない） / 色 `max(既定, 0.3)`（下表） | デコード | `luminance_noise_reduction_amount`、`color_noise_reduction_amount`、`post.noise_reduction` |
-| `highlight_recovery` | **no-op**（受理するが効かせない）。CI に対応物が無く、代替は #81 | — | `ignored: ["highlight_recovery"]` |
+| `highlight_recovery` | 0.5.0 までは **no-op**（受理するが効かせない）。**#81（CLI 0.6.0）で `exposure` / `shadow_lift` への写像に置き換えた**（下の「#81 での決定」） | — | 0.5.0: `ignored: ["highlight_recovery"]`、0.6.0: `ignored: []` |
 
 `noise_reduction` の表（`apple_default` v9・macOS 27.0.1、**輝度の上限 0.5**。旧暫定は ISO 3200 = 0.541、6400 = 0.657 だったが、空の高周波がカメラ比 0.5 を割るため T5 で頭打ちにした）:
 
@@ -82,3 +82,25 @@ CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVAL
 - 白点ガード: `adjustments` 指定時に限り、輝度 NR 0 かつ sharpness 0 になる組み合わせを `sharpnessAmount = max(…, 0.1)` に補正し `guards: ["white_dot_sharpness_floor"]` に記録（通常のスライダー範囲では発動しない）。
 - 後段（shadow_lift / brightness / contrast / saturation / USM）は CLI 内の Metal カーネルで 1 回のレンダに含める。rawpy の numpy 実装との差はオラクル比較（tiff16 sRGB、ΔE76 中央値 0、チャンネル差 p99 ≤ 0.001）で確認済み。
 - 原寸・書き出しは当面 rawpy のままなので、上の写像はプレビューにだけ効く。
+
+## #81 での決定（CLI 0.6.0、2026-10-22）
+
+`highlight_recovery`（hr）を、#92 で承認した C1'（`exposure` −0.7 + `shadow_lift` 40、強め −1.0 + 55）を節点にした区分線形の写像で置き換えた。
+設計は [設計書](design/coreimage-preset-retune.md) §2〜§4、実装は `Adjustments.swift: HighlightRecoveryMapping`（合成は `Develop.swift: develop()`）。
+
+| hr | ΔEV | Δlift | 根拠 |
+|---|---|---|---|
+| 0 | 0 | 0 | 恒等 |
+| 60 | −0.7 | 40 | C1'（診断レポート §5.1、10/10） |
+| 90 | −1.0 | 55 | C1' 強め（9/10） |
+| 100 | −1.1 | 60 | 外挿（#81 の空 10 カットで hr 90 とほぼ同じ指標: 白飛び 1.8% / 2.2%） |
+
+| 項目 | 決定 |
+|---|---|
+| 合成 | **加算**: `exposure_eff = exposure + ΔEV`、`lift_eff = clamp(shadow_lift + Δlift, 0, 100)`。max / 置換は不感帯を作るので採らない |
+| 置き場所 | CLI（`wb_temp` の mired 写像と同じく CI 固有の解釈は CLI に集約）。Rust は値域へのクランプだけ |
+| 応答 | `adjustments_applied.highlight_recovery = {value, exposure_delta, shadow_lift_delta, effective_exposure, effective_shadow_lift, shadow_lift_clamped}`。`ignored` は空配列（フィールドは残す） |
+| 等価性 | `{0, 0, hr 60}` ≡ `{−0.7, 40, hr 0}`、`{0, 0, hr 90}` ≡ `{−1.0, 55, hr 0}`（`applied`・`post.shadow_lift`・出力のバイト列が一致。Swift のスモークとハーネス `--presets` で確認） |
+| プリセット | 非救済 8 プリセットは hr 0、hr > 0 は `highlight_rescue` / `backlit_rescue` / `sunset_glow` だけ（契約 §5 の CI 値） |
+| rawpy | 変えない（hr は `HighlightMode` の選択のまま。プリセットも旧値） |
+| キャッシュ | `CACHE_KEY_SCHEMA` は上げない（鍵に CLI 版と実行ファイルの SHA が入っている） |

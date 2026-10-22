@@ -1,199 +1,5 @@
 {
-  "presets": [
-    {
-      "name": "neutral_recovery",
-      "label": "階調回復",
-      "description": "自然な明暗差を保つ標準仕上げ",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 15.0,
-        "highlight_recovery": 60.0,
-        "brightness": 1.0,
-        "contrast": 1.03,
-        "saturation": 1.02,
-        "sharpness": 1.04,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "landscape_clear",
-      "label": "風景クリア",
-      "description": "遠景の輪郭と色をくっきりさせる",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 10.0,
-        "highlight_recovery": 55.0,
-        "brightness": 1.0,
-        "contrast": 1.1,
-        "saturation": 1.08,
-        "sharpness": 1.15,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "nightscape",
-      "label": "夜景ノイズ低減",
-      "description": "高ISO夜景のノイズを抑え暗部を持ち上げる",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": -3.0,
-        "shadow_lift": 15.0,
-        "highlight_recovery": 55.0,
-        "brightness": 1.0,
-        "contrast": 1.04,
-        "saturation": 1.0,
-        "sharpness": 1.02,
-        "noise_reduction": "full"
-      }
-    },
-    {
-      "name": "sunset_glow",
-      "label": "夕景・マジックアワー",
-      "description": "夕焼けの暖色を強め空の階調を守る",
-      "adjustments": {
-        "exposure": -0.1,
-        "wb_temp": 12.0,
-        "shadow_lift": 8.0,
-        "highlight_recovery": 70.0,
-        "brightness": 1.0,
-        "contrast": 1.05,
-        "saturation": 1.07,
-        "sharpness": 1.03,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "indoor_warm",
-      "label": "室内・料理",
-      "description": "室内照明の暖かさを残し料理を明るく見せる",
-      "adjustments": {
-        "exposure": 0.1,
-        "wb_temp": 5.0,
-        "shadow_lift": 18.0,
-        "highlight_recovery": 55.0,
-        "brightness": 1.0,
-        "contrast": 1.02,
-        "saturation": 1.03,
-        "sharpness": 1.02,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "portrait_soft",
-      "label": "人物・柔らか",
-      "description": "肌を滑らかに見せる柔らかいコントラスト",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 3.0,
-        "shadow_lift": 12.0,
-        "highlight_recovery": 60.0,
-        "brightness": 1.0,
-        "contrast": 0.98,
-        "saturation": 1.0,
-        "sharpness": 0.96,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "monochrome_street",
-      "label": "モノクロ",
-      "description": "彩度を落としコントラストで見せる白黒仕上げ",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 10.0,
-        "highlight_recovery": 60.0,
-        "brightness": 1.0,
-        "contrast": 1.08,
-        "saturation": 0.0,
-        "sharpness": 1.04,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "highlight_rescue",
-      "label": "白飛び救済",
-      "description": "飛びかけた空や光源の階調を最大限引き戻す",
-      "adjustments": {
-        "exposure": -0.3,
-        "wb_temp": 0.0,
-        "shadow_lift": 15.0,
-        "highlight_recovery": 90.0,
-        "brightness": 1.0,
-        "contrast": 1.0,
-        "saturation": 1.0,
-        "sharpness": 1.02,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "shadow_rescue",
-      "label": "黒つぶれ救済",
-      "description": "つぶれた暗部を大きく持ち上げ、増えるノイズを抑える",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 45.0,
-        "highlight_recovery": 65.0,
-        "brightness": 1.0,
-        "contrast": 1.0,
-        "saturation": 1.0,
-        "sharpness": 1.01,
-        "noise_reduction": "full"
-      }
-    },
-    {
-      "name": "backlit_rescue",
-      "label": "逆光",
-      "description": "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 50.0,
-        "highlight_recovery": 80.0,
-        "brightness": 1.0,
-        "contrast": 1.0,
-        "saturation": 1.02,
-        "sharpness": 1.02,
-        "noise_reduction": "light"
-      }
-    },
-    {
-      "name": "vivid_travel",
-      "label": "ビビッド",
-      "description": "旅の記録向けに色を鮮やかに強調する",
-      "adjustments": {
-        "exposure": 0.0,
-        "wb_temp": 0.0,
-        "shadow_lift": 10.0,
-        "highlight_recovery": 55.0,
-        "brightness": 1.0,
-        "contrast": 1.07,
-        "saturation": 1.1,
-        "sharpness": 1.05,
-        "noise_reduction": "light"
-      }
-    }
-  ],
   "adjustment_ranges": {
-    "exposure": [
-      -2.0,
-      2.0
-    ],
-    "wb_temp": [
-      -100.0,
-      100.0
-    ],
-    "shadow_lift": [
-      0.0,
-      100.0
-    ],
-    "highlight_recovery": [
-      0.0,
-      100.0
-    ],
     "brightness": [
       0.7,
       1.4
@@ -202,18 +8,212 @@
       0.8,
       1.4
     ],
+    "exposure": [
+      -2.0,
+      2.0
+    ],
+    "highlight_recovery": [
+      0.0,
+      100.0
+    ],
     "saturation": [
       0.0,
       1.5
     ],
+    "shadow_lift": [
+      0.0,
+      100.0
+    ],
     "sharpness": [
       0.8,
       1.6
+    ],
+    "wb_temp": [
+      -100.0,
+      100.0
     ]
   },
   "noise_reduction_choices": [
     "off",
     "light",
     "full"
+  ],
+  "presets": [
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.03,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 1.02,
+        "shadow_lift": 15.0,
+        "sharpness": 1.04,
+        "wb_temp": 0.0
+      },
+      "description": "自然な明暗差を保つ標準仕上げ",
+      "label": "階調回復",
+      "name": "neutral_recovery"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.1,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 1.08,
+        "shadow_lift": 10.0,
+        "sharpness": 1.15,
+        "wb_temp": 0.0
+      },
+      "description": "遠景の輪郭と色をくっきりさせる",
+      "label": "風景クリア",
+      "name": "landscape_clear"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.04,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "full",
+        "saturation": 1.0,
+        "shadow_lift": 15.0,
+        "sharpness": 1.02,
+        "wb_temp": -3.0
+      },
+      "description": "高ISO夜景のノイズを抑え暗部を持ち上げる",
+      "label": "夜景ノイズ低減",
+      "name": "nightscape"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.05,
+        "exposure": 0.0,
+        "highlight_recovery": 60.0,
+        "noise_reduction": "light",
+        "saturation": 1.07,
+        "shadow_lift": 4.0,
+        "sharpness": 1.03,
+        "wb_temp": 12.0
+      },
+      "description": "夕焼けの暖色を強め空の階調を守る",
+      "label": "夕景・マジックアワー",
+      "name": "sunset_glow"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.02,
+        "exposure": 0.1,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 1.03,
+        "shadow_lift": 18.0,
+        "sharpness": 1.02,
+        "wb_temp": 5.0
+      },
+      "description": "室内照明の暖かさを残し料理を明るく見せる",
+      "label": "室内・料理",
+      "name": "indoor_warm"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 0.98,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 1.0,
+        "shadow_lift": 12.0,
+        "sharpness": 0.96,
+        "wb_temp": 3.0
+      },
+      "description": "肌を滑らかに見せる柔らかいコントラスト",
+      "label": "人物・柔らか",
+      "name": "portrait_soft"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.08,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 0.0,
+        "shadow_lift": 10.0,
+        "sharpness": 1.04,
+        "wb_temp": 0.0
+      },
+      "description": "彩度を落としコントラストで見せる白黒仕上げ",
+      "label": "モノクロ",
+      "name": "monochrome_street"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.0,
+        "exposure": 0.0,
+        "highlight_recovery": 90.0,
+        "noise_reduction": "light",
+        "saturation": 1.0,
+        "shadow_lift": 0.0,
+        "sharpness": 1.02,
+        "wb_temp": 0.0
+      },
+      "description": "飛びかけた空や光源の階調を最大限引き戻す",
+      "label": "白飛び救済",
+      "name": "highlight_rescue"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.0,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "full",
+        "saturation": 1.0,
+        "shadow_lift": 45.0,
+        "sharpness": 1.01,
+        "wb_temp": 0.0
+      },
+      "description": "つぶれた暗部を大きく持ち上げ、増えるノイズを抑える",
+      "label": "黒つぶれ救済",
+      "name": "shadow_rescue"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.0,
+        "exposure": 0.0,
+        "highlight_recovery": 60.0,
+        "noise_reduction": "light",
+        "saturation": 1.02,
+        "shadow_lift": 30.0,
+        "sharpness": 1.02,
+        "wb_temp": 0.0
+      },
+      "description": "明るい背景の階調を残しつつ、影になった被写体を持ち上げる",
+      "label": "逆光",
+      "name": "backlit_rescue"
+    },
+    {
+      "adjustments": {
+        "brightness": 1.0,
+        "contrast": 1.07,
+        "exposure": 0.0,
+        "highlight_recovery": 0.0,
+        "noise_reduction": "light",
+        "saturation": 1.1,
+        "shadow_lift": 10.0,
+        "sharpness": 1.05,
+        "wb_temp": 0.0
+      },
+      "description": "旅の記録向けに色を鮮やかに強調する",
+      "label": "ビビッド",
+      "name": "vivid_travel"
+    }
   ]
 }

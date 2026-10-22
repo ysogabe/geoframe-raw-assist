@@ -17,7 +17,7 @@ public struct Adjustments: Equatable {
     public var exposure: Double
     public var wbTemp: Double
     public var shadowLift: Double
-    /// 受理するが効かせない（no-op。`adjustments_applied.ignored` に載る。代替は #81）。
+    /// 0..100。`HighlightRecoveryMapping` で exposure と shadow_lift への寄与に写像して加算する（#81）。
     public var highlightRecovery: Double
     public var brightness: Double
     public var contrast: Double
@@ -42,7 +42,8 @@ public struct Adjustments: Equatable {
     }
 
     /// 受理するが効かせないキー（応答 `adjustments_applied.ignored`、`--capabilities`）。
-    public static let ignoredKeys = ["highlight_recovery"]
+    /// 0.6.0（#81）で `highlight_recovery` が写像で効くようになり空になった。フィールドは契約として残す。
+    public static let ignoredKeys: [String] = []
 
     /// 数値 8 キーの値域（契約 docs/API_CONTRACT.md §2 = local_raw/presets.py: ADJUSTMENT_RANGES）。
     /// CLI はクランプしない。範囲外は INVALID_REQUEST（クランプは Rust / Python の責務）。
@@ -168,6 +169,76 @@ public enum WhiteBalanceMapping {
         let mired = min(hi, max(lo, mired0 - wbTemp * miredPerUnit))
         let kelvin = min(kelvinRange.upperBound, max(kelvinRange.lowerBound, 1e6 / mired))
         return (kelvin, 1e6 / kelvin - mired0)
+    }
+}
+
+// MARK: - highlight_recovery（exposure と shadow_lift への写像。Issue #81）
+
+/// `highlight_recovery` が足す露出（EV）と shadow_lift（0..100 のスライダー単位）。
+/// 設計書 docs/design/coreimage-preset-retune.md §2・§3。
+public struct HighlightRecoveryEffect: Equatable {
+    public let value: Double
+    public let exposureDelta: Double
+    public let shadowLiftDelta: Double
+    /// `exposure + exposureDelta`（加算。クランプ無し: Rust の −2..2 + ΔEV ≥ −1.1 は CLI の −5..5 に収まる）。
+    public let effectiveExposure: Double
+    /// `clamp(shadow_lift + shadowLiftDelta, 0, 100)`（スライダー単位）。
+    public let effectiveShadowLift: Double
+    /// `effectiveShadowLift` が 100 で頭打ちになったか。
+    public let shadowLiftClamped: Bool
+}
+
+/// hr → (ΔEV, Δlift) の区分線形写像。節点 60 / 90 は #92 で承認した C1' / 強め（診断レポート §5.1）、
+/// 0 は恒等、100 は 60→90 の傾きでの外挿（#81 のハーネスで確認）。
+public enum HighlightRecoveryMapping {
+    /// (hr, ΔEV, Δlift)。節点では表の値をそのまま返す（補間演算を通さない）。
+    public static let nodes: [(hr: Double, exposure: Double, shadowLift: Double)] = [
+        (0, 0, 0),
+        (60, -0.7, 40),
+        (90, -1.0, 55),
+        (100, -1.1, 60),
+    ]
+
+    /// hr（0..100。範囲外は端の節点で止める）の寄与。
+    public static func delta(_ hr: Double) -> (exposure: Double, shadowLift: Double) {
+        let first = nodes[0]
+        let last = nodes[nodes.count - 1]
+        if !(hr > first.hr) { return (first.exposure, first.shadowLift) }
+        if hr >= last.hr { return (last.exposure, last.shadowLift) }
+        for index in 1..<nodes.count {
+            let hi = nodes[index]
+            if hr == hi.hr { return (hi.exposure, hi.shadowLift) }
+            if hr < hi.hr {
+                let lo = nodes[index - 1]
+                let t = (hr - lo.hr) / (hi.hr - lo.hr)
+                return (lo.exposure + (hi.exposure - lo.exposure) * t, lo.shadowLift + (hi.shadowLift - lo.shadowLift) * t)
+            }
+        }
+        return (last.exposure, last.shadowLift)
+    }
+
+    /// プリセット / スライダーの exposure・shadow_lift に hr の寄与を加算する（設計書 §3）。
+    public static func effect(_ adjustments: Adjustments) -> HighlightRecoveryEffect {
+        let d = delta(adjustments.highlightRecovery)
+        let liftSum = adjustments.shadowLift + d.shadowLift
+        let lift = min(100.0, max(0.0, liftSum))
+        return HighlightRecoveryEffect(
+            value: adjustments.highlightRecovery,
+            exposureDelta: d.exposure,
+            shadowLiftDelta: d.shadowLift,
+            effectiveExposure: adjustments.exposure + d.exposure,
+            effectiveShadowLift: lift,
+            shadowLiftClamped: lift != liftSum
+        )
+    }
+
+    /// hr の寄与を合成した後の Adjustments（exposure / shadow_lift を実効値に置き換える。hr は記録用に残す）。
+    public static func resolve(_ adjustments: Adjustments) -> (adjustments: Adjustments, effect: HighlightRecoveryEffect) {
+        let effect = effect(adjustments)
+        var resolved = adjustments
+        resolved.exposure = effect.effectiveExposure
+        resolved.shadowLift = effect.effectiveShadowLift
+        return (resolved, effect)
     }
 }
 

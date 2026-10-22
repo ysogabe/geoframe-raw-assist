@@ -853,6 +853,8 @@ class AdjustmentsContractTests(unittest.TestCase):
         adj = ce.oracle_adjustments("preset", preset)
         self.assertEqual((adj["exposure"], adj["wb_temp"], adj["noise_reduction"]), (0.0, 0.0, "light"))
         self.assertEqual((adj["shadow_lift"], adj["contrast"], adj["sharpness"]), (15.0, 1.03, 1.04))
+        # CLI 0.6.0 から hr はデコード段（exposure）にも効くので、オラクルでは常に 0（#81）。
+        self.assertEqual(adj["highlight_recovery"], 0.0)
         self.assertEqual(ce.oracle_adjustments({"brightness": 1.4})["brightness"], 1.4)
         with self.assertRaises(ValueError):
             ce.oracle_adjustments("preset", None)
@@ -1014,7 +1016,7 @@ def _sweep_metrics(ci_scale=1.0, wb_sign=1.0):
         out = {"identity": {"exposure_stops": 0.0, "log2_mean_linear": -3.0, "rb_ln_neutral": 0.0, "dark_mean_luma": 0.1,
                             "mean_luma": 0.4, "std_luma": 0.2, "ab_std": 10.0, "edge_width_ratio": 0.95, "flat_noise": 2.0,
                             "sky_noise": 3.0, "star_recall": 1.0, "star_recall_n": 30, "sky_hf_ratio": 0.5,
-                            "impulse_vs_full": 0, "ci_adj_guards": "", "ci_adj_ignored": "highlight_recovery"}}
+                            "impulse_vs_full": 0, "ci_adj_guards": "", "ci_adj_ignored": ""}}
         base = out["identity"]
         out["exp_m1"] = {**base, "exposure_stops": -1.0 * scale, "log2_mean_linear": -4.0}
         out["exp_p1"] = {**base, "exposure_stops": 1.0 * scale, "log2_mean_linear": -2.0}
@@ -1068,7 +1070,7 @@ class AdjustmentCheckTests(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertTrue(checks["white_dot_nr_off_sh0_guard"]["pass"])
         self.assertTrue(checks["white_dot_identity_guard"]["pass"])
-        self.assertTrue(checks["highlight_recovery_ignored"]["pass"])
+        self.assertTrue(checks["adjustments_ignored_empty"]["pass"])
         self.assertTrue(checks["sharpness_ci_edge_monotonic"]["pass"])
         self.assertTrue(checks["nr_ci_monotonic"]["pass"])
         self.assertTrue(checks["exposure_ci_m1_vs_rawpy"]["pass"])
@@ -1835,3 +1837,288 @@ class DiagnosisMockCliIntegrationTests(unittest.TestCase):
         self.assertTrue(plan["cli_ready"])
         self.assertEqual(plan["contract_problems"], [])
         self.assertEqual(plan["count"], 25 + 12)  # preview 25 + full 12（c_best は preview の結果で決まるので計画に出ない）
+
+
+# =============================================================================
+# --presets（Issue #81）
+# =============================================================================
+
+MOCK_CLI_060 = r"""#!{python}
+# テスト用の偽 CLI 0.6.0: 入力 ARW と同名の JPG を読み、exposure（hr の写像を加算）・lift・brightness を当てる。
+import json, os, sys
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
+
+NODES = [(0.0, 0.0, 0.0), (60.0, -0.7, 40.0), (90.0, -1.0, 55.0), (100.0, -1.1, 60.0)]
+
+def delta(hr):
+    if not hr > 0:
+        return 0.0, 0.0
+    for (h0, e0, l0), (h1, e1, l1) in zip(NODES, NODES[1:]):
+        if hr == h1:
+            return e1, l1
+        if hr < h1:
+            t = (hr - h0) / (h1 - h0)
+            return e0 + (e1 - e0) * t, l0 + (l1 - l0) * t
+    return NODES[-1][1], NODES[-1][2]
+
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print(json.dumps({"cli_version": "0.6.0"})); sys.exit(0)
+if args[:1] == ["--capabilities"]:
+    print(json.dumps({"adjustments": {"supported": True, "ignored": []}})); sys.exit(0)
+req = json.load(sys.stdin)
+with Image.open(os.path.splitext(req["input"])[0] + ".JPG") as im:
+    rgb = np.asarray(ImageOps.exif_transpose(im).convert("RGB"), dtype=np.float32) / 255.0
+if req["mode"] == "preview":
+    h, w = rgb.shape[:2]
+    s = req.get("max_edge", 2400) / max(h, w)
+    if s < 1:
+        rgb = cv2.resize(rgb, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
+adj = req.get("adjustments")
+resp = {"ok": True, "output": req["output"], "elapsed_ms": {"total": 5, "decode": 2, "render_encode": 3}}
+x = rgb.copy()
+exposure = 0.0
+if adj:
+    d_ev, d_lift = delta(adj["highlight_recovery"])
+    exposure = adj["exposure"] + d_ev
+    lift = min(100.0, max(0.0, adj["shadow_lift"] + d_lift))
+    x = np.clip(x * 2.0 ** exposure, 0, 1)
+    x = np.clip(x + (lift / 100.0) * 2.0 * x * (1 - x) ** 2, 0, 1)
+    x = np.clip(x * adj["brightness"], 0, 1)
+    y = x.mean(axis=2, keepdims=True)
+    x = np.clip(y + (x - y) * adj["saturation"], 0, 1)
+    resp["adjustments_applied"] = {"ignored": [], "guards": [], "post": {"shadow_lift": lift / 100.0},
+                                   "highlight_recovery": {"value": adj["highlight_recovery"], "exposure_delta": d_ev,
+                                                          "shadow_lift_delta": d_lift, "effective_exposure": exposure,
+                                                          "effective_shadow_lift": lift,
+                                                          "shadow_lift_clamped": lift != adj["shadow_lift"] + d_lift}}
+resp["applied"] = {"exposure": round(exposure, 6), "lens_correction_enabled": True, "profile": req["settings"]["profile"]}
+h, w = x.shape[:2]
+resp.update({"width": w, "height": h})
+if req.get("format") == "tiff16":
+    cv2.imwrite(req["output"], cv2.cvtColor((x * 65535).round().astype(np.uint16), cv2.COLOR_RGB2BGR))
+else:
+    Image.fromarray((x * 255).round().astype(np.uint8)).save(req["output"], "JPEG", quality=95)
+print(json.dumps(resp))
+"""
+
+
+class PresetsModeTests(unittest.TestCase):
+    def setUp(self):
+        self.presets = ce.load_ci_presets()
+
+    def test_ci_presets_have_hr_only_on_rescue(self):
+        self.assertEqual(len(self.presets), 11)
+        with_hr = {p["name"] for p in self.presets if p["adjustments"]["highlight_recovery"] > 0}
+        self.assertEqual(with_hr, set(ce.RESCUE_PRESETS))
+
+    def test_hr_delta_matches_cli_nodes(self):
+        self.assertEqual(ce.hr_delta(0), (0.0, 0.0))
+        self.assertEqual(ce.hr_delta(60), (-0.7, 40.0))
+        self.assertEqual(ce.hr_delta(90), (-1.0, 55.0))
+        self.assertEqual(ce.hr_delta(100), (-1.1, 60.0))
+        ev, lift = ce.hr_delta(30)
+        self.assertAlmostEqual(ev, -0.35)
+        self.assertAlmostEqual(lift, 20.0)
+        ev, lift = ce.hr_delta(70)
+        self.assertAlmostEqual(ev, -0.8)
+        self.assertAlmostEqual(lift, 45.0)
+
+    def test_effective_values_of_rescue_presets(self):
+        eff = {p["name"]: ce.effective_exposure_lift(p["adjustments"]) for p in self.presets}
+        self.assertEqual(eff["highlight_rescue"], (-1.0, 55.0))  # = C1' 強め（設計書 §11-4）
+        self.assertEqual(eff["backlit_rescue"], (-0.7, 70.0))
+        self.assertEqual(eff["sunset_glow"], (-0.7, 44.0))  # run2 で lift 8 → 4
+        self.assertEqual(eff["neutral_recovery"], (0.0, 15.0))
+        self.assertEqual(ce.effective_exposure_lift({"exposure": 0.0, "shadow_lift": 50.0, "highlight_recovery": 90.0}), (-1.0, 100.0))
+
+    def test_variant_specs(self):
+        specs = ce.preset_variant_specs(self.presets)
+        self.assertIsNone(specs["d_base"]["adjustments"])
+        for preset in self.presets:
+            self.assertEqual(specs[preset["name"]]["adjustments"], preset["adjustments"])
+        for name in ce.RESCUE_PRESETS:
+            hr0 = specs[f"{name}_hr0"]["adjustments"]
+            self.assertEqual(hr0["highlight_recovery"], 0.0)
+            self.assertEqual({k: v for k, v in hr0.items() if k != "highlight_recovery"},
+                             {k: v for k, v in specs[name]["adjustments"].items() if k != "highlight_recovery"})
+        self.assertNotIn("neutral_recovery_hr0", specs)
+        self.assertEqual(specs["neutral_recovery_hr30"]["adjustments"]["highlight_recovery"], 30.0)
+        self.assertEqual(specs["sunset_glow_hr70"]["adjustments"]["highlight_recovery"], 70.0)
+        self.assertEqual(specs["highlight_rescue_hr100"]["adjustments"]["highlight_recovery"], 100.0)
+        self.assertEqual(specs["landscape_clear_weak"]["adjustments"]["contrast"], 1.06)
+        full = ce.preset_variant_specs(self.presets, "full")
+        self.assertEqual(set(full), {"d_base", *ce.RESCUE_PRESETS, *(f"{n}_hr0" for n in ce.RESCUE_PRESETS)})
+
+    def test_every_planned_request_satisfies_frozen_contract(self):
+        for spec in ce.preset_variant_specs(self.presets).values():
+            if spec["adjustments"] is None:
+                continue
+            req = ce.coreimage_request(Path("/x/a.ARW"), Path("/o/a.jpg"), "preview", True, profile="apple_default",
+                                       adjustments=spec["adjustments"], max_edge=2400)
+            self.assertEqual(ce.validate_adjustments_request(req), [], spec["label"])
+        for _name, via_hr, direct in ce.equivalence_requests():
+            for adj in (via_hr, direct):
+                req = ce.coreimage_request(Path("/x/a.ARW"), Path("/o/a.tif"), "preview", True, profile="apple_default",
+                                           adjustments=adj, output_format="tiff16", output_color_space="srgb")
+                self.assertEqual(ce.validate_adjustments_request(req), [])
+
+    def test_equivalence_pairs_match_mapping(self):
+        for _name, via_hr, direct in ce.equivalence_requests():
+            self.assertEqual(ce.effective_exposure_lift(via_hr), ce.effective_exposure_lift(direct))
+
+    def test_presets_cli_gate(self):
+        ok_caps = {"adjustments": {"supported": True, "ignored": []}}
+        self.assertIsNone(ce.presets_cli_problem({"cli_version": "0.6.0"}, ok_caps))
+        self.assertIn("0.6.0", ce.presets_cli_problem({"cli_version": "0.5.0"}, ok_caps))
+        old_caps = {"adjustments": {"supported": True, "ignored": ["highlight_recovery"]}}
+        self.assertIn("ignored", ce.presets_cli_problem({"cli_version": "0.6.0"}, old_caps))
+
+    def test_highlight_recovery_summary(self):
+        payload = {"adjustments_applied": {"highlight_recovery": {
+            "value": 90.0, "exposure_delta": -1.0, "shadow_lift_delta": 55.0, "effective_exposure": -1.0,
+            "effective_shadow_lift": 55.0, "shadow_lift_clamped": False}}}
+        flat = ce.highlight_recovery_summary(payload)
+        self.assertEqual((flat["ci_hr_effective_exposure"], flat["ci_hr_effective_shadow_lift"]), (-1.0, 55.0))
+        self.assertEqual(ce.highlight_recovery_summary({"adjustments_applied": {}}), {})
+        self.assertEqual(ce.adjustments_applied_summary({"adjustments_applied": payload["adjustments_applied"]})["ci_hr_value"], 90.0)
+
+    def test_equivalence_compare(self):
+        a = np.full((4, 4, 3), 0.5, np.float32)
+        self.assertTrue(ce.equivalence_compare(a, a.copy(), {"exposure": -0.7}, {"exposure": -0.7})["pass"])
+        b = a.copy()
+        b[0, 0, 0] = 0.5 + 1 / 65535
+        self.assertFalse(ce.equivalence_compare(a, b, {}, {})["pass"])
+        self.assertFalse(ce.equivalence_compare(a, a, {"exposure": -0.7}, {"exposure": -1.0})["pass"])
+
+    def _metrics(self, clip_p=0.02, clip_hr0=0.05, clip_base=0.06, mid=0.45, mid_hr0=0.46, mid_base=0.46, fg=0.05, fg_hr0=0.06):
+        base = {"clip8_any": clip_base, "mid_p50": mid_base, "fg_p01": 0.06, "flat_noise": 2.0, "rb_ln_neutral": 0.0,
+                "mean_saturation": 0.2, "std_luma": 0.2, "mean_luma": 0.4, "dark_mean_luma": 0.1, "edge_width_px": 2.0}
+        out = {"d_base": base}
+        for name in ce.RESCUE_PRESETS:
+            out[name] = {**base, "clip8_any": clip_p, "mid_p50": mid, "fg_p01": fg, "magenta_rate": 0.0,
+                         "rb_ln_neutral": 0.05, "mean_saturation": 0.25}
+            out[f"{name}_hr0"] = {**base, "clip8_any": clip_hr0, "mid_p50": mid_hr0, "fg_p01": fg_hr0}
+        return out
+
+    def test_capture_checks_pass_and_fail(self):
+        checks = ce.preset_capture_checks("DSC04473", "preview", self._metrics(), 100, self.presets)
+        by = {(c["condition"], c["preset"], c["check"]): c for c in checks}
+        for name in ce.RESCUE_PRESETS:
+            for cond, check in ((1, "hr_clip8_lt_hr0"), (2, "hr_mid_p50_vs_hr0"), (3, "hr_fg_p01_vs_hr0"),
+                                (4, "magenta_rate"), (5, "dbase_clip8_and_mid")):
+                self.assertTrue(by[(cond, name, check)]["pass"], (cond, name))
+        self.assertTrue(by[(6, "sunset_glow", "direction_rb_ln_neutral")]["pass"])
+        # ISO 100 ではノイズの条件は n/a
+        self.assertTrue(all(c["pass"] is None for c in checks if c["condition"] == 7))
+        bad = ce.preset_capture_checks("DSC04473", "preview", self._metrics(clip_p=0.06, mid=0.40, fg=0.0), 3200, self.presets)
+        byb = {(c["condition"], c["preset"], c["check"]): c for c in bad}
+        self.assertFalse(byb[(1, "highlight_rescue", "hr_clip8_lt_hr0")]["pass"])
+        self.assertFalse(byb[(2, "highlight_rescue", "hr_mid_p50_vs_hr0")]["pass"])
+        self.assertFalse(byb[(3, "highlight_rescue", "hr_fg_p01_vs_hr0")]["pass"])
+        # P_hr0 の白飛びが 1% 未満なら hr の寄与は n/a
+        na = ce.preset_capture_checks("DSC04473", "preview", self._metrics(clip_hr0=0.005), 100, self.presets)
+        self.assertIsNone(next(c for c in na if c["check"] == "hr_clip8_lt_hr0")["pass"])
+
+    def test_dbase_checks_mid_exempt_and_low_clip(self):
+        # 中間調が d_base から +0.09: backlit_rescue だけは中間調を問わない（被写体向けの lift）
+        checks = ce.preset_capture_checks("DSC04473", "preview", self._metrics(mid=0.55, mid_hr0=0.55), 100, self.presets)
+        by = {(c["preset"], c["check"]): c for c in checks if c["condition"] in (5, 6)}
+        self.assertTrue(by[("backlit_rescue", "dbase_clip8_and_mid")]["pass"])
+        self.assertFalse(by[("highlight_rescue", "dbase_clip8_and_mid")]["pass"])
+        # d_base の白飛びが 1% 未満なら条件 5 と条件 6 の clip8 の方向は n/a
+        low = ce.preset_capture_checks("DSC04872", "preview", self._metrics(clip_p=0.00001, clip_base=0.00002), 100, self.presets)
+        for c in low:
+            if c["check"] in ("dbase_clip8_and_mid", "direction_clip8_any"):
+                self.assertIsNone(c["pass"], (c["preset"], c["check"]))
+
+    def test_check_summary_rules(self):
+        checks = []
+        for i, cid in enumerate(ce.PRESET_SKY_IDS):
+            ok_mid = i != 0  # 1 カットだけ外れる → 9/10 で合格
+            checks.append({"capture_id": cid, "mode": "preview", "condition": 2, "check": "hr_mid_p50_vs_hr0",
+                           "preset": "highlight_rescue", "sky_cut": True, "pass": ok_mid})
+            checks.append({"capture_id": cid, "mode": "preview", "condition": 1, "check": "hr_clip8_lt_hr0",
+                           "preset": "highlight_rescue", "sky_cut": True, "pass": None if i < 3 else (i != 5)})
+        checks.append({"capture_id": "DSC07415", "mode": "preview", "condition": 2, "check": "hr_mid_p50_vs_hr0",
+                       "preset": "highlight_rescue", "sky_cut": False, "pass": False})  # 空以外は 1〜5 に数えない
+        summary = {(c["condition"], c["preset"]): c for c in ce.preset_check_summary(checks)}
+        self.assertTrue(summary[(2, "highlight_rescue")]["pass"])
+        self.assertEqual(summary[(2, "highlight_rescue")]["decided_n"], 10)
+        self.assertFalse(summary[(1, "highlight_rescue")]["pass"])
+        self.assertEqual(summary[(1, "highlight_rescue")]["n_a"], 3)
+        self.assertIsNone(ce.preset_check_summary([{**checks[1], "pass": None}])[0]["pass"])
+
+    def test_sheet_columns(self):
+        cols = ce.presets_sheet_columns("sunset_glow", ["d_base", "sunset_glow", "sunset_glow_hr0", "sunset_glow_hr70",
+                                                        "rawpy_sunset_glow", "nightscape"])
+        self.assertEqual(cols, ["d_base", "sunset_glow", "sunset_glow_hr0", "sunset_glow_hr70", "rawpy_sunset_glow"])
+        self.assertEqual(ce.presets_sheet_columns("nightscape", ["d_base", "nightscape"]), ["d_base", "nightscape"])
+
+    def test_owner_groups_reference_known_presets_and_cuts(self):
+        names = {p["name"] for p in self.presets}
+        cuts = set(ce.PRESET_SKY_IDS) | set(ce.PRESET_SCENE_IDS)
+        for _group, pairs, _point in ce.PRESET_OWNER_GROUPS:
+            for cid, preset in pairs:
+                self.assertIn(preset, names)
+                self.assertIn(cid, cuts)
+        self.assertTrue(set(ce.PRESET_DIRECTIONS) <= names)
+
+
+class PresetsMockCliIntegrationTests(unittest.TestCase):
+    """偽 CLI 0.6.0 で --presets を 1 カット preview + full まで通す（rawpy の参考列は省く）。"""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        from PIL import Image
+
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.src = root / "src"
+        self.src.mkdir()
+        Image.fromarray(_diag_scene(1200, 800)).save(self.src / "DSC04473.JPG", "JPEG", quality=95)
+        (self.src / "DSC04473.ARW").write_bytes(b"not a raw file")
+        self.cli = root / "mock-cli"
+        self.cli.write_text(MOCK_CLI_060.replace("{python}", sys.executable), encoding="utf-8")
+        os.chmod(self.cli, 0o755)
+        self.out = root / "out"
+        self.out.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_presets_flow(self):
+        import csv
+
+        ctx = ce.RunContext(source_root=self.src, out=self.out, cli=self.cli, max_edge=600)
+        features = {"DSC04473": {"capture_id": "DSC04473", "iso": 100, "orientation": 1}}
+        ce.run_presets(ctx, [{"capture_id": "DSC04473", "category": "backlit"}], features, ["DSC04473"], with_rawpy=False)
+        summary = json.loads((self.out / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["errors"], [])
+        self.assertTrue(all(e["pass"] for e in summary["equivalence"]), summary["equivalence"])
+        with (self.out / "metrics.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        by = {(r["mode"], r["variant"]): r for r in rows}
+        self.assertIn(("preview", "highlight_rescue_hr100"), by)
+        self.assertIn(("full", "backlit_rescue_hr0"), by)
+        self.assertNotIn(("full", "nightscape"), by)
+        self.assertEqual(float(by[("preview", "highlight_rescue")]["ci_hr_effective_exposure"]), -1.0)
+        self.assertEqual(float(by[("preview", "backlit_rescue")]["ci_hr_effective_shadow_lift"]), 70.0)
+        self.assertTrue((self.out / "sheets" / "DSC04473_highlight_rescue.jpg").is_file())
+        self.assertTrue((self.out / "sheets" / "DSC04473_highlight_rescue_full.jpg").is_file())
+        index = (self.out / "index.md").read_text(encoding="utf-8")
+        self.assertIn("sheets/DSC04473_highlight_rescue.jpg", index)
+        self.assertIn("§2.2", index)
+        self.assertTrue((self.out / "tables.md").is_file())
+        self.assertNotIn("gps", (self.out / "summary.json").read_text(encoding="utf-8").lower())
+
+    def test_main_dry_run_writes_plan(self):
+        ce.main(["--source-root", str(self.src), "--captures", "DSC04473", "--presets", "--dry-run",
+                 "--out", str(self.out), "--cli", str(self.cli), "--full"])
+        plan = json.loads((self.out / "presets_plan.json").read_text(encoding="utf-8"))
+        self.assertEqual([p for p in plan if p["problems"]], [])
+        self.assertEqual({p["mode"] for p in plan}, {"preview", "full"})

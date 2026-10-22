@@ -231,9 +231,99 @@ final class AdjustmentMappingTests: XCTestCase {
     }
 
     func testCapabilitiesAdvertiseAdjustments() throws {
-        XCTAssertEqual(cliVersion, "0.5.0")
+        XCTAssertEqual(cliVersion, "0.6.0")
         let json = encodeJSONLine(Capabilities(probe: nil))
-        XCTAssertTrue(json.contains(#""adjustments":{"ignored":["highlight_recovery"],"post_kernel":"metal","supported":true}"#), json)
+        // 0.6.0（#81）で highlight_recovery が効くようになり ignored は空配列（フィールドは残す）。
+        XCTAssertTrue(json.contains(#""adjustments":{"ignored":[],"post_kernel":"metal","supported":true}"#), json)
+    }
+
+    // MARK: highlight_recovery の写像（#81、設計書 coreimage-preset-retune.md §2・§3）
+
+    func testHighlightRecoveryNodesAreExact() {
+        // 節点では表の値をそのまま返す（補間の丸めを通さない。§2.2 の等価性の前提）。
+        let zero = HighlightRecoveryMapping.delta(0)
+        XCTAssertEqual(zero.exposure, 0)
+        XCTAssertEqual(zero.shadowLift, 0)
+        let c1 = HighlightRecoveryMapping.delta(60)
+        XCTAssertEqual(c1.exposure, -0.7)
+        XCTAssertEqual(c1.shadowLift, 40)
+        let strong = HighlightRecoveryMapping.delta(90)
+        XCTAssertEqual(strong.exposure, -1.0)
+        XCTAssertEqual(strong.shadowLift, 55)
+        let top = HighlightRecoveryMapping.delta(100)
+        XCTAssertEqual(top.exposure, -1.1)
+        XCTAssertEqual(top.shadowLift, 60)
+    }
+
+    func testHighlightRecoveryInterpolatesLinearlyBetweenNodes() {
+        let cases: [(Double, Double, Double)] = [
+            (30, -0.35, 20), (50, -0.7 * 50 / 60, 40 * 50 / 60.0), (70, -0.8, 45), (80, -0.9, 50), (95, -1.05, 57.5),
+        ]
+        for (hr, ev, lift) in cases {
+            let d = HighlightRecoveryMapping.delta(hr)
+            XCTAssertEqual(d.exposure, ev, accuracy: 1e-12, "hr \(hr)")
+            XCTAssertEqual(d.shadowLift, lift, accuracy: 1e-12, "hr \(hr)")
+        }
+    }
+
+    func testHighlightRecoveryIsMonotonic() {
+        var previous = HighlightRecoveryMapping.delta(0)
+        for step in 1...200 {
+            let d = HighlightRecoveryMapping.delta(Double(step) * 0.5)
+            XCTAssertLessThanOrEqual(d.exposure, previous.exposure, "hr \(Double(step) * 0.5)")
+            XCTAssertGreaterThanOrEqual(d.shadowLift, previous.shadowLift, "hr \(Double(step) * 0.5)")
+            previous = d
+        }
+    }
+
+    func testHighlightRecoveryZeroIsIdentity() {
+        let adjustments = Adjustments(exposure: 0.3, shadowLift: 15, highlightRecovery: 0)
+        let resolved = HighlightRecoveryMapping.resolve(adjustments)
+        XCTAssertEqual(resolved.adjustments, adjustments)
+        XCTAssertEqual(resolved.effect.exposureDelta, 0)
+        XCTAssertEqual(resolved.effect.shadowLiftDelta, 0)
+        XCTAssertFalse(resolved.effect.shadowLiftClamped)
+    }
+
+    func testHighlightRecoveryAddsToPresetValues() {
+        // 加算合成（§3）。hr は記録用に残る。
+        let resolved = HighlightRecoveryMapping.resolve(Adjustments(exposure: -0.3, shadowLift: 15, highlightRecovery: 90))
+        XCTAssertEqual(resolved.adjustments.exposure, -1.3, accuracy: 1e-12)
+        XCTAssertEqual(resolved.adjustments.shadowLift, 70, accuracy: 1e-12)
+        XCTAssertEqual(resolved.adjustments.highlightRecovery, 90)
+        XCTAssertEqual(resolved.effect.effectiveExposure, -1.3, accuracy: 1e-12)
+        XCTAssertEqual(resolved.effect.effectiveShadowLift, 70, accuracy: 1e-12)
+    }
+
+    func testHighlightRecoveryClampsLiftAt100() {
+        let resolved = HighlightRecoveryMapping.resolve(Adjustments(shadowLift: 50, highlightRecovery: 90))
+        XCTAssertEqual(resolved.effect.effectiveShadowLift, 100)
+        XCTAssertEqual(resolved.adjustments.shadowLift, 100)
+        XCTAssertTrue(resolved.effect.shadowLiftClamped)
+        let edge = HighlightRecoveryMapping.resolve(Adjustments(shadowLift: 40, highlightRecovery: 100))
+        XCTAssertEqual(edge.effect.effectiveShadowLift, 100)
+        XCTAssertFalse(edge.effect.shadowLiftClamped)
+    }
+
+    func testHighlightRecoveryEquivalentToApprovedC1Settings() {
+        // §2.2: {0, 0, hr 60} ≡ {−0.7, 40, hr 0}、{0, 0, hr 90} ≡ {−1.0, 55, hr 0}（実効値が厳密に一致）。
+        for (hr, ev, lift) in [(60.0, -0.7, 40.0), (90.0, -1.0, 55.0)] {
+            let viaHR = HighlightRecoveryMapping.resolve(Adjustments(highlightRecovery: hr)).adjustments
+            let direct = HighlightRecoveryMapping.resolve(Adjustments(exposure: ev, shadowLift: lift)).adjustments
+            XCTAssertEqual(viaHR.exposure, direct.exposure, "hr \(hr)")
+            XCTAssertEqual(viaHR.shadowLift, direct.shadowLift, "hr \(hr)")
+            XCTAssertEqual(Float(viaHR.exposure), Float(direct.exposure))
+            XCTAssertEqual(viaHR.shadowLift / 100.0, direct.shadowLift / 100.0)
+        }
+    }
+
+    func testAdjustmentsAppliedEncodesHighlightRecovery() {
+        let effect = HighlightRecoveryMapping.effect(Adjustments(shadowLift: 15, highlightRecovery: 60))
+        let json = encodeJSONLine(AdjustmentsApplied.HighlightRecovery(effect))
+        XCTAssertEqual(
+            json,
+            #"{"effective_exposure":-0.7,"effective_shadow_lift":55,"exposure_delta":-0.7,"shadow_lift_clamped":false,"shadow_lift_delta":40,"value":60}"#
+        )
     }
 
     func testSuccessResponseOmitsAdjustmentsAppliedByDefault() throws {

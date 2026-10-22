@@ -1131,3 +1131,13 @@ K を 8bit JPEG から取った参考の内訳では、真に説明できない�
 - 未検証: 太陽そのもの・夕景の太陽・夜景の点光源（追加撮影はしない）。原寸の `magenta_rate` は preview より大きく（`d_base` 0.003、候補 0.005〜0.024）、閾値 0.01 は原寸向けには見直しが要る。
 - ハーネス側の限界（3 回目で対処）: K（白の画素集合）を 8bit JPEG から取ると lens OFF で白を数え損なっていた（DSC04705 full で 5.5pt、preview でも DSC04473 `sky_bright` で 19.5pt）。3 回目は S3 dump（≥ 0.9955）から取った。
   DSC04754 の `cloud_grad` は雲でなく明るい被写体に落ちていた。3 回目は低彩度（HSV の S < 0.2）の条件を足して空に移った（夜明けの桃色の雲 DSC04532 は同じ箱のまま）。
+
+## 18. プリセット再調整と `highlight_recovery` の写像（Issue #81、設計書 `design/coreimage-preset-retune.md`）
+
+- 手順: ハーネスに `--presets` モードを足した（`scripts/compare_engines.py`）。CI 値のプリセット表（`src-tauri/tests/fixtures/presets.json`）を読み、
+  `d_base`・11 プリセット・救済系の `<preset>_hr0`・追加の候補（案 C の hr 30、`landscape_clear` の弱め、`sunset_glow` hr 70、`highlight_rescue` hr 100）・
+  rawpy の legacy プリセット（参考）を現像し、設計書 §7.4 の 1〜7 と §2.2 の等価性（条件 9）を判定、§8 のシートを出す。
+- CLI 0.6.0 で `highlight_recovery` を `exposure` / `shadow_lift` への区分線形の写像（60 → C1'、90 → 強め）に置き換えた。等価性は DSC07415 で tiff16 のバイト一致。
+- 結果（2026-10-22、空 10 + 日中 3 + 室内 2 + 夜景 3 カット、反復 2 回）: 条件 1〜5・7〜9 は合格、条件 6 は誤差レベルの不一致のみ。
+  救済系 3 種は空の白飛び（`sky_bright` の clip8 中央値）を 45% から 0〜3% に減らし、中間調は CI 既定とほぼ同じ（`backlit_rescue` は設計どおり +0.09）。
+  反復で `sunset_glow` の `shadow_lift` を 8 → 4 にした。詳細は [再調整レポート](coreimage-preset-retune-report.md)。

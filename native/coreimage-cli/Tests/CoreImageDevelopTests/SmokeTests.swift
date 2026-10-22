@@ -138,7 +138,8 @@ final class SmokeTests: XCTestCase {
         """
     }
 
-    static let identityAdjustments = #"{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":60,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}"#
+    /// 恒等（0.6.0 から highlight_recovery も効くので 0）。
+    static let identityAdjustments = #"{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":0,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}"#
 
     func testAdjustmentsReportDefaultsPostAndIgnored() throws {
         let input = try firstReadable(Self.highISOCandidates)
@@ -146,10 +147,15 @@ final class SmokeTests: XCTestCase {
         let adjustments = #"{"exposure":0.5,"wb_temp":30,"shadow_lift":15,"highlight_recovery":60,"brightness":1.1,"contrast":1.03,"saturation":1.02,"sharpness":1.4,"noise_reduction":"full"}"#
         let response = try run(adjustmentsRequest(input, output, adjustments))
         let report = try XCTUnwrap(response.adjustments_applied)
-        XCTAssertEqual(report.ignored, ["highlight_recovery"])
+        XCTAssertEqual(report.ignored, [])
         XCTAssertEqual(report.guards, [])
         XCTAssertEqual(response.applied.profile, "apple_default")
-        XCTAssertEqual(response.applied.exposure, 0.5, accuracy: 1e-6)
+        // hr 60 → (−0.7, +40) を加算（#81）。exposure 0.5 − 0.7、lift 15 + 40。
+        XCTAssertEqual(report.highlight_recovery.value, 60)
+        XCTAssertEqual(report.highlight_recovery.effective_exposure, -0.2, accuracy: 1e-12)
+        XCTAssertEqual(report.highlight_recovery.effective_shadow_lift, 55, accuracy: 1e-12)
+        XCTAssertFalse(report.highlight_recovery.shadow_lift_clamped)
+        XCTAssertEqual(response.applied.exposure, -0.2, accuracy: 1e-6)
         // wb_temp > 0 は K を上げる（暖色側）。tint は既定のまま。
         XCTAssertGreaterThan(response.applied.neutral_temperature, report.defaults.neutral_temperature)
         XCTAssertEqual(response.applied.neutral_tint, report.defaults.neutral_tint, accuracy: 1e-4)
@@ -161,7 +167,7 @@ final class SmokeTests: XCTestCase {
         // full は既定より強い NR。
         XCTAssertGreaterThan(response.applied.luminance_noise_reduction_amount, report.defaults.luminance_noise_reduction_amount)
         XCTAssertGreaterThanOrEqual(response.applied.color_noise_reduction_amount, 0.3 - 1e-6)
-        XCTAssertEqual(report.post.shadow_lift, 0.15, accuracy: 1e-12)
+        XCTAssertEqual(report.post.shadow_lift, 0.55, accuracy: 1e-12)
         XCTAssertEqual(report.post.noise_reduction, "full")
         XCTAssertTrue(encodeJSONLine(response).contains("\"adjustments_applied\":{"))
     }
@@ -181,6 +187,23 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(report.defaults.luminance_noise_reduction_amount, plain.applied.luminance_noise_reduction_amount)
         XCTAssertEqual(report.defaults.neutral_temperature, plain.applied.neutral_temperature)
         XCTAssertEqual(report.post.usm.gain, 0)
+    }
+
+    /// 設計書 coreimage-preset-retune.md §2.2: {0, 0, hr 60} と {−0.7, 40, hr 0} は同じ画（90 ↔ (−1.0, 55) も）。
+    func testHighlightRecoveryMatchesApprovedC1Render() throws {
+        let input = try firstReadable(Self.highISOCandidates)
+        func adjustments(_ ev: Double, _ lift: Double, _ hr: Double) -> String {
+            #"{"exposure":\#(ev),"wb_temp":0,"shadow_lift":\#(lift),"highlight_recovery":\#(hr),"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}"#
+        }
+        for (hr, ev, lift) in [(60.0, -0.7, 40.0), (90.0, -1.0, 55.0)] {
+            let viaHR = directory.appendingPathComponent("hr\(Int(hr)).jpg")
+            let direct = directory.appendingPathComponent("c1_\(Int(hr)).jpg")
+            let a = try run(adjustmentsRequest(input, viaHR, adjustments(0, 0, hr)))
+            let b = try run(adjustmentsRequest(input, direct, adjustments(ev, lift, 0)))
+            XCTAssertEqual(encodeJSONLine(a.applied), encodeJSONLine(b.applied), "hr \(hr)")
+            XCTAssertEqual(a.adjustments_applied?.post.shadow_lift, b.adjustments_applied?.post.shadow_lift)
+            XCTAssertEqual(try Data(contentsOf: viaHR), try Data(contentsOf: direct), "hr \(hr): レンダ結果が一致しない")
+        }
     }
 
     func testWhiteDotGuardFiresOnlyWithAdjustments() throws {
