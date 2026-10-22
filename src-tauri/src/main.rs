@@ -6,8 +6,9 @@
 mod adjustments;
 mod analysis;
 mod coreimage;
-mod export;
 mod exif_inherit;
+mod export;
+mod photos_import;
 mod presets;
 mod source_folder;
 
@@ -28,7 +29,8 @@ fn main() {
             source_folder::get_source_folder,
             source_folder::set_source_folder,
             export::export_selection,
-            export::reveal_export
+            export::reveal_export,
+            photos_import::import_to_photos
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

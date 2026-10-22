@@ -22,6 +22,7 @@ import {
 } from "./lib/app-state";
 import {
   exportSelection,
+  importToPhotos,
   getAnalysis,
   getPresets,
   getSourceFolder,
@@ -495,7 +496,16 @@ export default function Home() {
     }
   }
 
-  // 「写真」アプリへの取り込み（runImport）は M1 の #115 で戻す（reducer の import/* と state は残してある）。
+  async function runImport() {
+    if (!isValidBatchName(state.batchName) || !state.exportResult) return;
+    dispatch({ type: "import/start" });
+    try {
+      const result = await importToPhotos({ batch_name: state.batchName });
+      dispatch({ type: "import/ok", result });
+    } catch (error) {
+      dispatch({ type: "import/fail", message: messageOf(error, "Appleフォトへの登録に失敗しました。") });
+    }
+  }
 
   const analysisReady = state.analysisState === "ready" && analysis !== null;
   const elapsed = developMode ? Math.max(0, (tick - state.developStartedAt) / 1000) : 0;
@@ -625,8 +635,11 @@ export default function Home() {
             onChangeBatchName={(value) => dispatch({ type: "export/batchName", value })}
             onChangeVariant={(key, variant) => dispatch({ type: "accept/variant", key, variant })}
             onExport={() => void runExport()}
+            onImport={() => void runImport()}
             exporting={state.exporting}
+            importing={state.importing}
             exportResult={state.exportResult}
+            importResult={state.importResult}
             onBack={returnToSuggestions}
           />
         ) : (

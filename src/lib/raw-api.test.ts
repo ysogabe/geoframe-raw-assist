@@ -12,6 +12,7 @@ import fixture from "../../src-tauri/tests/fixtures/presets.json";
 import {
   assetUrl,
   exportSelection,
+  importToPhotos,
   revealExport,
   getAnalysis,
   isSourceRootNotConfigured,
@@ -152,5 +153,16 @@ describe("書き出し Rust invoke", () => {
     vi.mocked(invoke).mockRejectedValue("プレビューは書き出せません");
     await expect(exportSelection("batch", [])).rejects.toThrow("プレビューは書き出せません");
     await expect(revealExport("/outside")).rejects.toEqual("プレビューは書き出せません");
+  });
+});
+
+
+describe("写真アプリ取り込み invoke (#115)", () => {
+  beforeEach(() => { vi.mocked(invoke).mockReset(); });
+  it("Rust コマンドに batch_name を渡し、response を返す", async () => {
+    const response = { status: "ok" as const, imported: 2, album: "GeoFrame RAW Assist trip" };
+    vi.mocked(invoke).mockResolvedValue(response);
+    expect(await importToPhotos({ batch_name: "trip" })).toEqual(response);
+    expect(invoke).toHaveBeenCalledWith("import_to_photos", { batchName: "trip", album: undefined });
   });
 });

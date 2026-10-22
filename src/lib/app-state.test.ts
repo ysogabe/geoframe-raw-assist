@@ -742,3 +742,20 @@ describe("フォルダ未設定（analysis/unconfigured。#110）", () => {
     expect(ready.analysis?.scored).toBe(false);
   });
 });
+
+describe("写真アプリ取り込み reducer (#115)", () => {
+  it("start / ok を処理して結果と notice を保存する", () => {
+    const started = reducer(initialState, { type: "import/start" });
+    expect(started.importing).toBe(true);
+    const done = reducer(started, { type: "import/ok", result: { status: "ok", imported: 3, album: "GeoFrame RAW Assist trip" } });
+    expect(done.importing).toBe(false);
+    expect(done.importResult?.status).toBe("ok");
+    expect(done.notice).toContain("3 件");
+  });
+  it("error response を notice に表示する", () => {
+    const done = reducer(reducer(initialState, { type: "import/start" }), { type: "import/ok", result: { status: "error", error: "自動化が未許可" } });
+    expect(done.importing).toBe(false);
+    expect(done.notice).toBe("自動化が未許可");
+    expect(done.noticeTone).toBe("error");
+  });
+});
