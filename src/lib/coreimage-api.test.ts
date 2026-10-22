@@ -11,6 +11,8 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import {
   coreImageErrorMessage,
+  engineInfoLabel,
+  getEngineInfo,
   previewEngine,
   resolveAdjustments,
   shouldFallbackToRawpy,
@@ -206,5 +208,24 @@ describe("previewEngine", () => {
   it("ブラウザモードは invoke せずに rawpy", async () => {
     await expect(previewEngine()).resolves.toBe("rawpy");
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("getEngineInfo", () => {
+  it("engine_info を引数なしで invoke して結果を返す", async () => {
+    const info = { cli_version: "0.6.0", macos_version: "15.1", sidecar_resolved: true };
+    vi.mocked(invoke).mockResolvedValueOnce(info);
+    await expect(getEngineInfo()).resolves.toEqual(info);
+    expect(invoke).toHaveBeenCalledWith("engine_info");
+  });
+
+  it("CoreImageError はそのまま reject される", async () => {
+    const error = { code: "SIDECAR_NOT_FOUND", message: "見つかりません" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(getEngineInfo()).rejects.toBe(error);
+  });
+
+  it("表示ラベルは Core Image <cli> / macOS <ver>", () => {
+    expect(engineInfoLabel({ cli_version: "0.6.0", macos_version: "15.1" })).toBe("Core Image 0.6.0 / macOS 15.1");
   });
 });

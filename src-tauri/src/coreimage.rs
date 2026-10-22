@@ -28,6 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
@@ -1615,6 +1616,118 @@ fn sidecar_path() -> Result<PathBuf, CoreImageError> {
 }
 
 // ---------------------------------------------------------------------------
+// engine_info（Issue #109）: Python の /api/health の代わりにフロントが「エンジン準備完了」を知る
+// ---------------------------------------------------------------------------
+
+/// `engine_info` の応答。フロントの `EngineInfo`（coreimage-api.ts）とフィールド名を一致させること。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EngineInfo {
+    pub cli_version: String,
+    pub macos_version: String,
+    /// sidecar のパス解決に成功したか。失敗時は reject するので、成功応答では常に true。
+    pub sidecar_resolved: bool,
+}
+
+/// `sw_vers -productVersion` の出力から版数を取り出す（空なら None）。
+fn parse_sw_vers(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// macOS の版数。取れなければ None（呼び出し側で CLI の自己申告へフォールバックする）。
+fn macos_product_version() -> Option<String> {
+    let output = Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_sw_vers(&output.stdout)
+}
+
+fn engine_info_blocking() -> Result<EngineInfo, CoreImageError> {
+    let sidecar = sidecar_path()?;
+    let version = cli_version(&sidecar)?;
+    Ok(EngineInfo {
+        cli_version: version.cli_version,
+        macos_version: macos_product_version().unwrap_or(version.macos_version),
+        sidecar_resolved: true,
+    })
+}
+
+/// Core Image エンジンの稼働確認。JS からは `invoke("engine_info")`。
+/// sidecar が見つからない / `--version` が失敗したら `CoreImageError` で reject する。
+#[tauri::command]
+pub async fn engine_info() -> Result<EngineInfo, CoreImageError> {
+    tauri::async_runtime::spawn_blocking(engine_info_blocking)
+        .await
+        .map_err(|error| CoreImageError::new("INTERNAL", format!("engine_info が中断されました: {error}")))?
+}
+
+// ---------------------------------------------------------------------------
+// root_key_for: Python `local_raw/config.py` の `root_key_for` と同じ規則
+// ---------------------------------------------------------------------------
+
+/// `root_key` の桁数（Python の `ROOT_KEY_LENGTH`）。
+const ROOT_KEY_LENGTH: usize = 8;
+
+/// Python の `Path.resolve()`（非 strict）相当の正規化。相対パスは cwd 基準で絶対化し、
+/// `.` / `..` を畳み、存在する最長の祖先は symlink を解決する（`/var` → `/private/var`）。
+/// 存在しない残りの成分はそのまま付ける。
+fn resolve_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let mut existing = normalized.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = fs::canonicalize(&existing) {
+            let mut resolved = real;
+            for part in rest.iter().rev() {
+                resolved.push(part);
+            }
+            return resolved;
+        }
+        match (existing.file_name().map(|n| n.to_os_string()), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => return normalized,
+        }
+    }
+}
+
+/// サムネイル名・キャッシュキー用のフォルダ識別子（sha1 の 16 進表記の先頭 8 文字）。
+/// 後続の解析移植（Python の `root_key_for` の置き換え）が使う。
+pub fn root_key_for(path: &Path) -> String {
+    let resolved = resolve_path(path);
+    let digest = Sha1::digest(resolved.to_string_lossy().as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    hex[..ROOT_KEY_LENGTH].to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Tauri コマンド
 // ---------------------------------------------------------------------------
 
@@ -1686,6 +1799,50 @@ pub async fn develop_preview_coreimage(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn root_key_matches_python_for_nonexistent_paths() {
+        // 期待値は Python で計算: hashlib.sha1(str(Path(p).resolve()).encode()).hexdigest()[:8]
+        assert_eq!(root_key_for(Path::new("/")), "42099b4a");
+        assert_eq!(
+            root_key_for(Path::new("/Users/yoshio/Pictures/日本語 フォルダ")),
+            "a7451179"
+        );
+        // `.` / `..` は畳まれる（/Users/yoshio/b/c）。
+        assert_eq!(
+            root_key_for(Path::new("/Users/yoshio/a/../b/./c")),
+            "2dc61a0d"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn root_key_resolves_system_symlinks_like_python() {
+        // Python: Path("/var").resolve() == /private/var -> 91683992
+        assert_eq!(root_key_for(Path::new("/var")), "91683992");
+        // 存在しない末尾は /tmp -> /private/tmp を解決した上で付く。
+        assert_eq!(
+            root_key_for(Path::new("/tmp/rk109/none/x/../y")),
+            "2e1f43fe"
+        );
+    }
+
+    #[test]
+    fn root_key_follows_symlinks() {
+        let dir = TempDir::new("root-key-link");
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(root_key_for(&link), root_key_for(&real));
+        assert_eq!(root_key_for(&real).len(), 8);
+    }
+
+    #[test]
+    fn parse_sw_vers_trims_and_rejects_empty() {
+        assert_eq!(parse_sw_vers(b"15.1\n"), Some("15.1".to_string()));
+        assert_eq!(parse_sw_vers(b"  \n"), None);
+    }
     use super::*;
     use std::sync::atomic::AtomicUsize;
 

@@ -895,6 +895,8 @@ fn main() {
             // Core Image プレビュー現像（Issue #72 / #73）。GEOFRAME_PREVIEW_ENGINE=rawpy で切り戻し。
             coreimage::preview_engine,
             coreimage::develop_preview_coreimage,
+            // 「エンジン準備完了」の判定（Issue #109）。Python の /api/health の代わり。
+            coreimage::engine_info,
             // プリセット定義（Issue #80）。定義の正は Rust 側。Python の /api/health は移行期間中の予備。
             presets::get_presets
         ])
