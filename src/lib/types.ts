@@ -209,7 +209,13 @@ export type AnalysisSummary = {
 };
 
 export type Analysis = {
-  analysis_version: 2;
+  /** 2 = Python エンジン、3 = Rust（Tauri。#110）。 */
+  analysis_version: 2 | 3;
+  /**
+   * false のとき採点値（シャープ・白飛び・黒つぶれ・総合点・信頼度）は未計算の 0。
+   * v2（Python）には無いフィールドで、undefined は採点済みとして扱う。
+   */
+  scored?: boolean;
   generated_at: string;
   source: AnalysisSource;
   summary: AnalysisSummary;
@@ -217,7 +223,7 @@ export type Analysis = {
   groups: GroupInfo[];
 };
 
-export type AnalysisAbsentResponse = { status: "absent" };
+export type AnalysisAbsentResponse = { status: "absent"; error?: string };
 export type AnalysisRunningResponse = {
   status: "running";
   progress: AnalysisProgress;

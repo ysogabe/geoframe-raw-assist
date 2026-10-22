@@ -22,7 +22,11 @@ import type {
 
 export type Screen = "suggestions" | "operation" | "export";
 export type EngineStatus = "checking" | "ready" | "offline";
-export type AnalysisState = "unknown" | "absent" | "running" | "ready" | "error";
+/**
+ * `unconfigured` = 現像元フォルダが未設定（Tauri の get_analysis が SOURCE_ROOT_NOT_CONFIGURED で reject。#110）。
+ * 解析を始める前にフォルダ選択が要る状態で、`absent`（設定済みだが未解析）とは別に扱う。
+ */
+export type AnalysisState = "unknown" | "unconfigured" | "absent" | "running" | "ready" | "error";
 export type ListView = "suggestions" | "queue" | "accepted";
 export type DevelopMode = "preview" | "full";
 
@@ -313,6 +317,8 @@ export type Action =
   | { type: "presets/loaded"; presets: PresetInfo[]; source: Exclude<PresetsSource, "none"> }
   | { type: "analysis/status"; response: AnalysisResponse }
   | { type: "analysis/requested" }
+  /** 現像元フォルダが未設定（SOURCE_ROOT_NOT_CONFIGURED）。 */
+  | { type: "analysis/unconfigured" }
   | { type: "analysis/error"; message: string }
   | { type: "source/loaded"; info: SourceFolderInfo }
   | { type: "source/unavailable" }
@@ -544,8 +550,25 @@ export function reducer(state: State, action: Action): State {
           analysisError: "",
         };
       }
-      return { ...state, analysisState: "absent", analysisProgress: null, analysisError: "" };
+      return {
+        ...state,
+        analysisState: "absent",
+        analysisProgress: null,
+        // Rust 側が直近の解析失敗を添えてくることがある（#110）。ゲートに出せるよう保持する。
+        analysisError: response.error ?? "",
+        analyzeRequested: false,
+      };
     }
+
+    case "analysis/unconfigured":
+      return {
+        ...state,
+        analysisState: "unconfigured",
+        analysis: null,
+        analysisProgress: null,
+        analysisError: "",
+        analyzeRequested: false,
+      };
 
     case "analysis/requested":
       return { ...state, analyzeRequested: true, analysisState: "running", analysisError: "" };

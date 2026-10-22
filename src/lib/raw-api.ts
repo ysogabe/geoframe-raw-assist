@@ -1,7 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./setup";
 import type {
   Adjustments,
+  Analysis,
+  AnalysisProgress,
   AnalysisResponse,
   AnalyzeResponse,
   CaptureId,
@@ -28,12 +30,37 @@ export const LOCAL_RAW_API = "http://127.0.0.1:8788";
  * `DevelopedResult.output_url` は既に完全URLなので、この関数を通してはならない。
  */
 export function assetUrl(path: string): string {
-  return path.startsWith("http") ? path : `${LOCAL_RAW_API}${path}`;
+  if (path.startsWith("http")) return path;
+  // Tauri: Rust 解析の photos[*].thumb は $APPDATA/thumbnails/ 配下の絶対パス。asset protocol で配信する。
+  // Python 由来の相対パス（"/thumbs/..."）は従来どおりエンジンの HTTP を指す。
+  if (isTauri() && path.startsWith("/") && !path.startsWith("/thumbs/")) return convertFileSrc(path);
+  return `${LOCAL_RAW_API}${path}`;
 }
 
-/** カメラ内JPG（現像前）のURL。 */
+/** Rust 側 URI scheme（src-tauri/src/analysis.rs `source_jpg_protocol`）。 */
+export const SOURCE_JPG_SCHEME = "geoframe";
+
+/**
+ * カメラ内JPG（現像前）のURL。
+ *
+ * Tauri では `geoframe://localhost/source-jpg/DSC12345.JPG`（macOS）。`convertFileSrc("source-jpg/x", "geoframe")` は
+ * パス全体を encodeURIComponent するため `source-jpg%2Fx` になり、Rust 側の `request.uri().path()`（デコードされない）が
+ * `^/source-jpg/(DSC[0-9]{5})\.JPG$` に一致しない。そのため `/` を残した形をここで組み立てる。
+ */
 export function sourceJpgUrl(captureId: CaptureId): string {
+  if (isTauri()) return `${SOURCE_JPG_SCHEME}://localhost/source-jpg/${captureId}.JPG`;
   return `${LOCAL_RAW_API}/source-jpg/${captureId}.JPG`;
+}
+
+/** `get_analysis` が現像元フォルダ未設定で reject したときのコード（Rust `SOURCE_ROOT_NOT_CONFIGURED`）。 */
+export const SOURCE_ROOT_NOT_CONFIGURED = "SOURCE_ROOT_NOT_CONFIGURED";
+
+export function isSourceRootNotConfigured(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === SOURCE_ROOT_NOT_CONFIGURED
+  );
 }
 
 class RawApiError extends Error {
@@ -136,10 +163,30 @@ export async function getPresets(fallback: PresetInfo[]): Promise<PresetInfo[]> 
 }
 
 export async function getAnalysis(): Promise<AnalysisResponse> {
+  // 未設定（SOURCE_ROOT_NOT_CONFIGURED）の reject はそのまま投げる。呼び出し側が isSourceRootNotConfigured で分岐する。
+  if (isTauri()) return normalizeAnalysisResponse(await invoke<unknown>("get_analysis"));
   return (await getJson("/api/analysis", "解析状況を取得できませんでした。")) as AnalysisResponse;
 }
 
+/** Rust `get_analysis` の応答を既存の AnalysisResponse に写す（形は同じだが、不正な status は absent に倒す）。 */
+export function normalizeAnalysisResponse(raw: unknown): AnalysisResponse {
+  const body = (raw ?? {}) as { status?: unknown; progress?: unknown; analysis?: unknown; error?: unknown };
+  if (body.status === "ready" && body.analysis) return { status: "ready", analysis: body.analysis as Analysis };
+  if (body.status === "running") {
+    const p = (body.progress ?? {}) as Partial<AnalysisProgress>;
+    return {
+      status: "running",
+      progress: { stage: typeof p.stage === "string" ? p.stage : "", done: Number(p.done) || 0, total: Number(p.total) || 0 },
+    };
+  }
+  return typeof body.error === "string" && body.error ? { status: "absent", error: body.error } : { status: "absent" };
+}
+
 export async function startAnalyze(force = false): Promise<AnalyzeResponse> {
+  if (isTauri()) {
+    const status = await invoke<AnalyzeResponse["status"]>("start_analysis", { force });
+    return { status };
+  }
   return (await postJson("/api/analyze", force ? { force: true } : {}, "解析を開始できませんでした。")) as AnalyzeResponse;
 }
 

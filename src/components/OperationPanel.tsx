@@ -102,12 +102,13 @@ type OperationPanelProps = {
   onOpenViewer: (gallery: ViewerGallery) => void;
 };
 
-function ScoreRow({ label, value }: { label: string; value: number }) {
+function ScoreRow({ label, value, unscored = false }: { label: string; value: number; unscored?: boolean }) {
+  // 未採点（analysis.scored === false）の 0 は「悪い点数」ではなく「計算していない」。0 と表示しない。
   return (
     <div className="score-row">
       <span>{label}</span>
-      <div><i style={{ width: `${Math.min(Math.max(value, 0), 100)}%` }} /></div>
-      <strong>{value}</strong>
+      <div><i style={{ width: unscored ? "0%" : `${Math.min(Math.max(value, 0), 100)}%` }} /></div>
+      <strong>{unscored ? "未採点" : value}</strong>
     </div>
   );
 }
@@ -162,6 +163,7 @@ export function OperationPanel({
   onOpenViewer,
 }: OperationPanelProps) {
   const mergePanelRef = useRef<HTMLElement>(null);
+  const unscored = analysis.scored === false;
   const developResult = fullResult ?? previewResult;
   /**
    * 本合成の結果が **今選んでいるフレーム構成** のものか。
@@ -370,7 +372,7 @@ export function OperationPanel({
             {photo ? (
               <ProgressiveImage thumbSrc={assetUrl(photo.thumb)} fullSrc={sourceJpgUrl(captureId)} alt={`選択中 ${captureId}`} />
             ) : null}
-            {photo && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
+            {photo && !unscored && <div className="preview-grade"><small>総合</small><strong>{formatScore(photo.overall_score)}</strong></div>}
             <div className="filename">{captureId}.JPG</div>
             {/* サムネそのものをクリックしても原寸ビューアが開くようにする（一番押したくなる場所なので）。 */}
             <button
@@ -409,7 +411,7 @@ export function OperationPanel({
             <div className="analysis-title">
               <span className="spark">✦</span>
               <strong>{group.recommended_capture_id === captureId ? "この一枚をおすすめ" : "おすすめは別の一枚です"}</strong>
-              <small>信頼度 {formatConfidence(group.confidence)}%</small>
+              {analysis.scored !== false && <small>信頼度 {formatConfidence(group.confidence)}%</small>}
             </div>
             <ul className="reason-list">
               {group.recommendation_reasons.map((reason) => (
@@ -418,10 +420,11 @@ export function OperationPanel({
             </ul>
             {photo ? (
               <>
-                <ScoreRow label="総合スコア" value={formatScore(photo.overall_score)} />
-                <ScoreRow label="シャープネス" value={formatScore(photo.sharpness_score)} />
-                <ScoreRow label="ハイライト保持" value={100 - formatPercent(photo.highlight_clip_ratio)} />
-                <ScoreRow label="暗部の保持" value={100 - formatPercent(photo.shadow_clip_ratio)} />
+                {unscored && <p className="reason-empty">採点は未対応です（グループ分けのみ）。</p>}
+                <ScoreRow label="総合スコア" value={formatScore(photo.overall_score)} unscored={unscored} />
+                <ScoreRow label="シャープネス" value={formatScore(photo.sharpness_score)} unscored={unscored} />
+                <ScoreRow label="ハイライト保持" value={100 - formatPercent(photo.highlight_clip_ratio)} unscored={unscored} />
+                <ScoreRow label="暗部の保持" value={100 - formatPercent(photo.shadow_clip_ratio)} unscored={unscored} />
               </>
             ) : (
               <p className="reason-empty">この写真の解析データが見つかりません。</p>
