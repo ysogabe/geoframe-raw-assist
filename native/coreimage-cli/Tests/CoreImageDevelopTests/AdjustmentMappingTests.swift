@@ -231,7 +231,7 @@ final class AdjustmentMappingTests: XCTestCase {
     }
 
     func testCapabilitiesAdvertiseAdjustments() throws {
-        XCTAssertEqual(cliVersion, "0.6.0")
+        XCTAssertEqual(cliVersion, "0.7.0")
         let json = encodeJSONLine(Capabilities(probe: nil))
         // 0.6.0（#81）で highlight_recovery が効くようになり ignored は空配列（フィールドは残す）。
         XCTAssertTrue(json.contains(#""adjustments":{"ignored":[],"post_kernel":"metal","supported":true}"#), json)

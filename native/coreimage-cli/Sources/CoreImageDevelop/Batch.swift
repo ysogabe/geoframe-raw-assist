@@ -13,9 +13,17 @@ public final class BatchProcessor {
     /// 直前に振った番号（まだ 1 件も受けていなければ 0）。
     public private(set) var sequence = 0
     private let log: (String) -> Void
+    /// `op: decode` の結果（RGBAh）の保持。`clearCaches()` では消えない（CI のキャッシュとは別物）。
+    let decodeCache: DecodeCache
+    private let handlePrefix = makeHandlePrefix()
+    private var handleCounter = 0
 
-    public init(context: CIContext = makeRenderContext(), log: @escaping (String) -> Void = { _ in }) {
+    public init(
+        context: CIContext = makeRenderContext(), decodeCacheLimits: DecodeCacheLimits = DecodeCacheLimits(),
+        log: @escaping (String) -> Void = { _ in }
+    ) {
         self.context = context
+        self.decodeCache = DecodeCache(limits: decodeCacheLimits)
         self.log = log
     }
 
@@ -29,7 +37,12 @@ public final class BatchProcessor {
         // 1 件ごとに autorelease pool を空にする（Core Image / ImageIO の一時オブジェクトを件数ぶん溜めない）。
         return autoreleasepool {
             do {
-                let request = try RequestParser.parse(Data(line.utf8))
+                let data = Data(line.utf8)
+                if let (op, object) = try RequestParser.operation(in: data) {
+                    defer { context.clearCaches() }
+                    return try handleOperation(op, object, sequence: current)
+                }
+                let request = try RequestParser.parse(data)
                 // 使い回す CIContext のキャッシュは 1 件ごとに捨てる。捨てないと同じ RAW を続けて回したときに
                 // 1 件あたりの時間が伸び続けた（30 件で 1.3 秒 → 2.3 秒。README「バッチモード」の計測）。
                 defer { context.clearCaches() }
@@ -44,6 +57,33 @@ public final class BatchProcessor {
                 log("#\(current) internal error: \(error)")
                 return encodeJSONLine(FailureResponse(DevelopError(.internalError, "\(error)"), sequence: current))
             }
+        }
+    }
+
+    /// `op` 付きの 1 件（decode / render / release）。成功応答の JSON 行を返す。
+    private func handleOperation(_ op: String, _ object: [String: Any], sequence current: Int) throws -> String {
+        switch op {
+        case "decode":
+            let request = try RequestParser.parseDecodeOp(object)
+            handleCounter += 1
+            var response = try performDecode(
+                request, handle: "\(handlePrefix)-\(handleCounter)", cache: decodeCache, context: context
+            )
+            response.sequence = current
+            log("#\(current) ok decode \(response.handle) \(response.width)x\(response.height) total=\(response.elapsed_ms.total)ms cache=\(response.cache.entries)/\(response.cache.bytes)B evicted=\(response.cache.evicted.count)")
+            return encodeJSONLine(response)
+        case "render":
+            let request = try RequestParser.parseRenderOp(object)
+            var response = try performRender(request, cache: decodeCache, context: context)
+            response.sequence = current
+            log("#\(current) ok render \(request.handle) \(response.format) \(response.width)x\(response.height) total=\(response.elapsed_ms.total)ms")
+            return encodeJSONLine(response)
+        default:
+            let handle = try RequestParser.parseReleaseOp(object)
+            let released = decodeCache.remove(handle)
+            let response = ReleaseResponse(handle: handle, released: released, cache: decodeCache.state(), sequence: current)
+            log("#\(current) ok release \(handle) released=\(released)")
+            return encodeJSONLine(response)
         }
     }
 

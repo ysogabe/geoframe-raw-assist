@@ -40,7 +40,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.6.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.7.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
@@ -52,7 +52,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"adjustments":{"ignored":[],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.6.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"adjustments":{"ignored":[],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.7.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
@@ -385,6 +385,7 @@ stdout には JSON 1 行だけを書く（`--batch` では応答 1 件につき 
 | `RENDER_FAILED` | `outputImage` が無い / レンダリング失敗 |
 | `WRITE_FAILED` | エンコード・一時ファイル書き込み・rename の失敗 |
 | `INTERNAL_ERROR` | 想定外の例外 |
+| `HANDLE_NOT_FOUND` | `--batch` の `op: render` で、ハンドルが未知・解放済み・LRU で捨てられた（0.7.0。下記「decode キャッシュ」。呼び出し側は `op: decode` をやり直す） |
 
 ## バッチモード（CLI 0.5.0、Issue #82）
 
@@ -424,6 +425,109 @@ printf '%s\n' '{"input":"/abs/a.ARW","output":"/abs/work/a.jpg","mode":"preview"
 - バッチの出力が単発とバイト単位で一致すること、前の件の設定（neutral・個別上書き・診断の `linear_space_filter`・
   `adjustments`・別ファイル）が次の件に漏れないことは `BatchTests.testBatchOutputIsByteIdenticalToSingleShotAndDoesNotLeakSettings`
   （tiff16 で比較）が確かめる。
+
+### decode キャッシュ（`op: decode` / `render` / `release`、CLI 0.7.0、Issue #116）
+
+PSO（現像候補の自動生成）は、同じ RAW に対して後段の調整（lift・brightness・contrast・saturation・sharpness > 1）だけを変えた
+小さなレンダを数十〜数百回繰り返す。毎回 RAW をデコードする（約 0.5 秒）代わりに、1 回デコードした結果を `--batch` の
+プロセス内に保持して後段だけを繰り返す（設計: `docs/coreimage-small-render-performance.md` §5.2・§5.3）。
+
+リクエストの行に `op` を足す。**`op` が無い行は従来どおり 1 件の現像**（動作は 0.6.0 と同じ。出力画素は 0.6.0 とバイト一致。
+`op` を持つ行が 0.6.0 では「未知のキー」だったので、これまでエラーだった行だけが意味を持つようになった）。
+`op` は文字列で `decode` / `render` / `release` のいずれか。ほかは `INVALID_REQUEST`。応答には `sequence` が付く。
+
+#### `op: decode`
+
+デコード段（RAW フィルタ・レンズ補正・デコーダ設定）だけを実行し、結果を保持してハンドルを返す。画像は書かない。
+
+```jsonc
+// リクエスト（キーは現像リクエストから output / format 系を除いたもの。adjustments は必須）
+{"op":"decode","input":"/abs/DSC07402.ARW","mode":"preview","max_edge":640,"decoder_version":"9",
+ "settings":{"profile":"apple_default","lens_correction":true},
+ "adjustments":{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":0,"brightness":1,"contrast":1,
+                "saturation":1,"sharpness":1,"noise_reduction":"light"}}
+// 応答
+{"ok":true,"op":"decode","handle":"h3fa9c1d2-1","width":640,"height":427,"bytes":2186240,
+ "decoder_version":"9","input":"/abs/DSC07402.ARW","mode":"preview",
+ "elapsed_ms":{"decode":15.2,"render_encode":760.1,"total":775.3},
+ "applied":{...},"source":{...},
+ "cache":{"entries":1,"bytes":2186240,"max_entries":32,"max_bytes":268435456,"evicted":[]},"sequence":1}
+```
+
+- 受けるキー: `op` `input` `mode` `max_edge` `decoder_version` `settings` `adjustments`（`output` `format` `diagnostics` は不可 → `INVALID_REQUEST`）。
+  `settings.profile` は `adjustments` の規則どおり `apple_default`。
+- **デコード段のキー（render が一致を要求するもの）**は、`adjustments` のうち hr の寄与を足した**実効 exposure**・`wb_temp`・
+  `min(sharpness, 1)`・`noise_reduction`。`shadow_lift`・`brightness`・`contrast`・`saturation`・`sharpness > 1` の増分（USM）は後段で、
+  decode 時の値は無視される（保持されない）。それ以外（`input` `mode` `max_edge` `decoder_version` `settings`）は decode で固定され、render では指定できない。
+- `applied` は通常の現像と同じ形で、`color_space` は `"(set by render)"`、`bit_depth` は 16 の固定値（出力形式は render が決める）。
+- ハンドルは `h<8 桁 16 進>-<通し番号>`（プロセスごとに接頭辞が違い、別プロセスの古いハンドルを取り違えない）。
+- 保持する画素は **RGBAh（half float）の作業空間のまま**（extended linear sRGB）。1 件の大きさは `width × height × 8` バイト
+  （長辺 640 で約 2.2 MB、2400 で約 31 MB）。`CIImage` / `CIRAWFilter` は保持しない（`outputImage` を 2 回参照すると extent が縮む問題に触れないため）。
+- 1 件が単独でバイト上限を超える大きさなら、デコードする前に `INVALID_REQUEST`（`max_edge` を下げる）。
+
+#### `op: render`
+
+保持した画素に後段チェーンだけを掛けて書き出す。
+
+```jsonc
+{"op":"render","handle":"h3fa9c1d2-1","output":"/abs/work/p-17.tif","format":"tiff16","output_color_space":"srgb",
+ "adjustments":{"exposure":0,"wb_temp":0,"shadow_lift":20,"highlight_recovery":0,"brightness":1.05,"contrast":1.1,
+                "saturation":1.08,"sharpness":1.2,"noise_reduction":"light"}}
+// 応答: 通常の現像の成功応答と同じ形 + "op":"render","handle":"…","sequence":N
+```
+
+- 受けるキー: `op` `handle` `output` `format` `jpeg_quality` `output_color_space` `adjustments`（出力側の規則は通常の現像と同じ）。
+- `adjustments` のデコード段のキーが decode 時と食い違うと `INVALID_REQUEST`（食い違った値をメッセージに載せる）。黙って近似しない。
+  hr を変えると実効 exposure も変わるので、hr を変えたいときは decode からやり直す。
+- 応答の `adjustments_applied` / `applied` / `source` は通常の現像と同じ内容（`applied` は decode 時の読み戻し + 出力形式）。
+  `elapsed_ms.decode` は後段グラフの組み立て、`render_encode` はレンダ + エンコード + 書き込み。
+- ハンドルが未知・解放済み・LRU で捨てられたなら **`HANDLE_NOT_FOUND`**（メッセージは `evicted (LRU limit)` か `unknown or already released`）。
+  呼び出し側は `op: decode` をやり直す。セッションは使い続けられる。
+- render は保持した画素を変更しない。同じハンドルに何度でも異なる後段を掛けられる。
+
+#### `op: release`
+
+```jsonc
+{"op":"release","handle":"h3fa9c1d2-1"}
+// 応答
+{"ok":true,"op":"release","handle":"h3fa9c1d2-1","released":true,"cache":{"entries":0,"bytes":0,"max_entries":32,"max_bytes":268435456,"evicted":[]},"sequence":5}
+```
+
+冪等。保持していなかった（未知・解放済み・捨て済み）ときも `ok:true` で `released:false`。
+
+#### 寿命と上限
+
+- **寿命**: ハンドルは decode 成功から、`release`・LRU による破棄・プロセス終了（stdin の EOF、kill）のどれかまで。ディスクには何も書かない。
+  Rust の `BatchSession` を閉じる（`finish` / drop / タイムアウトの kill）と全部消える。
+- **上限（既定）**: 同時に **32 件**、画素の合計 **256 MiB**（`DecodeCacheLimits`）。decode で超えたら、**最後に使った（decode / render した）
+  のが古い順**に捨てる。新しく作ったハンドルは捨てない。捨てたハンドルは decode の応答の `cache.evicted` に載る。
+  長辺 640 なら 32 件で約 70 MB（個数上限が先に効く）、長辺 2400 なら約 8 件（バイト上限が先に効く）。
+- **`clearCaches()` との関係**: バッチは 1 件（op 付きの行を含む）の処理ごとに `CIContext.clearCaches()` を呼ぶが、これは Core Image の
+  中間結果のキャッシュを捨てるだけで、保持している画素（CLI が自分で持つ `Data`）には影響しない。render は毎回、保持した画素から
+  `CIImage` を作り直してレンダする（`clearCaches()` 直後でも同じ結果）。逆に、保持の解放は `release` / LRU だけで行う。
+- `decode` / `render` の失敗はハンドルを壊さない（`render` の `INVALID_REQUEST` / `WRITE_FAILED` の後も同じハンドルで続けられる）。
+
+#### 通常の現像との差
+
+後段だけの描画（decode → render）は、同じ入力・設定の通常の現像と**画素が完全には一致しない**。通常経路は RAW デコードから後段までを
+1 つの Core Image グラフとして評価するが、decode op はデコード結果をいったん half float のビットマップへ書き出すため、
+その丸めぶんだけ差が出る。tiff16 sRGB 640px の実測（DSC07402、後段の 4 通り）: 16bit 値の**最大差 26〜64**（8bit の 0.1〜0.25 段）、
+平均差 2〜3.4。single の 8bit 出力（jpeg）では 1 段以内。float（RGBAf）で保持しても一致せず（最大 49〜75）、デコーダの
+固有色空間（Display P3）で保持しても同じで、half の作業空間が最小だったため、half を採用した。
+`DecodeCacheTests.testRenderMatchesDirectDevelopPixelForPixel` が 4 通りの後段で、この許容（最大差 128 = 8bit の半段）以内であること、
+`adjustments_applied` / `applied` / `source` が一致することを確かめる。
+
+#### 計測（2026-10-22、Apple M3 / macOS 27.0.1、640px tiff16 sRGB）
+
+`DSC07402` / `DSC07408`、後段をレンダごとに変える（`work/issue116/bench.py`）。decode 1 回 + render 50 回と、通常の現像 50 回（同じ
+`--batch`）の比較:
+
+| ARW | decode | render（保持画素から） | 通常の現像 1 回 | 50 評価の合計 保持 / 通常 |
+|---|---|---|---|---|
+| DSC07402 | 785 ms | p50 5.7 ms / 平均 7.8 ms | p50 566 ms | 1.18 秒 / 28.5 秒（24 倍） |
+| DSC07408 | 845 ms | p50 4.4 ms / 平均 4.9 ms | p50 675 ms | 1.09 秒 / 33.7 秒（31 倍） |
+
+render の時間にはエンコードとファイル書き込みが含まれる（#102 §5.3 の見積もり 7.2 ms より速い）。decode は最初の 1 回分で、通常の現像 1 回とほぼ同じ。
 
 ### 計測（2026-10-21、Apple M3 / macOS 27.0.1）
 
