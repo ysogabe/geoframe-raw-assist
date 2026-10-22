@@ -1,0 +1,133 @@
+{
+  "app": "geoframe-raw-assist",
+  "batch_name": "baseline-107",
+  "created_at": "2000-01-01T00:00:00+00:00",
+  "items": [
+    {
+      "capture_id": "DSC07402",
+      "exif": {
+        "captured_at": "2022-11-19T18:19:57",
+        "focal_length": 16.0,
+        "iso": 3200,
+        "lens_model": "E 16mm F2.8"
+      },
+      "exported_file": "DSC07402.JPG",
+      "group": {
+        "id": 0,
+        "kind": "single",
+        "raw_level": "strong",
+        "user_selected": true,
+        "was_recommended": true
+      },
+      "recipe": null,
+      "source": {
+        "arw": "DSC07402.arw",
+        "jpg": "DSC07402.JPG",
+        "jpg_sha256": "54bb6e6dae243a68b1056569a6a1637c449fb1e689a442a773aefcc1978ade2d"
+      },
+      "variant": "camera_jpg"
+    },
+    {
+      "capture_id": "DSC07402",
+      "exif": {
+        "captured_at": "2022-11-19T18:19:57",
+        "focal_length": 16.0,
+        "iso": 3200,
+        "lens_model": "E 16mm F2.8"
+      },
+      "exported_file": "DSC07402-neutral_recovery-b8abc83742.jpg",
+      "group": {
+        "id": 0,
+        "kind": "single",
+        "raw_level": "strong",
+        "user_selected": true,
+        "was_recommended": true
+      },
+      "recipe": {
+        "adjustments": {
+          "brightness": 1.0,
+          "contrast": 1.03,
+          "exposure": 0.0,
+          "highlight_recovery": 60.0,
+          "noise_reduction": "light",
+          "saturation": 1.02,
+          "shadow_lift": 15.0,
+          "sharpness": 1.04,
+          "wb_temp": 0.0
+        },
+        "capture_id": "DSC07402",
+        "created_at": "2000-01-01T00:00:00+00:00",
+        "dark_scene": {
+          "bright_k": 5.0,
+          "dark_scene": true,
+          "ev100": 1.671,
+          "source": "pair_jpg"
+        },
+        "elapsed_seconds": 9.4,
+        "engine": {
+          "engine_version": 17,
+          "name": "rawpy/LibRaw",
+          "opencv_version": "5.0.0",
+          "pillow_version": "12.3.0",
+          "rawpy_version": "0.27.0"
+        },
+        "exif": {
+          "captured_at": "2022:11:19 18:19:57",
+          "exposure_time": 0.07692307692307693,
+          "f_number": 2.8,
+          "focal_length": 16.0,
+          "iso": 3200,
+          "lens_model": "E 16mm F2.8",
+          "make": "SONY",
+          "model": "ILCE-6400",
+          "offset_time": "+09:00",
+          "orientation": 1
+        },
+        "exif_inherited": true,
+        "iso": 3200.0,
+        "lens_correction": {
+          "aperture": 2.8,
+          "applied": true,
+          "flags": [
+            "distortion",
+            "tca"
+          ],
+          "focal_length": 16.0,
+          "lens": "Sony / E 16mm f/2.8",
+          "skipped": [
+            "vignetting_forced_skip"
+          ]
+        },
+        "makernote": "dropped",
+        "output": {
+          "format": "JPEG",
+          "height": 4008,
+          "max_edge": 6000,
+          "path": "work/baseline/rawpy/full/DSC07402-neutral_recovery-b8abc83742.jpg",
+          "preview": false,
+          "quality": 92,
+          "width": 6000
+        },
+        "params_hash": "b8abc83742",
+        "preset": {
+          "label": "階調回復",
+          "name": "neutral_recovery"
+        },
+        "recipe_version": 11,
+        "source": {
+          "path": "DSC07402.arw",
+          "sha256": "2cc20448c22411883c860a43d0a5cb6c4fc446d863b0319b98b073ce5014400e",
+          "size_bytes": 24845056
+        }
+      },
+      "source": {
+        "arw": "DSC07402.arw",
+        "jpg": "DSC07402.JPG",
+        "jpg_sha256": "54bb6e6dae243a68b1056569a6a1637c449fb1e689a442a773aefcc1978ade2d"
+      },
+      "variant": "developed"
+    }
+  ],
+  "manifest_version": 1,
+  "source_root": "raw"
+}

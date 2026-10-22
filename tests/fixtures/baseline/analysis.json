@@ -1,0 +1,474 @@
+{
+  "_source_signature": "ff4911aae764f9f319a90ae95b71ad9db23f410b",
+  "analysis_version": 2,
+  "generated_at": "2000-01-01T00:00:00+00:00",
+  "groups": [
+    {
+      "capture_ids": [
+        "DSC07402"
+      ],
+      "confidence": 1.0,
+      "end_at": "2022-11-19T18:19:57",
+      "id": 0,
+      "kind": "single",
+      "raw": {
+        "label": "RAW現像を強く推奨",
+        "level": "strong",
+        "reason_codes": [
+          "night_scene",
+          "high_iso"
+        ],
+        "reasons": [
+          "高感度(ISO 3200)の暗いシーンです。RAWならノイズと階調を作り直せます。",
+          "ISO 3200 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "single_shot",
+          "text": "このシーンで唯一の写真です。"
+        }
+      ],
+      "recommended_capture_id": "DSC07402",
+      "start_at": "2022-11-19T18:19:57",
+      "title": "18:19 単写 1枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07404",
+        "DSC07405"
+      ],
+      "confidence": 0.6,
+      "end_at": "2022-11-19T22:35:13",
+      "id": 1,
+      "kind": "similar",
+      "raw": {
+        "label": "RAW現像を強く推奨",
+        "level": "strong",
+        "reason_codes": [
+          "night_scene",
+          "high_iso"
+        ],
+        "reasons": [
+          "高感度(ISO 6400)の暗いシーンです。RAWならノイズと階調を作り直せます。",
+          "ISO 6400 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "sharpest",
+          "text": "グループ内で最もシャープです。"
+        }
+      ],
+      "recommended_capture_id": "DSC07404",
+      "start_at": "2022-11-19T22:34:14",
+      "title": "22:34 類似 2枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07407"
+      ],
+      "confidence": 1.0,
+      "end_at": "2022-11-19T22:37:54",
+      "id": 2,
+      "kind": "single",
+      "raw": {
+        "label": "RAW現像がおすすめ",
+        "level": "recommended",
+        "reason_codes": [
+          "high_iso"
+        ],
+        "reasons": [
+          "ISO 6400 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "single_shot",
+          "text": "このシーンで唯一の写真です。"
+        }
+      ],
+      "recommended_capture_id": "DSC07407",
+      "start_at": "2022-11-19T22:37:54",
+      "title": "22:37 単写 1枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07408"
+      ],
+      "confidence": 1.0,
+      "end_at": "2022-11-19T22:39:36",
+      "id": 3,
+      "kind": "single",
+      "raw": {
+        "label": "RAW現像がおすすめ",
+        "level": "recommended",
+        "reason_codes": [
+          "high_iso"
+        ],
+        "reasons": [
+          "ISO 6400 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "single_shot",
+          "text": "このシーンで唯一の写真です。"
+        }
+      ],
+      "recommended_capture_id": "DSC07408",
+      "start_at": "2022-11-19T22:39:36",
+      "title": "22:39 単写 1枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07412"
+      ],
+      "confidence": 1.0,
+      "end_at": "2022-11-19T22:43:49",
+      "id": 4,
+      "kind": "single",
+      "raw": {
+        "label": "RAW現像がおすすめ",
+        "level": "recommended",
+        "reason_codes": [
+          "high_iso"
+        ],
+        "reasons": [
+          "ISO 6400 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "single_shot",
+          "text": "このシーンで唯一の写真です。"
+        }
+      ],
+      "recommended_capture_id": "DSC07412",
+      "start_at": "2022-11-19T22:43:49",
+      "title": "22:43 単写 1枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07415",
+        "DSC07416"
+      ],
+      "confidence": 0.6,
+      "end_at": "2022-11-19T22:47:09",
+      "id": 5,
+      "kind": "similar",
+      "raw": {
+        "label": "RAW現像がおすすめ",
+        "level": "recommended",
+        "reason_codes": [
+          "high_iso"
+        ],
+        "reasons": [
+          "ISO 3200 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "sharpest",
+          "text": "グループ内で最もシャープです。"
+        }
+      ],
+      "recommended_capture_id": "DSC07416",
+      "start_at": "2022-11-19T22:46:39",
+      "title": "22:46 類似 2枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07419"
+      ],
+      "confidence": 1.0,
+      "end_at": "2022-11-19T22:50:04",
+      "id": 6,
+      "kind": "single",
+      "raw": {
+        "label": "RAW現像を強く推奨",
+        "level": "strong",
+        "reason_codes": [
+          "night_scene",
+          "high_iso"
+        ],
+        "reasons": [
+          "高感度(ISO 3200)の暗いシーンです。RAWならノイズと階調を作り直せます。",
+          "ISO 3200 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "single_shot",
+          "text": "このシーンで唯一の写真です。"
+        }
+      ],
+      "recommended_capture_id": "DSC07419",
+      "start_at": "2022-11-19T22:50:04",
+      "title": "22:50 単写 1枚"
+    },
+    {
+      "capture_ids": [
+        "DSC07422",
+        "DSC07423"
+      ],
+      "confidence": 0.6,
+      "end_at": "2022-11-19T22:55:52",
+      "id": 7,
+      "kind": "similar",
+      "raw": {
+        "label": "RAW現像がおすすめ",
+        "level": "recommended",
+        "reason_codes": [
+          "high_iso"
+        ],
+        "reasons": [
+          "ISO 3200 と高感度のため、ノイズ低減の効果が大きい写真です。"
+        ]
+      },
+      "recommendation_reasons": [
+        {
+          "code": "sharpest",
+          "text": "グループ内で最もシャープです。"
+        }
+      ],
+      "recommended_capture_id": "DSC07422",
+      "start_at": "2022-11-19T22:54:57",
+      "title": "22:54 類似 2枚"
+    }
+  ],
+  "photos": {
+    "DSC07402": {
+      "capture_id": "DSC07402",
+      "captured_at": "2022-11-19T18:19:57",
+      "exposure_bias": -0.3,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 0.00023,
+      "iso": 3200,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 52.84,
+      "orientation": 1,
+      "overall_score": 100.0,
+      "shadow_clip_ratio": 0.02319,
+      "sharpness_raw": 159.77,
+      "sharpness_score": 100.0,
+      "shutter": 0.07692307692307693,
+      "thumb": "/thumbs/5ac73fc3-DSC07402.webp",
+      "width": 6000
+    },
+    "DSC07404": {
+      "capture_id": "DSC07404",
+      "captured_at": "2022-11-19T22:34:14",
+      "exposure_bias": 0.0,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 0.00011,
+      "iso": 6400,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 33.05,
+      "orientation": 1,
+      "overall_score": 60.0,
+      "shadow_clip_ratio": 0.05467,
+      "sharpness_raw": 266.593,
+      "sharpness_score": 100.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07404.webp",
+      "width": 6000
+    },
+    "DSC07405": {
+      "capture_id": "DSC07405",
+      "captured_at": "2022-11-19T22:35:13",
+      "exposure_bias": 0.0,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 1e-05,
+      "iso": 6400,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 29.43,
+      "orientation": 1,
+      "overall_score": 40.0,
+      "shadow_clip_ratio": 0.05828,
+      "sharpness_raw": 200.965,
+      "sharpness_score": 0.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07405.webp",
+      "width": 6000
+    },
+    "DSC07407": {
+      "capture_id": "DSC07407",
+      "captured_at": "2022-11-19T22:37:54",
+      "exposure_bias": 0.0,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 3e-05,
+      "iso": 6400,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 91.53,
+      "orientation": 1,
+      "overall_score": 100.0,
+      "shadow_clip_ratio": 0.00189,
+      "sharpness_raw": 467.2,
+      "sharpness_score": 100.0,
+      "shutter": 30.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07407.webp",
+      "width": 6000
+    },
+    "DSC07408": {
+      "capture_id": "DSC07408",
+      "captured_at": "2022-11-19T22:39:36",
+      "exposure_bias": 0.0,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 0.00274,
+      "iso": 6400,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 88.27,
+      "orientation": 1,
+      "overall_score": 100.0,
+      "shadow_clip_ratio": 0.00519,
+      "sharpness_raw": 795.433,
+      "sharpness_score": 100.0,
+      "shutter": 30.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07408.webp",
+      "width": 6000
+    },
+    "DSC07412": {
+      "capture_id": "DSC07412",
+      "captured_at": "2022-11-19T22:43:49",
+      "exposure_bias": 0.0,
+      "f_number": 1.4,
+      "focal_length": 30.0,
+      "height": 4000,
+      "highlight_clip_ratio": 0.00031,
+      "iso": 6400,
+      "lens_model": "30mm F1.4 DC DN | Contemporary 016",
+      "mean_luma": 118.7,
+      "orientation": 1,
+      "overall_score": 100.0,
+      "shadow_clip_ratio": 0.0,
+      "sharpness_raw": 696.898,
+      "sharpness_score": 100.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07412.webp",
+      "width": 6000
+    },
+    "DSC07415": {
+      "capture_id": "DSC07415",
+      "captured_at": "2022-11-19T22:46:39",
+      "exposure_bias": 0.0,
+      "f_number": 1.4,
+      "focal_length": 30.0,
+      "height": 4000,
+      "highlight_clip_ratio": 4e-05,
+      "iso": 3200,
+      "lens_model": "30mm F1.4 DC DN | Contemporary 016",
+      "mean_luma": 82.5,
+      "orientation": 1,
+      "overall_score": 40.0,
+      "shadow_clip_ratio": 0.0,
+      "sharpness_raw": 1043.142,
+      "sharpness_score": 0.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07415.webp",
+      "width": 6000
+    },
+    "DSC07416": {
+      "capture_id": "DSC07416",
+      "captured_at": "2022-11-19T22:47:09",
+      "exposure_bias": 0.0,
+      "f_number": 1.6,
+      "focal_length": 30.0,
+      "height": 4000,
+      "highlight_clip_ratio": 5e-05,
+      "iso": 3200,
+      "lens_model": "30mm F1.4 DC DN | Contemporary 016",
+      "mean_luma": 78.03,
+      "orientation": 1,
+      "overall_score": 60.0,
+      "shadow_clip_ratio": 0.0,
+      "sharpness_raw": 1046.203,
+      "sharpness_score": 100.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07416.webp",
+      "width": 6000
+    },
+    "DSC07419": {
+      "capture_id": "DSC07419",
+      "captured_at": "2022-11-19T22:50:04",
+      "exposure_bias": 0.0,
+      "f_number": 2.8,
+      "focal_length": 16.0,
+      "height": 4000,
+      "highlight_clip_ratio": 3e-05,
+      "iso": 3200,
+      "lens_model": "E 16mm F2.8",
+      "mean_luma": 36.62,
+      "orientation": 1,
+      "overall_score": 100.0,
+      "shadow_clip_ratio": 0.00371,
+      "sharpness_raw": 258.113,
+      "sharpness_score": 100.0,
+      "shutter": 20.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07419.webp",
+      "width": 6000
+    },
+    "DSC07422": {
+      "capture_id": "DSC07422",
+      "captured_at": "2022-11-19T22:54:57",
+      "exposure_bias": 0.0,
+      "f_number": 1.4,
+      "focal_length": 30.0,
+      "height": 4000,
+      "highlight_clip_ratio": 0.00013,
+      "iso": 3200,
+      "lens_model": "30mm F1.4 DC DN | Contemporary 016",
+      "mean_luma": 79.22,
+      "orientation": 1,
+      "overall_score": 60.0,
+      "shadow_clip_ratio": 0.0,
+      "sharpness_raw": 1191.789,
+      "sharpness_score": 100.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07422.webp",
+      "width": 6000
+    },
+    "DSC07423": {
+      "capture_id": "DSC07423",
+      "captured_at": "2022-11-19T22:55:52",
+      "exposure_bias": 0.0,
+      "f_number": 1.4,
+      "focal_length": 30.0,
+      "height": 4000,
+      "highlight_clip_ratio": 9e-05,
+      "iso": 3200,
+      "lens_model": "30mm F1.4 DC DN | Contemporary 016",
+      "mean_luma": 93.98,
+      "orientation": 1,
+      "overall_score": 40.0,
+      "shadow_clip_ratio": 0.0,
+      "sharpness_raw": 662.872,
+      "sharpness_score": 0.0,
+      "shutter": 10.0,
+      "thumb": "/thumbs/5ac73fc3-DSC07423.webp",
+      "width": 6000
+    }
+  },
+  "source": {
+    "arw_only": 0,
+    "jpg_only": 0,
+    "pairs": 11,
+    "root": "~/works/60-misc/40-raw-assistant/work/raw",
+    "total_bytes": 440551680
+  },
+  "summary": {
+    "groups": 8,
+    "needs_review": 0,
+    "raw_candidates": 8
+  }
+}

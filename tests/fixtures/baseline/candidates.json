@@ -1,0 +1,2402 @@
+{
+  "pending_missing_root": [
+    {
+      "capture_id": "DSC04267",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC04294",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC02849",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03075",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC02813",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC02754",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03177",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC02947",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03203",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03218",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03791",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03029",
+      "preset": "neutral_recovery",
+      "root": "image_work"
+    },
+    {
+      "capture_id": "DSC03203",
+      "preset": "nightscape",
+      "root": "image_work"
+    }
+  ],
+  "records": [
+    {
+      "case": {
+        "capture_id": "DSC07402",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 6.6e-05,
+              "color_saturation_clip": 6.6e-05,
+              "detail": 0.210113,
+              "detail_halo": 0.107707,
+              "flat_region_noise": 0.007038,
+              "halo": 0.107707,
+              "highlight_clip": 0.000613,
+              "highlight_clipping": 0.000613,
+              "noise_flat": 0.007038,
+              "shadow_clip": 0.170743,
+              "shadow_crushing": 0.170743,
+              "shadow_mean": 0.021799,
+              "source_detail": 0.137393,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.007033,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.561583,
+              "tone_range": 0.561583
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 42.7
+          },
+          {
+            "adjustments": {
+              "brightness": 1.06,
+              "contrast": 0.99,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.02,
+              "shadow_lift": 40.0,
+              "sharpness": 1.03,
+              "wb_temp": -3.0
+            },
+            "description": "暗い前景を持ち上げ、空や明部を過度に壊さない候補",
+            "id": "foreground",
+            "label": "前景を明るく",
+            "metrics": {
+              "baseline_deviation": 0.073706,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.240209,
+              "detail_halo": 0.12096,
+              "flat_region_noise": 0.008403,
+              "halo": 0.12096,
+              "highlight_clip": 0.000723,
+              "highlight_clipping": 0.000723,
+              "noise_flat": 0.008403,
+              "shadow_clip": 0.001146,
+              "shadow_crushing": 0.001146,
+              "shadow_mean": 0.062166,
+              "source_detail": 0.137393,
+              "source_deviation": 0.073706,
+              "source_noise_flat": 0.007008,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.702019,
+              "tone_range": 0.702019
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "暗い前景を持ち上げ、ハイライト回復を併用"
+            ],
+            "score": 49.4
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0557,
+              "contrast": 0.9905,
+              "exposure": -0.5,
+              "highlight_recovery": 85.0,
+              "noise_reduction": "full",
+              "saturation": 1.1407,
+              "shadow_lift": 30.6,
+              "sharpness": 0.9427,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.014053,
+              "color_clip": 0.000146,
+              "color_saturation_clip": 0.000146,
+              "detail": 0.195218,
+              "detail_halo": 0.097908,
+              "flat_region_noise": 0.006554,
+              "halo": 0.097908,
+              "highlight_clip": 0.000493,
+              "highlight_clipping": 0.000493,
+              "noise_flat": 0.006554,
+              "shadow_clip": 0.016611,
+              "shadow_crushing": 0.016611,
+              "shadow_mean": 0.041356,
+              "source_detail": 0.137393,
+              "source_deviation": 0.014053,
+              "source_noise_flat": 0.007078,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.561309,
+              "tone_range": 0.561309
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "平坦な暗部のノイズを基準より抑える設定",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 47.3
+          },
+          {
+            "adjustments": {
+              "brightness": 0.9617,
+              "contrast": 1.0367,
+              "exposure": 0.0,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 1.0864,
+              "shadow_lift": 5.4,
+              "sharpness": 1.1384,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.120078,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.300865,
+              "detail_halo": 0.150375,
+              "flat_region_noise": 0.010556,
+              "halo": 0.150375,
+              "highlight_clip": 0.001267,
+              "highlight_clipping": 0.001267,
+              "noise_flat": 0.010556,
+              "shadow_clip": 0.004089,
+              "shadow_crushing": 0.004089,
+              "shadow_mean": 0.071021,
+              "source_detail": 0.137393,
+              "source_deviation": 0.120078,
+              "source_noise_flat": 0.008276,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.842838,
+              "tone_range": 0.842838
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 56.2
+          }
+        ],
+        "capture_id": "DSC07402",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 13,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 2724743982,
+        "star_scene": {
+          "bright_point_ratio": 0.006502,
+          "dark_background_ratio": 0.590085,
+          "exif_night": false,
+          "exif_state": "daylight",
+          "is_star_scene": false,
+          "star_color_saturation": 0.0,
+          "star_count": 42,
+          "star_halo": 0.0,
+          "star_point_density": null
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07404",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 1.5e-05,
+              "color_saturation_clip": 1.5e-05,
+              "detail": 0.277209,
+              "detail_halo": 0.133805,
+              "flat_region_noise": 0.008675,
+              "halo": 0.133805,
+              "highlight_clip": 0.000336,
+              "highlight_clipping": 0.000336,
+              "noise_flat": 0.008675,
+              "shadow_clip": 0.082944,
+              "shadow_crushing": 0.082944,
+              "shadow_mean": 0.068715,
+              "source_detail": 0.182655,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.009588,
+              "star_color_saturation": 0.070398,
+              "star_count": 31,
+              "star_halo": 0.388193,
+              "tonal_range": 0.290299,
+              "tone_range": 0.290299
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 38.2
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0531,
+              "contrast": 1.0292,
+              "exposure": 0.5,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 0.9844,
+              "shadow_lift": 25.0,
+              "sharpness": 1.0183,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.208467,
+              "color_clip": 0.00011,
+              "color_saturation_clip": 0.00011,
+              "detail": 0.451958,
+              "detail_halo": 0.208375,
+              "flat_region_noise": 0.015176,
+              "halo": 0.208375,
+              "highlight_clip": 0.001442,
+              "highlight_clipping": 0.001442,
+              "noise_flat": 0.015176,
+              "shadow_clip": 0.00042,
+              "shadow_crushing": 0.00042,
+              "shadow_mean": 0.214578,
+              "source_detail": 0.182655,
+              "source_deviation": 0.208467,
+              "source_noise_flat": 0.011922,
+              "star_color_saturation": 0.050703,
+              "star_count": 176,
+              "star_halo": 0.679158,
+              "tonal_range": 0.479681,
+              "tone_range": 0.479681
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな高輝度点を優先（検出目安 176点、基準 31点）"
+            ],
+            "score": 49.5
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 1.5e-05,
+              "color_saturation_clip": 1.5e-05,
+              "detail": 0.277209,
+              "detail_halo": 0.133805,
+              "flat_region_noise": 0.008675,
+              "halo": 0.133805,
+              "highlight_clip": 0.000336,
+              "highlight_clipping": 0.000336,
+              "noise_flat": 0.008675,
+              "shadow_clip": 0.082944,
+              "shadow_crushing": 0.082944,
+              "shadow_mean": 0.068715,
+              "source_detail": 0.182655,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.009588,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.290299,
+              "tone_range": 0.290299
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 38.0
+          },
+          {
+            "adjustments": {
+              "brightness": 0.9848,
+              "contrast": 1.1374,
+              "exposure": 0.5,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 1.1362,
+              "shadow_lift": 2.1,
+              "sharpness": 1.1053,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.09966,
+              "color_clip": 0.000398,
+              "color_saturation_clip": 0.000398,
+              "detail": 0.449343,
+              "detail_halo": 0.214273,
+              "flat_region_noise": 0.01482,
+              "halo": 0.214273,
+              "highlight_clip": 0.001384,
+              "highlight_clipping": 0.001384,
+              "noise_flat": 0.01482,
+              "shadow_clip": 0.070261,
+              "shadow_crushing": 0.070261,
+              "shadow_mean": 0.116608,
+              "source_detail": 0.182655,
+              "source_deviation": 0.09966,
+              "source_noise_flat": 0.011168,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.458048,
+              "tone_range": 0.458048
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 47.9
+          }
+        ],
+        "capture_id": "DSC07404",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 18,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 2150198300,
+        "star_scene": {
+          "bright_point_ratio": 0.001197,
+          "dark_background_ratio": 0.763153,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.070398,
+          "star_count": 31,
+          "star_halo": 0.388193,
+          "star_point_density": 0.003673
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07405",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 4e-06,
+              "color_saturation_clip": 4e-06,
+              "detail": 0.239146,
+              "detail_halo": 0.110304,
+              "flat_region_noise": 0.00775,
+              "halo": 0.110304,
+              "highlight_clip": 2.6e-05,
+              "highlight_clipping": 2.6e-05,
+              "noise_flat": 0.00775,
+              "shadow_clip": 0.084386,
+              "shadow_crushing": 0.084386,
+              "shadow_mean": 0.072174,
+              "source_detail": 0.158641,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.008576,
+              "star_color_saturation": 0.0375,
+              "star_count": 16,
+              "star_halo": 0.287686,
+              "tonal_range": 0.204211,
+              "tone_range": 0.204211
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 35.3
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0904,
+              "contrast": 1.0739,
+              "exposure": 0.5,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 1.003,
+              "shadow_lift": 22.7,
+              "sharpness": 0.9881,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.206125,
+              "color_clip": 3.3e-05,
+              "color_saturation_clip": 3.3e-05,
+              "detail": 0.444138,
+              "detail_halo": 0.206251,
+              "flat_region_noise": 0.015303,
+              "halo": 0.206251,
+              "highlight_clip": 0.000201,
+              "highlight_clipping": 0.000201,
+              "noise_flat": 0.015303,
+              "shadow_clip": 0.004392,
+              "shadow_crushing": 0.004392,
+              "shadow_mean": 0.218169,
+              "source_detail": 0.158641,
+              "source_deviation": 0.206125,
+              "source_noise_flat": 0.009727,
+              "star_color_saturation": 0.026807,
+              "star_count": 316,
+              "star_halo": 0.664887,
+              "tonal_range": 0.398786,
+              "tone_range": 0.398786
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな高輝度点を優先（検出目安 316点、基準 16点）"
+            ],
+            "score": 47.4
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0449,
+              "contrast": 0.9672,
+              "exposure": -0.5,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0049,
+              "shadow_lift": 32.6,
+              "sharpness": 1.014,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.022884,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.229616,
+              "detail_halo": 0.10384,
+              "flat_region_noise": 0.007467,
+              "halo": 0.10384,
+              "highlight_clip": 7e-06,
+              "highlight_clipping": 7e-06,
+              "noise_flat": 0.007467,
+              "shadow_clip": 1.8e-05,
+              "shadow_crushing": 1.8e-05,
+              "shadow_mean": 0.098397,
+              "source_detail": 0.158641,
+              "source_deviation": 0.022884,
+              "source_noise_flat": 0.008591,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.192085,
+              "tone_range": 0.192085
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "平坦な暗部のノイズを基準より抑える設定",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 37.2
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0461,
+              "contrast": 1.1519,
+              "exposure": 0.5,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 1.2532,
+              "shadow_lift": 14.5,
+              "sharpness": 1.0727,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.151905,
+              "color_clip": 8e-05,
+              "color_saturation_clip": 8e-05,
+              "detail": 0.450235,
+              "detail_halo": 0.211737,
+              "flat_region_noise": 0.015382,
+              "halo": 0.211737,
+              "highlight_clip": 0.000263,
+              "highlight_clipping": 0.000263,
+              "noise_flat": 0.015382,
+              "shadow_clip": 0.057068,
+              "shadow_crushing": 0.057068,
+              "shadow_mean": 0.166562,
+              "source_detail": 0.158641,
+              "source_deviation": 0.151905,
+              "source_noise_flat": 0.009587,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.390396,
+              "tone_range": 0.390396
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 45.4
+          }
+        ],
+        "capture_id": "DSC07405",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 15,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 3725421828,
+        "star_scene": {
+          "bright_point_ratio": 0.000139,
+          "dark_background_ratio": 0.980812,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.0375,
+          "star_count": 16,
+          "star_halo": 0.287686,
+          "star_point_density": 0.003052
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07407",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.281518,
+              "detail_halo": 0.141711,
+              "flat_region_noise": 0.008463,
+              "halo": 0.141711,
+              "highlight_clip": 5.1e-05,
+              "highlight_clipping": 5.1e-05,
+              "noise_flat": 0.008463,
+              "shadow_clip": 0.013007,
+              "shadow_crushing": 0.013007,
+              "shadow_mean": 0.23707,
+              "source_detail": 0.184657,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.009395,
+              "star_color_saturation": 0.005293,
+              "star_count": 429,
+              "star_halo": 0.712295,
+              "tonal_range": 0.402848,
+              "tone_range": 0.402848
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 43.7
+          },
+          {
+            "adjustments": {
+              "brightness": 1.02,
+              "contrast": 1.03,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.9677,
+              "shadow_lift": 18.9,
+              "sharpness": 1.0158,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.01672,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.280416,
+              "detail_halo": 0.134247,
+              "flat_region_noise": 0.008624,
+              "halo": 0.134247,
+              "highlight_clip": 5.1e-05,
+              "highlight_clipping": 5.1e-05,
+              "noise_flat": 0.008624,
+              "shadow_clip": 0.002179,
+              "shadow_crushing": 0.002179,
+              "shadow_mean": 0.250059,
+              "source_detail": 0.184657,
+              "source_deviation": 0.01672,
+              "source_noise_flat": 0.009893,
+              "star_color_saturation": 0.009004,
+              "star_count": 354,
+              "star_halo": 0.73157,
+              "tonal_range": 0.409443,
+              "tone_range": 0.409443
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな高輝度点を優先（検出目安 354点、基準 429点）"
+            ],
+            "score": 43.1
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.059168,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.272902,
+              "detail_halo": 0.133377,
+              "flat_region_noise": 0.008313,
+              "halo": 0.133377,
+              "highlight_clip": 5.8e-05,
+              "highlight_clipping": 5.8e-05,
+              "noise_flat": 0.008313,
+              "shadow_clip": 0.000234,
+              "shadow_crushing": 0.000234,
+              "shadow_mean": 0.292547,
+              "source_detail": 0.184657,
+              "source_deviation": 0.059168,
+              "source_noise_flat": 0.009352,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.414742,
+              "tone_range": 0.414742
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 43.8
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0135,
+              "contrast": 1.1631,
+              "exposure": 0.0,
+              "highlight_recovery": 0.0,
+              "noise_reduction": "light",
+              "saturation": 1.0902,
+              "shadow_lift": 23.1,
+              "sharpness": 1.1327,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.205631,
+              "color_clip": 4e-06,
+              "color_saturation_clip": 4e-06,
+              "detail": 0.389115,
+              "detail_halo": 0.185018,
+              "flat_region_noise": 0.012536,
+              "halo": 0.185018,
+              "highlight_clip": 0.002928,
+              "highlight_clipping": 0.002928,
+              "noise_flat": 0.012536,
+              "shadow_clip": 0.009448,
+              "shadow_crushing": 0.009448,
+              "shadow_mean": 0.385161,
+              "source_detail": 0.184657,
+              "source_deviation": 0.205631,
+              "source_noise_flat": 0.010382,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.600432,
+              "tone_range": 0.600432
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 53.6
+          }
+        ],
+        "capture_id": "DSC07407",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 10,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 3831118306,
+        "star_scene": {
+          "bright_point_ratio": 0.006502,
+          "dark_background_ratio": 0.048069,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.005293,
+          "star_count": 429,
+          "star_halo": 0.712295,
+          "star_point_density": 0.006294
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07408",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 7.3e-05,
+              "color_saturation_clip": 7.3e-05,
+              "detail": 0.425102,
+              "detail_halo": 0.23472,
+              "flat_region_noise": 0.012423,
+              "halo": 0.23472,
+              "highlight_clip": 0.004717,
+              "highlight_clipping": 0.004717,
+              "noise_flat": 0.012423,
+              "shadow_clip": 0.024595,
+              "shadow_crushing": 0.024595,
+              "shadow_mean": 0.149029,
+              "source_detail": 0.276096,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.013014,
+              "star_color_saturation": 0.282003,
+              "star_count": 76,
+              "star_halo": 0.550827,
+              "tonal_range": 0.642584,
+              "tone_range": 0.642584
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 50.5
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0167,
+              "contrast": 1.0003,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.0219,
+              "shadow_lift": 12.0,
+              "sharpness": 1.0728,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.009093,
+              "color_clip": 0.000113,
+              "color_saturation_clip": 0.000113,
+              "detail": 0.412496,
+              "detail_halo": 0.223109,
+              "flat_region_noise": 0.012184,
+              "halo": 0.223109,
+              "highlight_clip": 0.004604,
+              "highlight_clipping": 0.004604,
+              "noise_flat": 0.012184,
+              "shadow_clip": 0.000434,
+              "shadow_crushing": 0.000434,
+              "shadow_mean": 0.157509,
+              "source_detail": 0.276096,
+              "source_deviation": 0.009093,
+              "source_noise_flat": 0.013599,
+              "star_color_saturation": 0.271491,
+              "star_count": 73,
+              "star_halo": 0.562069,
+              "tonal_range": 0.622517,
+              "tone_range": 0.622517
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな高輝度点を優先（検出目安 73点、基準 76点）"
+            ],
+            "score": 54.2
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.055267,
+              "color_clip": 4e-05,
+              "color_saturation_clip": 4e-05,
+              "detail": 0.420836,
+              "detail_halo": 0.228199,
+              "flat_region_noise": 0.012368,
+              "halo": 0.228199,
+              "highlight_clip": 0.004976,
+              "highlight_clipping": 0.004976,
+              "noise_flat": 0.012368,
+              "shadow_clip": 0.000358,
+              "shadow_crushing": 0.000358,
+              "shadow_mean": 0.195942,
+              "source_detail": 0.276096,
+              "source_deviation": 0.055267,
+              "source_noise_flat": 0.012899,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.65183,
+              "tone_range": 0.65183
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 50.6
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0232,
+              "contrast": 1.0442,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.0428,
+              "shadow_lift": 24.6,
+              "sharpness": 1.0742,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.030579,
+              "color_clip": 0.000146,
+              "color_saturation_clip": 0.000146,
+              "detail": 0.43667,
+              "detail_halo": 0.235678,
+              "flat_region_noise": 0.012993,
+              "halo": 0.235678,
+              "highlight_clip": 0.005345,
+              "highlight_clipping": 0.005345,
+              "noise_flat": 0.012993,
+              "shadow_clip": 0.007984,
+              "shadow_crushing": 0.007984,
+              "shadow_mean": 0.168213,
+              "source_detail": 0.276096,
+              "source_deviation": 0.030579,
+              "source_noise_flat": 0.013425,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.665588,
+              "tone_range": 0.665588
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 56.2
+          }
+        ],
+        "capture_id": "DSC07408",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 12,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 3711376114,
+        "star_scene": {
+          "bright_point_ratio": 0.006502,
+          "dark_background_ratio": 0.159207,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.282003,
+          "star_count": 76,
+          "star_halo": 0.550827,
+          "star_point_density": 0.00652
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07412",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 2.6e-05,
+              "color_saturation_clip": 2.6e-05,
+              "detail": 0.34443,
+              "detail_halo": 0.18749,
+              "flat_region_noise": 0.009224,
+              "halo": 0.18749,
+              "highlight_clip": 0.0005,
+              "highlight_clipping": 0.0005,
+              "noise_flat": 0.009224,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.365342,
+              "source_detail": 0.224364,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.010874,
+              "star_color_saturation": 0.027719,
+              "star_count": 1355,
+              "star_halo": 0.775964,
+              "tonal_range": 0.268578,
+              "tone_range": 0.268578
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 40.3
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0045,
+              "contrast": 1.031,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.991,
+              "shadow_lift": 18.6,
+              "sharpness": 1.011,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.01095,
+              "color_clip": 1.5e-05,
+              "color_saturation_clip": 1.5e-05,
+              "detail": 0.325011,
+              "detail_halo": 0.168167,
+              "flat_region_noise": 0.008888,
+              "halo": 0.168167,
+              "highlight_clip": 0.000482,
+              "highlight_clipping": 0.000482,
+              "noise_flat": 0.008888,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.374843,
+              "source_detail": 0.224364,
+              "source_deviation": 0.01095,
+              "source_noise_flat": 0.011099,
+              "star_color_saturation": 0.02384,
+              "star_count": 1317,
+              "star_halo": 0.8075,
+              "tonal_range": 0.264938,
+              "tone_range": 0.264938
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな高輝度点を優先（検出目安 1317点、基準 1355点）"
+            ],
+            "score": 40.0
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.058472,
+              "color_clip": 2.9e-05,
+              "color_saturation_clip": 2.9e-05,
+              "detail": 0.315505,
+              "detail_halo": 0.166401,
+              "flat_region_noise": 0.00856,
+              "halo": 0.166401,
+              "highlight_clip": 0.000588,
+              "highlight_clipping": 0.000588,
+              "noise_flat": 0.00856,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.426953,
+              "source_detail": 0.224364,
+              "source_deviation": 0.058472,
+              "source_noise_flat": 0.010816,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.255387,
+              "tone_range": 0.255387
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 39.1
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.16,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.12,
+              "shadow_lift": 12.0,
+              "sharpness": 1.11,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.017061,
+              "color_clip": 0.000179,
+              "color_saturation_clip": 0.000179,
+              "detail": 0.383595,
+              "detail_halo": 0.205888,
+              "flat_region_noise": 0.010482,
+              "halo": 0.205888,
+              "highlight_clip": 0.001059,
+              "highlight_clipping": 0.001059,
+              "noise_flat": 0.010482,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.338913,
+              "source_detail": 0.224364,
+              "source_deviation": 0.017061,
+              "source_noise_flat": 0.011106,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.304648,
+              "tone_range": 0.304648
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 44.0
+          }
+        ],
+        "capture_id": "DSC07412",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 15,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 1071733941,
+        "star_scene": {
+          "bright_point_ratio": 0.006502,
+          "dark_background_ratio": 7e-06,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.027719,
+          "star_count": 1355,
+          "star_halo": 0.775964,
+          "star_point_density": 0.012336
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07415",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 1.8e-05,
+              "color_saturation_clip": 1.8e-05,
+              "detail": 0.360149,
+              "detail_halo": 0.182135,
+              "flat_region_noise": 0.009924,
+              "halo": 0.182135,
+              "highlight_clip": 9.5e-05,
+              "highlight_clipping": 9.5e-05,
+              "noise_flat": 0.009924,
+              "shadow_clip": 7e-06,
+              "shadow_crushing": 7e-06,
+              "shadow_mean": 0.279315,
+              "source_detail": 0.23641,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.012086,
+              "star_color_saturation": 0.033426,
+              "star_count": 359,
+              "star_halo": 0.605154,
+              "tonal_range": 0.187996,
+              "tone_range": 0.187996
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 38.4
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.02,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.98,
+              "shadow_lift": 23.0,
+              "sharpness": 1.0,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.026976,
+              "color_clip": 7e-06,
+              "color_saturation_clip": 7e-06,
+              "detail": 0.341523,
+              "detail_halo": 0.164502,
+              "flat_region_noise": 0.009649,
+              "halo": 0.164502,
+              "highlight_clip": 8.4e-05,
+              "highlight_clipping": 8.4e-05,
+              "noise_flat": 0.009649,
+              "shadow_clip": 4e-06,
+              "shadow_crushing": 4e-06,
+              "shadow_mean": 0.305746,
+              "source_detail": 0.23641,
+              "source_deviation": 0.026976,
+              "source_noise_flat": 0.012315,
+              "star_color_saturation": 0.031081,
+              "star_count": 370,
+              "star_halo": 0.655202,
+              "tonal_range": 0.185886,
+              "tone_range": 0.185886
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな高輝度点を優先（検出目安 370点、基準 359点）"
+            ],
+            "score": 42.0
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.060991,
+              "color_clip": 2.6e-05,
+              "color_saturation_clip": 2.6e-05,
+              "detail": 0.348341,
+              "detail_halo": 0.171617,
+              "flat_region_noise": 0.00979,
+              "halo": 0.171617,
+              "highlight_clip": 0.000117,
+              "highlight_clipping": 0.000117,
+              "noise_flat": 0.00979,
+              "shadow_clip": 4e-06,
+              "shadow_crushing": 4e-06,
+              "shadow_mean": 0.339453,
+              "source_detail": 0.23641,
+              "source_deviation": 0.060991,
+              "source_noise_flat": 0.011999,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.187143,
+              "tone_range": 0.187143
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 37.6
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.16,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.12,
+              "shadow_lift": 12.0,
+              "sharpness": 1.11,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.029946,
+              "color_clip": 9.1e-05,
+              "color_saturation_clip": 9.1e-05,
+              "detail": 0.398185,
+              "detail_halo": 0.201335,
+              "flat_region_noise": 0.011104,
+              "halo": 0.201335,
+              "highlight_clip": 0.000256,
+              "highlight_clipping": 0.000256,
+              "noise_flat": 0.011104,
+              "shadow_clip": 5.8e-05,
+              "shadow_crushing": 5.8e-05,
+              "shadow_mean": 0.243358,
+              "source_detail": 0.23641,
+              "source_deviation": 0.029946,
+              "source_noise_flat": 0.012328,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.210424,
+              "tone_range": 0.210424
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 40.8
+          }
+        ],
+        "capture_id": "DSC07415",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 12,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 93836317,
+        "star_scene": {
+          "bright_point_ratio": 0.00138,
+          "dark_background_ratio": 0.000409,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.033426,
+          "star_count": 359,
+          "star_halo": 0.605154,
+          "star_point_density": 0.013661
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07416",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 1.5e-05,
+              "color_saturation_clip": 1.5e-05,
+              "detail": 0.355812,
+              "detail_halo": 0.181839,
+              "flat_region_noise": 0.009792,
+              "halo": 0.181839,
+              "highlight_clip": 7.7e-05,
+              "highlight_clipping": 7.7e-05,
+              "noise_flat": 0.009792,
+              "shadow_clip": 7e-06,
+              "shadow_crushing": 7e-06,
+              "shadow_mean": 0.272412,
+              "source_detail": 0.23326,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.011862,
+              "star_color_saturation": 0.036058,
+              "star_count": 312,
+              "star_halo": 0.574366,
+              "tonal_range": 0.171947,
+              "tone_range": 0.171947
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 37.8
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.02,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.98,
+              "shadow_lift": 23.0,
+              "sharpness": 1.0,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.027017,
+              "color_clip": 4e-06,
+              "color_saturation_clip": 4e-06,
+              "detail": 0.33946,
+              "detail_halo": 0.165631,
+              "flat_region_noise": 0.009573,
+              "halo": 0.165631,
+              "highlight_clip": 6.2e-05,
+              "highlight_clipping": 6.2e-05,
+              "noise_flat": 0.009573,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.298865,
+              "source_detail": 0.23326,
+              "source_deviation": 0.027017,
+              "source_noise_flat": 0.012037,
+              "star_color_saturation": 0.036604,
+              "star_count": 321,
+              "star_halo": 0.622323,
+              "tonal_range": 0.169751,
+              "tone_range": 0.169751
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな高輝度点を優先（検出目安 321点、基準 312点）"
+            ],
+            "score": 42.2
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.060876,
+              "color_clip": 1.8e-05,
+              "color_saturation_clip": 1.8e-05,
+              "detail": 0.346382,
+              "detail_halo": 0.172583,
+              "flat_region_noise": 0.009717,
+              "halo": 0.172583,
+              "highlight_clip": 8e-05,
+              "highlight_clipping": 8e-05,
+              "noise_flat": 0.009717,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.332244,
+              "source_detail": 0.23326,
+              "source_deviation": 0.060876,
+              "source_noise_flat": 0.011763,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.171633,
+              "tone_range": 0.171633
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 37.1
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0233,
+              "contrast": 1.1587,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.1207,
+              "shadow_lift": 12.8,
+              "sharpness": 1.1116,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.023733,
+              "color_clip": 9.9e-05,
+              "color_saturation_clip": 9.9e-05,
+              "detail": 0.398946,
+              "detail_halo": 0.204378,
+              "flat_region_noise": 0.011117,
+              "halo": 0.204378,
+              "highlight_clip": 0.000274,
+              "highlight_clipping": 0.000274,
+              "noise_flat": 0.011117,
+              "shadow_clip": 5.1e-05,
+              "shadow_crushing": 5.1e-05,
+              "shadow_mean": 0.24288,
+              "source_detail": 0.23326,
+              "source_deviation": 0.023733,
+              "source_noise_flat": 0.012059,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.194362,
+              "tone_range": 0.194362
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 40.2
+          }
+        ],
+        "capture_id": "DSC07416",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 14,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 1346964748,
+        "star_scene": {
+          "bright_point_ratio": 0.001201,
+          "dark_background_ratio": 0.000504,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.036058,
+          "star_count": 312,
+          "star_halo": 0.574366,
+          "star_point_density": 0.013383
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07419",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.221642,
+              "detail_halo": 0.116345,
+              "flat_region_noise": 0.006722,
+              "halo": 0.116345,
+              "highlight_clip": 2.9e-05,
+              "highlight_clipping": 2.9e-05,
+              "noise_flat": 0.006722,
+              "shadow_clip": 0.008086,
+              "shadow_crushing": 0.008086,
+              "shadow_mean": 0.120393,
+              "source_detail": 0.145164,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.007371,
+              "star_color_saturation": 0.046296,
+              "star_count": 45,
+              "star_halo": 0.35069,
+              "tonal_range": 0.168296,
+              "tone_range": 0.168296
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 36.1
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0714,
+              "contrast": 1.0047,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.9724,
+              "shadow_lift": 19.1,
+              "sharpness": 0.9979,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.029285,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.234395,
+              "detail_halo": 0.118182,
+              "flat_region_noise": 0.007246,
+              "halo": 0.118182,
+              "highlight_clip": 2.9e-05,
+              "highlight_clipping": 2.9e-05,
+              "noise_flat": 0.007246,
+              "shadow_clip": 0.000548,
+              "shadow_crushing": 0.000548,
+              "shadow_mean": 0.147239,
+              "source_detail": 0.145164,
+              "source_deviation": 0.029285,
+              "source_noise_flat": 0.00772,
+              "star_color_saturation": 0.053819,
+              "star_count": 48,
+              "star_halo": 0.396292,
+              "tonal_range": 0.175924,
+              "tone_range": 0.175924
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "暗部の黒つぶれを基準より抑えて階調を残す",
+              "小さな高輝度点を優先（検出目安 48点、基準 45点）",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 46.5
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.221642,
+              "detail_halo": 0.116345,
+              "flat_region_noise": 0.006722,
+              "halo": 0.116345,
+              "highlight_clip": 2.9e-05,
+              "highlight_clipping": 2.9e-05,
+              "noise_flat": 0.006722,
+              "shadow_clip": 0.008086,
+              "shadow_crushing": 0.008086,
+              "shadow_mean": 0.120393,
+              "source_detail": 0.145164,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.007371,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.168296,
+              "tone_range": 0.168296
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定",
+              "細部の強調によるハローを監視"
+            ],
+            "score": 36.0
+          },
+          {
+            "adjustments": {
+              "brightness": 1.0959,
+              "contrast": 1.2401,
+              "exposure": 0.5,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.0255,
+              "shadow_lift": 27.7,
+              "sharpness": 1.1777,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.055366,
+              "color_clip": 7.3e-05,
+              "color_saturation_clip": 7.3e-05,
+              "detail": 0.35798,
+              "detail_halo": 0.186103,
+              "flat_region_noise": 0.011298,
+              "halo": 0.186103,
+              "highlight_clip": 0.000215,
+              "highlight_clipping": 0.000215,
+              "noise_flat": 0.011298,
+              "shadow_clip": 0.012186,
+              "shadow_crushing": 0.012186,
+              "shadow_mean": 0.146695,
+              "source_detail": 0.145164,
+              "source_deviation": 0.055366,
+              "source_noise_flat": 0.007738,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.263714,
+              "tone_range": 0.263714
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 41.6
+          }
+        ],
+        "capture_id": "DSC07419",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 15,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 1932055730,
+        "star_scene": {
+          "bright_point_ratio": 0.000212,
+          "dark_background_ratio": 0.833192,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.046296,
+          "star_count": 45,
+          "star_halo": 0.35069,
+          "star_point_density": 0.003574
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07422",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.391088,
+              "detail_halo": 0.217288,
+              "flat_region_noise": 0.01078,
+              "halo": 0.217288,
+              "highlight_clip": 6.9e-05,
+              "highlight_clipping": 6.9e-05,
+              "noise_flat": 0.01078,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.269567,
+              "source_detail": 0.254658,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.012521,
+              "star_color_saturation": 0.010145,
+              "star_count": 690,
+              "star_halo": 0.595614,
+              "tonal_range": 0.206392,
+              "tone_range": 0.206392
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 38.8
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.02,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.98,
+              "shadow_lift": 23.0,
+              "sharpness": 1.0,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.027142,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.373015,
+              "detail_halo": 0.197297,
+              "flat_region_noise": 0.010509,
+              "halo": 0.197297,
+              "highlight_clip": 5.1e-05,
+              "highlight_clipping": 5.1e-05,
+              "noise_flat": 0.010509,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.295636,
+              "source_detail": 0.254658,
+              "source_deviation": 0.027142,
+              "source_noise_flat": 0.012604,
+              "star_color_saturation": 0.006944,
+              "star_count": 696,
+              "star_halo": 0.64461,
+              "tonal_range": 0.203023,
+              "tone_range": 0.203023
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな高輝度点を優先（検出目安 696点、基準 690点）"
+            ],
+            "score": 42.9
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.060807,
+              "color_clip": 0.0,
+              "color_saturation_clip": 0.0,
+              "detail": 0.378376,
+              "detail_halo": 0.203889,
+              "flat_region_noise": 0.010615,
+              "halo": 0.203889,
+              "highlight_clip": 7.3e-05,
+              "highlight_clipping": 7.3e-05,
+              "noise_flat": 0.010615,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.32925,
+              "source_detail": 0.254658,
+              "source_deviation": 0.060807,
+              "source_noise_flat": 0.012386,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.204424,
+              "tone_range": 0.204424
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 38.0
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.16,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.12,
+              "shadow_lift": 12.0,
+              "sharpness": 1.11,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.031114,
+              "color_clip": 2.2e-05,
+              "color_saturation_clip": 2.2e-05,
+              "detail": 0.434609,
+              "detail_halo": 0.240958,
+              "flat_region_noise": 0.012085,
+              "halo": 0.240958,
+              "highlight_clip": 0.000215,
+              "highlight_clipping": 0.000215,
+              "noise_flat": 0.012085,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.23234,
+              "source_detail": 0.254658,
+              "source_deviation": 0.031114,
+              "source_noise_flat": 0.012674,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.230702,
+              "tone_range": 0.230702
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 41.4
+          }
+        ],
+        "capture_id": "DSC07422",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 10,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 3387070985,
+        "star_scene": {
+          "bright_point_ratio": 0.003118,
+          "dark_background_ratio": 0.0008,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.010145,
+          "star_count": 690,
+          "star_halo": 0.595614,
+          "star_point_density": 0.014019
+        }
+      }
+    },
+    {
+      "case": {
+        "capture_id": "DSC07423",
+        "preset": "nightscape",
+        "root": "stars"
+      },
+      "result": {
+        "budget": 48,
+        "candidates": [
+          {
+            "adjustments": {
+              "brightness": 1.0,
+              "contrast": 1.04,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 15.0,
+              "sharpness": 1.02,
+              "wb_temp": -3.0
+            },
+            "description": "プリセット値のままの基準候補（他の候補との比較の基準）",
+            "id": "natural",
+            "label": "自然",
+            "metrics": {
+              "baseline_deviation": 0.0,
+              "color_clip": 2.9e-05,
+              "color_saturation_clip": 2.9e-05,
+              "detail": 0.296641,
+              "detail_halo": 0.154086,
+              "flat_region_noise": 0.00808,
+              "halo": 0.154086,
+              "highlight_clip": 0.00015,
+              "highlight_clipping": 0.00015,
+              "noise_flat": 0.00808,
+              "shadow_clip": 1.1e-05,
+              "shadow_crushing": 1.1e-05,
+              "shadow_mean": 0.302376,
+              "source_detail": 0.19422,
+              "source_deviation": 0.0,
+              "source_noise_flat": 0.009774,
+              "star_color_saturation": 0.033298,
+              "star_count": 347,
+              "star_halo": 0.661285,
+              "tonal_range": 0.207012,
+              "tone_range": 0.207012
+            },
+            "reasons": [
+              "プリセット値のままの基準候補（他候補はこの画像と比較）"
+            ],
+            "score": 38.3
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.02,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 0.98,
+              "shadow_lift": 23.0,
+              "sharpness": 1.0,
+              "wb_temp": -3.0
+            },
+            "description": "星を残しながら暗い背景の階調と星色を守る候補",
+            "id": "stars",
+            "label": "星空",
+            "metrics": {
+              "baseline_deviation": 0.027595,
+              "color_clip": 2.2e-05,
+              "color_saturation_clip": 2.2e-05,
+              "detail": 0.280406,
+              "detail_halo": 0.138392,
+              "flat_region_noise": 0.007816,
+              "halo": 0.138392,
+              "highlight_clip": 0.000139,
+              "highlight_clipping": 0.000139,
+              "noise_flat": 0.007816,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.329649,
+              "source_detail": 0.19422,
+              "source_deviation": 0.027595,
+              "source_noise_flat": 0.009932,
+              "star_color_saturation": 0.029015,
+              "star_count": 361,
+              "star_halo": 0.712007,
+              "tonal_range": 0.205672,
+              "tone_range": 0.205672
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな高輝度点を優先（検出目安 361点、基準 347点）"
+            ],
+            "score": 40.6
+          },
+          {
+            "adjustments": {
+              "brightness": 1.03,
+              "contrast": 1.0,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "full",
+              "saturation": 1.0,
+              "shadow_lift": 30.0,
+              "sharpness": 0.93,
+              "wb_temp": -3.0
+            },
+            "description": "平坦な暗部のノイズを抑え、細部を残す候補",
+            "id": "low_noise",
+            "label": "低ノイズ",
+            "metrics": {
+              "baseline_deviation": 0.061152,
+              "color_clip": 2.9e-05,
+              "color_saturation_clip": 2.9e-05,
+              "detail": 0.283226,
+              "detail_halo": 0.143278,
+              "flat_region_noise": 0.00784,
+              "halo": 0.143278,
+              "highlight_clip": 0.000153,
+              "highlight_clipping": 0.000153,
+              "noise_flat": 0.00784,
+              "shadow_clip": 0.0,
+              "shadow_crushing": 0.0,
+              "shadow_mean": 0.363349,
+              "source_detail": 0.19422,
+              "source_deviation": 0.061152,
+              "source_noise_flat": 0.009682,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.20491,
+              "tone_range": 0.20491
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "平坦な暗部のノイズを基準より抑える設定"
+            ],
+            "score": 37.5
+          },
+          {
+            "adjustments": {
+              "brightness": 1.01,
+              "contrast": 1.16,
+              "exposure": 0.0,
+              "highlight_recovery": 55.0,
+              "noise_reduction": "light",
+              "saturation": 1.12,
+              "shadow_lift": 12.0,
+              "sharpness": 1.11,
+              "wb_temp": -3.0
+            },
+            "description": "小さな画面でも見やすいコントラストと色に寄せた候補",
+            "id": "social",
+            "label": "SNS向け",
+            "metrics": {
+              "baseline_deviation": 0.024765,
+              "color_clip": 9.1e-05,
+              "color_saturation_clip": 9.1e-05,
+              "detail": 0.329944,
+              "detail_halo": 0.170503,
+              "flat_region_noise": 0.009134,
+              "halo": 0.170503,
+              "highlight_clip": 0.00027,
+              "highlight_clipping": 0.00027,
+              "noise_flat": 0.009134,
+              "shadow_clip": 3.3e-05,
+              "shadow_crushing": 3.3e-05,
+              "shadow_mean": 0.269619,
+              "source_detail": 0.19422,
+              "source_deviation": 0.024765,
+              "source_noise_flat": 0.009962,
+              "star_color_saturation": 0.0,
+              "star_count": 0,
+              "star_halo": 0.0,
+              "tonal_range": 0.233628,
+              "tone_range": 0.233628
+            },
+            "reasons": [
+              "明部の白飛びを基準より増やさない範囲で調整",
+              "小さな表示でも見やすいコントラストと彩度"
+            ],
+            "score": 41.0
+          }
+        ],
+        "capture_id": "DSC07423",
+        "preset": "nightscape",
+        "proxy": {
+          "decode_edge": 1280,
+          "decodes": 12,
+          "height": 428,
+          "max_edge": 640,
+          "source": "raw_half",
+          "width": 640
+        },
+        "rejected": [],
+        "seed": 2169001728,
+        "star_scene": {
+          "bright_point_ratio": 0.001482,
+          "dark_background_ratio": 7.7e-05,
+          "exif_night": true,
+          "exif_state": "night",
+          "is_star_scene": true,
+          "star_color_saturation": 0.033298,
+          "star_count": 347,
+          "star_halo": 0.661285,
+          "star_point_density": 0.010021
+        }
+      }
+    }
+  ]
+}

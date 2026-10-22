@@ -1,0 +1,475 @@
+{
+  "images": [
+    {
+      "exif": {
+        "exposure_time": 20.0,
+        "f_number": 2.8,
+        "iso": 3200
+      },
+      "input": "gradient.png",
+      "metrics": {
+        "False": {
+          "baseline_deviation": 0.086907,
+          "color_clip": 0.132812,
+          "color_saturation_clip": 0.132812,
+          "detail": 0.081564,
+          "detail_halo": 0.005967,
+          "flat_region_noise": 0.001141,
+          "halo": 0.005967,
+          "highlight_clip": 0.322808,
+          "highlight_clipping": 0.322808,
+          "noise_flat": 0.001141,
+          "shadow_clip": 0.041233,
+          "shadow_crushing": 0.041233,
+          "shadow_mean": 0.581592,
+          "source_detail": 0.053701,
+          "source_deviation": 0.086907,
+          "source_noise_flat": 0.001606,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 1.0,
+          "tone_range": 1.0
+        },
+        "True": {
+          "baseline_deviation": 0.086907,
+          "color_clip": 0.132812,
+          "color_saturation_clip": 0.132812,
+          "detail": 0.081564,
+          "detail_halo": 0.005967,
+          "flat_region_noise": 0.001141,
+          "halo": 0.005967,
+          "highlight_clip": 0.322808,
+          "highlight_clipping": 0.322808,
+          "noise_flat": 0.001141,
+          "shadow_clip": 0.041233,
+          "shadow_crushing": 0.041233,
+          "shadow_mean": 0.581592,
+          "source_detail": 0.053701,
+          "source_deviation": 0.086907,
+          "source_noise_flat": 0.001606,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 1.0,
+          "tone_range": 1.0
+        }
+      },
+      "sha256": "4d27a8683df55c7e0fa66a623622984b348d7c3d3d683487f50b218bd9c6c9fa",
+      "star_measurements": {
+        "bright_point_ratio": 0.00651,
+        "dark_background_ratio": 0.112305,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "star_ungated": {
+        "bright_point_ratio": 0.00651,
+        "dark_background_ratio": 0.112305,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "transform": {
+        "clip": [
+          0,
+          1
+        ],
+        "multiply_float32": 1.2
+      }
+    },
+    {
+      "exif": {
+        "exposure_time": 20.0,
+        "f_number": 2.8,
+        "iso": 3200
+      },
+      "input": "stars.png",
+      "metrics": {
+        "False": {
+          "baseline_deviation": 0.007641,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.417982,
+          "detail_halo": 0.500803,
+          "flat_region_noise": 0.018955,
+          "halo": 0.500803,
+          "highlight_clip": 0.003798,
+          "highlight_clipping": 0.003798,
+          "noise_flat": 0.018955,
+          "shadow_clip": 0.0,
+          "shadow_crushing": 0.0,
+          "shadow_mean": 0.047436,
+          "source_detail": 0.222086,
+          "source_deviation": 0.007641,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 0.239825,
+          "tone_range": 0.239825
+        },
+        "True": {
+          "baseline_deviation": 0.007641,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.417982,
+          "detail_halo": 0.500803,
+          "flat_region_noise": 0.018955,
+          "halo": 0.500803,
+          "highlight_clip": 0.003798,
+          "highlight_clipping": 0.003798,
+          "noise_flat": 0.018955,
+          "shadow_clip": 0.0,
+          "shadow_crushing": 0.0,
+          "shadow_mean": 0.047436,
+          "source_detail": 0.222086,
+          "source_deviation": 0.007641,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 1.0,
+          "star_count": 35,
+          "star_halo": 0.262053,
+          "tonal_range": 0.239825,
+          "tone_range": 0.239825
+        }
+      },
+      "sha256": "28dbfe687683ee12b3ffa97890459d783b1b1ea130dbac54e0faa94e84b689be",
+      "star_measurements": {
+        "bright_point_ratio": 0.003798,
+        "dark_background_ratio": 0.96582,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 35,
+        "star_halo": 0.0,
+        "star_point_density": 0.0
+      },
+      "star_ungated": {
+        "bright_point_ratio": 0.003798,
+        "dark_background_ratio": 0.96582,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 1.0,
+        "star_count": 35,
+        "star_halo": 0.218377,
+        "star_point_density": null
+      },
+      "transform": {
+        "clip": [
+          0,
+          1
+        ],
+        "multiply_float32": 1.2
+      }
+    },
+    {
+      "exif": {
+        "exposure_time": 20.0,
+        "f_number": 2.8,
+        "iso": 3200
+      },
+      "input": "checker.png",
+      "metrics": {
+        "False": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 1.0,
+          "detail_halo": 1.0,
+          "flat_region_noise": 0.286216,
+          "halo": 1.0,
+          "highlight_clip": 0.5,
+          "highlight_clipping": 0.5,
+          "noise_flat": 0.286216,
+          "shadow_clip": 0.5,
+          "shadow_crushing": 0.5,
+          "shadow_mean": 0.5,
+          "source_detail": 1.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 1.0,
+          "tone_range": 1.0
+        },
+        "True": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 1.0,
+          "detail_halo": 1.0,
+          "flat_region_noise": 0.286216,
+          "halo": 1.0,
+          "highlight_clip": 0.5,
+          "highlight_clipping": 0.5,
+          "noise_flat": 0.286216,
+          "shadow_clip": 0.5,
+          "shadow_crushing": 0.5,
+          "shadow_mean": 0.5,
+          "source_detail": 1.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 1.0,
+          "tone_range": 1.0
+        }
+      },
+      "sha256": "cde410a9e16e57f3544460a75b52555575bb39375da2bd41288dc185f1c75940",
+      "star_measurements": {
+        "bright_point_ratio": 0.5,
+        "dark_background_ratio": 0.5,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "star_ungated": {
+        "bright_point_ratio": 0.5,
+        "dark_background_ratio": 0.5,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "transform": {
+        "clip": [
+          0,
+          1
+        ],
+        "multiply_float32": 1.2
+      }
+    },
+    {
+      "exif": {
+        "exposure_time": 20.0,
+        "f_number": 2.8,
+        "iso": 3200
+      },
+      "input": "black.png",
+      "metrics": {
+        "False": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.0,
+          "detail_halo": 0.0,
+          "flat_region_noise": 0.0,
+          "halo": 0.0,
+          "highlight_clip": 0.0,
+          "highlight_clipping": 0.0,
+          "noise_flat": 0.0,
+          "shadow_clip": 1.0,
+          "shadow_crushing": 1.0,
+          "shadow_mean": 0.0,
+          "source_detail": 0.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 0.0,
+          "tone_range": 0.0
+        },
+        "True": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.0,
+          "detail_halo": 0.0,
+          "flat_region_noise": 0.0,
+          "halo": 0.0,
+          "highlight_clip": 0.0,
+          "highlight_clipping": 0.0,
+          "noise_flat": 0.0,
+          "shadow_clip": 1.0,
+          "shadow_crushing": 1.0,
+          "shadow_mean": 0.0,
+          "source_detail": 0.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 0.0,
+          "tone_range": 0.0
+        }
+      },
+      "sha256": "131cafd494ec4060eeb45d47a8c701b14c4771ccf349c5b1afe67bf11610913e",
+      "star_measurements": {
+        "bright_point_ratio": 0.0,
+        "dark_background_ratio": 1.0,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": 0.0
+      },
+      "star_ungated": {
+        "bright_point_ratio": 0.0,
+        "dark_background_ratio": 1.0,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "transform": {
+        "clip": [
+          0,
+          1
+        ],
+        "multiply_float32": 1.2
+      }
+    },
+    {
+      "exif": {
+        "exposure_time": 20.0,
+        "f_number": 2.8,
+        "iso": 3200
+      },
+      "input": "white.png",
+      "metrics": {
+        "False": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.0,
+          "detail_halo": 0.0,
+          "flat_region_noise": 0.0,
+          "halo": 0.0,
+          "highlight_clip": 1.0,
+          "highlight_clipping": 1.0,
+          "noise_flat": 0.0,
+          "shadow_clip": 0.0,
+          "shadow_crushing": 0.0,
+          "shadow_mean": 1.0,
+          "source_detail": 0.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 0.0,
+          "tone_range": 0.0
+        },
+        "True": {
+          "baseline_deviation": 0.0,
+          "color_clip": 0.0,
+          "color_saturation_clip": 0.0,
+          "detail": 0.0,
+          "detail_halo": 0.0,
+          "flat_region_noise": 0.0,
+          "halo": 0.0,
+          "highlight_clip": 1.0,
+          "highlight_clipping": 1.0,
+          "noise_flat": 0.0,
+          "shadow_clip": 0.0,
+          "shadow_crushing": 0.0,
+          "shadow_mean": 1.0,
+          "source_detail": 0.0,
+          "source_deviation": 0.0,
+          "source_noise_flat": 0.0,
+          "star_color_saturation": 0.0,
+          "star_count": 0,
+          "star_halo": 0.0,
+          "tonal_range": 0.0,
+          "tone_range": 0.0
+        }
+      },
+      "sha256": "6bc593c1ff7a4bba829536ec2859e69e48a36dfdf51b84fc21cc52fcdd2f1cb7",
+      "star_measurements": {
+        "bright_point_ratio": 1.0,
+        "dark_background_ratio": 0.0,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "star_ungated": {
+        "bright_point_ratio": 1.0,
+        "dark_background_ratio": 0.0,
+        "exif_night": true,
+        "exif_state": "night",
+        "is_star_scene": false,
+        "star_color_saturation": 0.0,
+        "star_count": 0,
+        "star_halo": 0.0,
+        "star_point_density": null
+      },
+      "transform": {
+        "clip": [
+          0,
+          1
+        ],
+        "multiply_float32": 1.2
+      }
+    }
+  ],
+  "pareto": [
+    {
+      "indices": [
+        0,
+        1,
+        2,
+        4
+      ],
+      "points": [
+        [
+          0.0,
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          1.0,
+          0.0
+        ],
+        [
+          2.0,
+          2.0,
+          2.0
+        ],
+        [
+          0.0,
+          1.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "indices": [],
+      "points": []
+    }
+  ]
+}
