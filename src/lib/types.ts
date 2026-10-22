@@ -52,14 +52,14 @@ export type NoiseReduction = "off" | "light" | "full";
  * DevelopedResult.adjustments は解決後の全量が返る。
  */
 export type Adjustments = {
-  /** EV -2.0..+2.0 → rawpy exp_shift = clamp(2**ev, 0.25, 8) */
+  /** EV -2.0..+2.0。Core Image の露出補正。 */
   exposure: number;
   /** -100..100。camera_whitebalance の R/B ゲインをスケールし user_wb へ */
   wb_temp: number;
   /** 0..100。256エントリLUT（下半分中心の持ち上げ） */
   shadow_lift: number;
   /**
-   * 0..100。rawpy: exp_preserve_highlights 0.4..1.0、>=75 で HighlightMode.Reconstruct（明るさは変えない）。
+   * 0..100。
    * Core Image（CLI 0.6.0、#81）: 区分線形の写像 0 → (0EV, 0)、60 → (−0.7EV, +40)、90 → (−1.0EV, +55)、
    * 100 → (−1.1EV, +60) を exposure / shadow_lift に加算する（露出を下げて暗部を戻す）。
    */
@@ -261,10 +261,10 @@ export type DevelopedResult = {
   capture_id: CaptureId;
   preset: PresetName;
   preset_label: string;
-  /** {capture_id}-{preset}-{hash10}.jpg */
+  /** Core Image: {capture_id}_{hash16}.jpg。 */
   filename: string;
   recipe_filename: string;
-  /** sha1(canonical JSON)[:10]。キャッシュ判定はレシピJSON内のこの値の完全一致で行う。 */
+  /** キャッシュ鍵 hash16 の先頭10文字（表示用）。出力ファイル名には全16文字を含む。 */
   params_hash: string;
   /** 解決後の全量 */
   adjustments: Adjustments;
@@ -276,18 +276,17 @@ export type DevelopedResult = {
   lens_correction: LensCorrection;
   exif_inherited: boolean;
   /**
-   * 配信URL。キャッシュバスター `?v=<st_mtime_ns>` が付いた完全URLである。
+   * 配信URL。キャッシュ鍵をファイル名に含む asset プロトコルの完全URL。
    * そのまま <img src> に渡すこと。パスとして再構成してはならない。
    */
   output_url: string;
   /**
-   * 現像したエンジン（凍結後の任意フィールド追加、#72）。Python 由来は未設定（= rawpy）。
-   * Tauri の Core Image プレビューでは "coreimage" が入る。
+   * 現像したエンジン。プレビュー・本現像とも "coreimage"。既存の保存結果では未設定の場合がある。
    */
   engine?: DevelopEngine;
   /**
    * Core Image で highlight_recovery を exposure / shadow_lift へ写像した結果（凍結後の任意フィールド追加、#81）。
-   * CLI 応答 `adjustments_applied.highlight_recovery` の写し。rawpy・CLI 0.5.0 以前では未設定。
+   * CLI 応答 `adjustments_applied.highlight_recovery` の写し。CLI 0.5.0 以前では未設定。
    */
   highlight_recovery_effect?: HighlightRecoveryEffect;
 };
@@ -303,7 +302,7 @@ export type HighlightRecoveryEffect = {
 };
 
 /** 現像エンジン（凍結後の追加、#72）。 */
-export type DevelopEngine = "rawpy" | "coreimage";
+export type DevelopEngine = "coreimage";
 
 // ---------------------------------------------------------------------------
 // 現像候補（M3 まで隠している）— RAW縮小デコード代理による現像候補

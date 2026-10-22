@@ -13,9 +13,9 @@ import {
   coreImageErrorMessage,
   engineInfoLabel,
   getEngineInfo,
-  previewEngine,
+  developFullCoreImage,
+  developPreviewCoreImage,
   resolveAdjustments,
-  shouldFallbackToRawpy,
   toDevelopedResult,
   type CoreImagePreviewResult,
 } from "./coreimage-api";
@@ -45,6 +45,8 @@ function ciResult(overrides: Partial<CoreImagePreviewResult> = {}): CoreImagePre
     height: 1600,
     elapsed_ms: { decode: 900, render_encode: 400, total: 1316 },
     cache_hit: false,
+    preview: true,
+    exif_inherited: false,
     params_hash: "0123456789abcdef",
     decoder_version: "9",
     cli_version: "0.3.0",
@@ -138,57 +140,6 @@ describe("toDevelopedResult", () => {
   });
 });
 
-describe("shouldFallbackToRawpy（§2.6）", () => {
-  const fallback = [
-    "SIDECAR_NOT_FOUND",
-    "SIDECAR_SPAWN_FAILED",
-    "SIDECAR_TIMEOUT",
-    "SIDECAR_IO_FAILED",
-    "SIDECAR_BAD_RESPONSE",
-    "UNSUPPORTED_RAW",
-    "UNSUPPORTED_DECODER_VERSION",
-    "RENDER_FAILED",
-    "WRITE_FAILED",
-    "OUTPUT_DIR_FAILED",
-    "PROVENANCE_WRITE_FAILED",
-    "APP_DATA_DIR_UNAVAILABLE",
-    "INTERNAL_ERROR",
-    // Python は設定が無い・壊れている・フォルダが無いと既定フォルダへ逃がすので rawpy で救える。
-    "SOURCE_ROOT_NOT_CONFIGURED",
-    "CONFIG_INVALID",
-    "CONFIG_UNREADABLE",
-    "SOURCE_ROOT_NOT_FOUND",
-    // CLI の入力・出力先チェック。
-    "INPUT_NOT_FOUND",
-    "INPUT_NOT_READABLE",
-    "OUTPUT_DIR_NOT_FOUND",
-  ];
-  const display = [
-    "BUSY",
-    "INVALID_REQUEST",
-    "ADJUSTMENTS_INVALID",
-    "INVALID_CAPTURE_ID",
-    "ARW_NOT_FOUND",
-    "ARW_OUTSIDE_SOURCE_ROOT",
-    "SOMETHING_NEW",
-  ];
-
-  it.each(fallback)("インフラ系 %s は rawpy へフォールバックする", (code) => {
-    expect(shouldFallbackToRawpy({ code, message: "m" })).toBe(true);
-  });
-
-  it.each(display)("%s はフォールバックせず表示する", (code) => {
-    expect(shouldFallbackToRawpy({ code, message: "m" })).toBe(false);
-  });
-
-  it("コードを持たない失敗（invoke 自体の失敗など）はフォールバックしない", () => {
-    expect(shouldFallbackToRawpy(new Error("command develop_preview_coreimage not found"))).toBe(false);
-    expect(shouldFallbackToRawpy("command not found")).toBe(false);
-    expect(shouldFallbackToRawpy(null)).toBe(false);
-    expect(shouldFallbackToRawpy({ code: 42 })).toBe(false);
-  });
-});
-
 describe("coreImageErrorMessage", () => {
   it("BUSY は「別の現像を実行中です」", () => {
     expect(coreImageErrorMessage({ code: "BUSY", message: "busy" })).toBe("別の現像を実行中です（BUSY）");
@@ -204,10 +155,21 @@ describe("coreImageErrorMessage", () => {
   });
 });
 
-describe("previewEngine", () => {
-  it("ブラウザモードは invoke せずに rawpy", async () => {
-    await expect(previewEngine()).resolves.toBe("rawpy");
-    expect(invoke).not.toHaveBeenCalled();
+describe("Core Image invoke", () => {
+  it("full / preview を別コマンドに送る。full は実寸と継承結果を表示に渡す", async () => {
+    const full = toDevelopedResult(ciResult({ preview: false, exif_inherited: true, width: 6000, height: 4000 }), PRESET);
+    vi.mocked(invoke).mockResolvedValueOnce(full);
+    const result = await developFullCoreImage("DSC04430", ADJ, PRESET);
+    expect(invoke).toHaveBeenLastCalledWith("develop_full_coreimage", { captureId: "DSC04430", adjustments: ADJ, preset: PRESET.name });
+    expect(result).toMatchObject({ preview: false, exif_inherited: true, width: 6000, height: 4000 });
+    vi.mocked(invoke).mockResolvedValueOnce(ciResult());
+    await developPreviewCoreImage("DSC04430", ADJ);
+    expect(invoke).toHaveBeenLastCalledWith("develop_preview_coreimage", { captureId: "DSC04430", adjustments: ADJ });
+  });
+  it("失敗はそのまま表示側に返す", async () => {
+    const error = { code: "SIDECAR_NOT_FOUND", message: "not found" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(developFullCoreImage("DSC04430", ADJ, PRESET)).rejects.toBe(error);
   });
 });
 

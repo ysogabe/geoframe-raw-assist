@@ -5,8 +5,7 @@
 //! `geoframe-ci-develop`（`native/coreimage-cli`、Tauri の externalBin）を子プロセスとして
 //! 直接呼ぶ。CLI の入出力契約は `native/coreimage-cli/README.md` と設計書 §4.1・§4.2。
 //!
-//! - 既定でプレビューは Core Image。`GEOFRAME_PREVIEW_ENGINE=rawpy` のときだけ
-//!   `preview_engine()` が `"rawpy"` を返し、フロントは Python のプレビューに戻す。
+//! - プレビュー・原寸とも Core Image。エラーはフロントで表示する。
 //! - `config.json`（Python の `local_raw/config.py` と同じファイル）は `source_root` を
 //!   **読むだけ**。書き込みは Python 側の責務のまま。
 //! - capture_id → ARW の解決は `local_raw/source_files.py` と同じ規則の再実装。
@@ -34,15 +33,12 @@ use tauri::{AppHandle, Manager};
 
 use crate::adjustments::normalize_adjustments;
 
-/// プレビューの現像エンジンを切り戻す環境変数。値がちょうど `"rawpy"` のときだけ rawpy。
-pub const PREVIEW_ENGINE_ENV: &str = "GEOFRAME_PREVIEW_ENGINE";
-
 /// externalBin の名前（tauri-build が実行ファイルの隣へ triple 無しの名前でコピーする）。
 const SIDECAR_NAME: &str = "geoframe-ci-develop";
 
 /// 出力ディレクトリ名（`<app_data_dir>/coreimage/`）。tauri.conf.json の
 /// `assetProtocol.scope`（`$APPDATA/coreimage/**`）と一致させること。モードごとに
-/// サブディレクトリ（`preview/`、将来の `full/`）を切る。
+/// サブディレクトリ（`preview/`、`full/`）を切る。
 const OUTPUT_DIR_NAME: &str = "coreimage";
 
 /// 現像 1 回のウォッチドッグ。超えたら子プロセスを kill してエラーにする。
@@ -95,13 +91,11 @@ impl CoreImageError {
 }
 
 /// 現像モード。自由文字列を CLI の JSON へ流さないよう enum で受ける。
-/// この PR のコマンドは preview だけを使う。full（原寸）は後続 Issue で使うので残す
-/// （設計書 §3.6「CLI / Rust は mode: full を受けられる形を保つ」）。
+/// full は max_edge を送らず、CLI の原寸出力を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DevelopMode {
     Preview,
-    #[allow(dead_code)]
     Full,
 }
 
@@ -130,6 +124,9 @@ pub struct CoreImagePreviewResult {
     /// 最初に現像したときの値。
     pub elapsed_ms: Value,
     pub cache_hit: bool,
+    pub preview: bool,
+    /// Rust の APP1 後処理に成功した場合のみ true。
+    pub exif_inherited: bool,
     /// キャッシュ鍵（hash16）。ファイル名にも入る。
     pub params_hash: String,
     pub decoder_version: String,
@@ -1084,6 +1081,11 @@ fn result_from_response(
         height: response.get("height")?.as_u64()?,
         elapsed_ms: field("elapsed_ms"),
         cache_hit,
+        preview: response.get("mode").and_then(Value::as_str) != Some("full"),
+        exif_inherited: response
+            .get("exif_inherited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         params_hash: context.key.to_string(),
         decoder_version: response
             .get("decoder_version")
@@ -1479,7 +1481,32 @@ pub(crate) fn develop(
     // 2. 出力名（安定ハッシュ）の決定。
     let version = cli_version(sidecar)?;
     let mut request = base_request(&input, mode, adjustments);
-    let key = cache_key(&request, &version, metadata.len(), mtime_ns);
+    // full のみ JPG を読み取る。継承に使うものと同じバイト列を鍵に含め、
+    // ペア追加／更新／削除で必ず再現像する。画像や GPS の値は来歴・ログに出さない。
+    let source_jpeg = if mode == DevelopMode::Full {
+        fs::canonicalize(source_root.join(format!("{capture_id}.JPG")))
+            .ok()
+            .filter(|p| p.parent() == input.parent())
+            .and_then(|p| fs::read(p).ok())
+    } else {
+        None
+    };
+    let mut key_request = request.clone();
+    if mode == DevelopMode::Full {
+        let fingerprint = source_jpeg.as_ref().map(|b| {
+            Sha256::digest(b)
+                .iter()
+                .map(|v| format!("{v:02x}"))
+                .collect::<String>()
+        });
+        key_request.insert(
+            "rust_exif".into(),
+            json!({
+                "schema": 1, "source_sha256": fingerprint, "software": EXIF_SOFTWARE,
+            }),
+        );
+    }
+    let key = cache_key(&key_request, &version, metadata.len(), mtime_ns);
 
     let (coreimage_dir, output_dir) = prepare_output_dirs(app_data_dir, mode)?;
     // 試験経路の旧出力（coreimage/ 直下）を 1 回だけ掃除する。
@@ -1525,7 +1552,7 @@ pub(crate) fn develop(
     );
     let body = Value::Object(request).to_string();
     let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
-    let response = parse_response(&result)?;
+    let mut response = parse_response(&result)?;
     if response.get("ok") != Some(&Value::Bool(true)) || !result.status.success() {
         return Err(cli_error(&response, result.status));
     }
@@ -1539,19 +1566,53 @@ pub(crate) fn develop(
             "Core Image CLI の出力先が依頼と一致しないか、出力ファイルがありません",
         ));
     }
-    let developed = result_from_response(&response, &context, false).ok_or_else(|| {
+    let mut developed = result_from_response(&response, &context, false).ok_or_else(|| {
         CoreImageError::new(
             "SIDECAR_BAD_RESPONSE",
             "Core Image CLI の応答に width / height がありません",
         )
     })?;
 
-    // 6. 来歴: CLI の応答 JSON をそのまま横に置く。
+    // CLI は EXIF を書かない。full のみ Rust で APP1 を追加する。
+    // Python と同じく、読取・構文・サイズ・EXIF 保存の失敗は元の CLI JPEG で続行。
+    developed.exif_inherited = source_jpeg.as_deref().is_some_and(|source| {
+        inherit_output_exif(&output, source, developed.width, developed.height)
+    });
+    developed.preview = mode == DevelopMode::Preview;
+    response["exif_inherited"] = json!(developed.exif_inherited);
+    response["mode"] = json!(mode.as_str());
+    // Swift の実応答には request がない。Rust が実際に送った要求を来歴に記録する。
+    // #111 は request.mode / input / output を検証してから full を複製する。
+    response["request"] = serde_json::from_str(&body).expect("Rust-serialized request JSON");
+    // 6. 来歴: preview と同じ CLI 応答 JSON に Rust の継承結果を加える。
     write_provenance(&provenance, &format!("{}\n", response))?;
 
     // 7. キャッシュの上限管理（いま書いた組は残す）。
     prune_cache(&output_dir, CACHE_MAX_ENTRIES, CACHE_MAX_BYTES, Some(&stem));
     Ok(developed)
+}
+
+const EXIF_SOFTWARE: &str = "GeoFrame RAW Assist (Core Image)";
+
+fn inherit_output_exif(output: &Path, source: &[u8], width: u64, height: u64) -> bool {
+    let attempt = || -> Option<()> {
+        let width = u32::try_from(width).ok()?;
+        let height = u32::try_from(height).ok()?;
+        let developed = fs::read(output).ok()?;
+        let bytes =
+            crate::exif_inherit::inherit_exif(&developed, source, width, height, EXIF_SOFTWARE)
+                .ok()?;
+        let name = output.file_name()?.to_str()?;
+        let temp = output.with_file_name(provenance_temp_name(name));
+        let saved = create_new_file(&temp)
+            .and_then(|mut file| file.write_all(&bytes))
+            .and_then(|_| fs::rename(&temp, output));
+        if saved.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        saved.ok()
+    };
+    attempt().is_some()
 }
 
 /// アプリ実行時の sidecar パス。tauri-build が externalBin を実行ファイルの隣へコピーする
@@ -1635,7 +1696,9 @@ fn engine_info_blocking() -> Result<EngineInfo, CoreImageError> {
 pub async fn engine_info() -> Result<EngineInfo, CoreImageError> {
     tauri::async_runtime::spawn_blocking(engine_info_blocking)
         .await
-        .map_err(|error| CoreImageError::new("INTERNAL", format!("engine_info が中断されました: {error}")))?
+        .map_err(|error| {
+            CoreImageError::new("INTERNAL", format!("engine_info が中断されました: {error}"))
+        })?
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,7 +1740,10 @@ fn resolve_path(path: &Path) -> PathBuf {
             }
             return resolved;
         }
-        match (existing.file_name().map(|n| n.to_os_string()), existing.parent()) {
+        match (
+            existing.file_name().map(|n| n.to_os_string()),
+            existing.parent(),
+        ) {
             (Some(name), Some(parent)) => {
                 rest.push(name);
                 existing = parent.to_path_buf();
@@ -1700,21 +1766,6 @@ pub fn root_key_for(path: &Path) -> String {
 // Tauri コマンド
 // ---------------------------------------------------------------------------
 
-/// 環境変数の値からプレビューエンジンを決める。ちょうど `"rawpy"` のときだけ rawpy。
-fn engine_from(value: Option<&str>) -> &'static str {
-    if value == Some("rawpy") {
-        "rawpy"
-    } else {
-        "coreimage"
-    }
-}
-
-/// プレビュー現像のエンジン（`"coreimage"` | `"rawpy"`）。フロントは起動時に 1 回だけ読む。
-#[tauri::command]
-pub fn preview_engine() -> &'static str {
-    engine_from(std::env::var(PREVIEW_ENGINE_ENV).ok().as_deref())
-}
-
 /// 選択中カットを Core Image でプレビュー現像する。JS からは
 /// `invoke("develop_preview_coreimage", { captureId, adjustments })`。
 /// `adjustments` はフロントがプリセット既定値 + overrides をマージした 9 キー全量。
@@ -1726,6 +1777,87 @@ pub async fn develop_preview_coreimage(
     app: AppHandle,
     capture_id: String,
     adjustments: Value,
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    develop_command(app, capture_id, adjustments, DevelopMode::Preview).await
+}
+
+/// 原寸 JPEG。DevelopedResult 契約（フロント src/lib/types.ts）を直接返す。
+#[tauri::command]
+pub async fn develop_full_coreimage(
+    app: AppHandle,
+    capture_id: String,
+    adjustments: Value,
+    preset: String,
+) -> Result<Value, CoreImageError> {
+    let preset = crate::presets::get_presets()
+        .into_iter()
+        .find(|p| p.name == preset)
+        .ok_or_else(|| {
+            CoreImageError::new(crate::presets::UNKNOWN_PRESET, "未対応のプリセットです")
+        })?;
+    let result = develop_command(app, capture_id, adjustments, DevelopMode::Full).await?;
+    Ok(full_developed_result(&result, &preset))
+}
+
+fn full_developed_result(
+    result: &CoreImagePreviewResult,
+    preset: &crate::presets::PresetInfo,
+) -> Value {
+    let basename = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    let lens = result.source.get("lens_model");
+    let applied = result
+        .applied
+        .get("lens_correction_enabled")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let mut correction = json!({ "applied": applied, "lens": lens, "flags": [] });
+    if !applied {
+        correction["reason"] = json!("coreimage_unsupported");
+    }
+    // Tauri convertFileSrc と同じ asset URL（macOS）。絶対パス全体を encodeURIComponent。
+    let encoded: String = result
+        .output_path
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let total = result
+        .elapsed_ms
+        .get("total")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let mut value = json!({
+        "capture_id": result.capture_id, "preset": preset.name, "preset_label": preset.label,
+        "filename": basename(&result.output_path), "recipe_filename": basename(&result.provenance_path),
+        "params_hash": result.params_hash.chars().take(10).collect::<String>(),
+        "adjustments": result.adjustments, "width": result.width, "height": result.height,
+        "elapsed_seconds": (total / 10.0).round() / 100.0,
+        "cached": result.cache_hit, "preview": false, "lens_correction": correction,
+        "exif_inherited": result.exif_inherited, "output_url": format!("asset://localhost/{encoded}"),
+        "engine": "coreimage",
+    });
+    if let Some(effect) = result.adjustments_applied.get("highlight_recovery") {
+        value["highlight_recovery_effect"] = effect.clone();
+    }
+    value
+}
+
+async fn develop_command(
+    app: AppHandle,
+    capture_id: String,
+    adjustments: Value,
+    mode: DevelopMode,
 ) -> Result<CoreImagePreviewResult, CoreImageError> {
     // 安い検査は先に（CLI もファイルシステムも触らない）。
     let adjustments = normalize_adjustments(&adjustments)?;
@@ -1747,7 +1879,7 @@ pub async fn develop_preview_coreimage(
             &app_data_dir,
             &sidecar,
             &capture_id,
-            DevelopMode::Preview,
+            mode,
             Some(&adjustments),
             &DEVELOP_SLOT,
             DEVELOP_TIMEOUT,
@@ -1767,7 +1899,7 @@ pub async fn develop_preview_coreimage(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     #[test]
     fn root_key_matches_python_for_nonexistent_paths() {
@@ -2702,15 +2834,6 @@ exit 0"#,
     }
 
     #[test]
-    fn preview_engine_flag() {
-        assert_eq!(engine_from(None), "coreimage");
-        assert_eq!(engine_from(Some("rawpy")), "rawpy");
-        for other in ["", "RAWPY", "rawpy ", "coreimage", "1", "python"] {
-            assert_eq!(engine_from(Some(other)), "coreimage", "{other:?}");
-        }
-    }
-
-    #[test]
     fn develop_slot_waits_then_busy_over_limit() {
         use std::sync::{mpsc, Arc};
         let slot = Arc::new(DevelopSlot::new(2));
@@ -3020,6 +3143,133 @@ exit 1"#;
         )
         .unwrap();
         (app_data, source)
+    }
+
+    /// export の結合テスト用。本物の Swift と同じく request を返さない CLI モック。
+    pub(crate) fn full_for_export_test(app: &Path) -> CoreImagePreviewResult {
+        let bin = TempDir::new("export-full-cli");
+        let mock = MOCK_OK
+            .replace(",\"request\":%s", "")
+            .replace("\"$out\" \"$req\"", "\"$out\"");
+        let cli = mock_cli(bin.path(), &mock);
+        develop(
+            app,
+            &cli,
+            "DSC00001",
+            DevelopMode::Full,
+            Some(&sample_adjustments()),
+            &DevelopSlot::new(2),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn full_develop_inherits_exif_caches_and_handles_pair_changes() {
+        use crate::exif_inherit::tests::{fixture, jpeg};
+        let (app, source) = fake_app("full-exif", &["DSC00001"]);
+        let bin = TempDir::new("full-exif-cli");
+        let cli_image = bin.path().join("developed.jpg");
+        let plain = jpeg(&[(0xe2, b"ICC_PROFILE\0synthetic")]);
+        fs::write(&cli_image, &plain).unwrap();
+        let mock = MOCK_OK
+            .replace(
+                "printf 'JPEGDATA' > \"$out\"",
+                &format!("command cp -f '{}' \"$out\"", cli_image.display()),
+            )
+            .replace("\"width\":2400", "\"width\":80")
+            .replace("\"height\":1600", "\"height\":40")
+            .replace(",\"request\":%s", "")
+            .replace("\"$out\" \"$req\"", "\"$out\"");
+        let cli = mock_cli(bin.path(), &mock);
+        let pair = source.path().join("DSC00001.JPG");
+        let original = fixture(false, true, Some(8));
+        fs::write(&pair, &original).unwrap();
+        let slot = DevelopSlot::new(2);
+        let adjustments = sample_adjustments();
+        let run = || {
+            develop(
+                app.path(),
+                &cli,
+                "DSC00001",
+                DevelopMode::Full,
+                Some(&adjustments),
+                &slot,
+                Duration::from_secs(5),
+            )
+            .unwrap()
+        };
+        let first = run();
+        assert!(!first.preview && first.exif_inherited && !first.cache_hit);
+        assert_eq!(
+            Path::new(&first.output_path).parent().unwrap(),
+            app.path().join("coreimage/full").canonicalize().unwrap()
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(&first.provenance_path).unwrap()).unwrap();
+        assert_eq!(saved["request"]["mode"], "full");
+        assert!(saved["request"].get("max_edge").is_none());
+        assert!(saved["request"].get("rust_exif").is_none());
+        assert_eq!(saved["exif_inherited"], true);
+        assert_eq!(fs::read(&pair).unwrap(), original);
+        let preset = crate::presets::get_presets().remove(0);
+        let contract = full_developed_result(&first, &preset);
+        assert_eq!(contract["preview"], false);
+        assert_eq!(contract["exif_inherited"], true);
+        assert_eq!(contract["width"], 80);
+        assert_eq!(
+            contract["filename"],
+            Path::new(&first.output_path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+        assert!(contract["recipe_filename"]
+            .as_str()
+            .unwrap()
+            .ends_with(".json"));
+        assert_eq!(contract["params_hash"].as_str().unwrap().len(), 10);
+        assert!(contract["output_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("asset://localhost/%2F"));
+        let cached = run();
+        assert!(cached.cache_hit && cached.exif_inherited && !cached.preview);
+        assert_eq!(calls(bin.path()), 1);
+        // TIFF のパディングだけが変わっても別のペアとして鍵を更新する。
+        let mut changed = original.clone();
+        let n = changed.len();
+        changed[n - 3] ^= 1;
+        fs::write(&pair, changed).unwrap();
+        let updated = run();
+        assert!(updated.exif_inherited && !updated.cache_hit);
+        assert_ne!(first.params_hash, updated.params_hash);
+        for bytes in [b"not a JPEG".as_slice(), plain.as_slice()] {
+            fs::write(&pair, bytes).unwrap();
+            let result = run();
+            assert!(!result.exif_inherited && !result.cache_hit);
+            assert_eq!(fs::read(&result.output_path).unwrap(), plain);
+            assert!(run().cache_hit);
+        }
+        fs::remove_file(&pair).unwrap();
+        let missing = run();
+        assert!(!missing.exif_inherited && !missing.cache_hit);
+        assert_eq!(fs::read(&missing.output_path).unwrap(), plain);
+        // preview の結果に EXIF を付けない。
+        fs::write(&pair, original).unwrap();
+        let preview = develop(
+            app.path(),
+            &cli,
+            "DSC00001",
+            DevelopMode::Preview,
+            Some(&adjustments),
+            &slot,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(preview.preview && !preview.exif_inherited);
+        assert_eq!(fs::read(preview.output_path).unwrap(), plain);
     }
 
     #[test]
