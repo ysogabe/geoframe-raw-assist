@@ -8,6 +8,7 @@ import type {
   CaptureId,
   DevelopedResult,
   ExportResponse,
+  ImportToPhotosResponse,
   GroupInfo,
   MergedResult,
 } from "../lib/types";
@@ -48,8 +49,11 @@ type ExportPanelProps = {
   onChangeBatchName: (value: string) => void;
   onChangeVariant: (key: string, variant: PhotoExportVariant) => void;
   onExport: () => void;
+  onImport: () => void;
   exporting: boolean;
+  importing: boolean;
   exportResult: ExportResponse | null;
+  importResult: ImportToPhotosResponse | null;
   onBack: () => void;
 };
 
@@ -60,8 +64,11 @@ export function ExportPanel({
   onChangeBatchName,
   onChangeVariant,
   onExport,
+  onImport,
   exporting,
+  importing,
   exportResult,
+  importResult,
   onBack,
 }: ExportPanelProps) {
   const [revealError, setRevealError] = useState<string | null>(null);
@@ -184,7 +191,20 @@ export function ExportPanel({
               ))}
             </ul>
           )}
-          {/* 「写真」アプリへの取り込み（M1 の #115 で戻す）はここに差し込む。state（importing / importResult）と reducer は残してある。 */}
+          <div className="export-import-row">
+            <button className="secondary-action" onClick={onImport} disabled={importing}>
+              {importing ? "登録しています…" : "Apple フォトへ登録"}
+            </button>
+            <small>アルバム名: GeoFrame RAW Assist {batchName.trim()}</small>
+          </div>
+          {importResult && (
+            <p className={`import-result${importResult.status === "ok" ? " ok" : " error"}`}>
+              {importResult.status === "ok"
+                ? `${importResult.imported}件を「${importResult.album}」に登録しました。`
+                : importResult.error}
+              {importResult.status === "error" && importResult.stderr ? <small> {importResult.stderr}</small> : null}
+            </p>
+          )}
         </div>
       )}
     </section>

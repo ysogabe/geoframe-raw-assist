@@ -24,7 +24,7 @@ pub struct ExportItem {
     developed_filename: Option<String>,
 }
 
-fn normalize_batch_name(raw: &str) -> Result<String, String> {
+pub(crate) fn normalize_batch_name(raw: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() || name.chars().count() > 64 {
         return Err("バッチ名は1〜64文字で指定してください。".into());

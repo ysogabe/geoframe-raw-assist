@@ -7,6 +7,8 @@ import type {
   CaptureId,
   ExportItem,
   ExportResponse,
+  ImportToPhotosRequest,
+  ImportToPhotosResponse,
   PresetInfo,
   SourceFolderErrorReason,
   SourceFolderInfo,
@@ -130,6 +132,11 @@ export async function setSourceFolder(path: string): Promise<SourceFolderInfo> {
   } catch (error) {
     throw sourceFolderApiErrorFromInvoke(error);
   }
+}
+
+/** 書き出し済みバッチを Apple「写真」へ取り込む（Issue #115）。 */
+export async function importToPhotos(request: ImportToPhotosRequest): Promise<ImportToPhotosResponse> {
+  return await invoke<ImportToPhotosResponse>("import_to_photos", { batchName: request.batch_name, album: request.album });
 }
 
 /** 書き出したフォルダを Finder で表示する。 */
