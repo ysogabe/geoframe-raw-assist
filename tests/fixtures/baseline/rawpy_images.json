@@ -1,0 +1,50 @@
+[
+  {
+    "capture_id": "DSC07402",
+    "dimensions": [
+      1600,
+      1069
+    ],
+    "mode": "preview",
+    "path": "work/baseline/rawpy/preview/DSC07402-neutral_recovery-037ce83cb0.jpg",
+    "rgb8_sha256": "6c8afee50d1d64f8864d9ef205c3be3a55ac94f626c6092ee27d7ea6a93e0819",
+    "sha256": "8787ba463ca890029b3ea2f74fcd02fe28db3a52b57077a32dfb27433d85c835",
+    "wall_s": 7.865652834007051
+  },
+  {
+    "capture_id": "DSC07402",
+    "dimensions": [
+      6000,
+      4008
+    ],
+    "mode": "full",
+    "path": "work/baseline/rawpy/full/DSC07402-neutral_recovery-b8abc83742.jpg",
+    "rgb8_sha256": "b54e4f8637b2116855ec937c91e7ebc91cacf23bacaab123ba5b416c0b573ecb",
+    "sha256": "505737700d96ff0e1e03fce86a51c131207bccae254c4894d6ebb7555767e088",
+    "wall_s": 10.449054124997929
+  },
+  {
+    "capture_id": "DSC07423",
+    "dimensions": [
+      1600,
+      1069
+    ],
+    "mode": "preview",
+    "path": "work/baseline/rawpy/preview/DSC07423-neutral_recovery-037ce83cb0.jpg",
+    "rgb8_sha256": "ba94b30f2acffab988d3798e9ffd27307c4f8148db9f4bea009f93b66164b328",
+    "sha256": "e5d7256224c2c856d4daa09db7d2c54cd1627c922bc61e46366db31a15235318",
+    "wall_s": 4.770865250000497
+  },
+  {
+    "capture_id": "DSC07423",
+    "dimensions": [
+      6000,
+      4008
+    ],
+    "mode": "full",
+    "path": "work/baseline/rawpy/full/DSC07423-neutral_recovery-b8abc83742.jpg",
+    "rgb8_sha256": "5a29173dc0a88a8e26875c6b707a19d7bc588a00d2e9beea5ae00c474b9c0b9f",
+    "sha256": "06a06a9fa9ec4032b6b7c6b3d6f160624a2f8208d934ae7a20742280542c66f1",
+    "wall_s": 5.251861083001131
+  }
+]

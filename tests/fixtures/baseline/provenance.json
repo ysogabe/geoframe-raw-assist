@@ -1,0 +1,113 @@
+{
+  "opencv_threads": 8,
+  "packages": {
+    "Pillow": "12.3.0",
+    "lensfunpy": "1.18.0",
+    "numpy": "2.5.1",
+    "opencv-python-headless": "5.0.0.93",
+    "rawpy": "0.27.0"
+  },
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.8",
+  "source_files": [
+    {
+      "name": "DSC07402.JPG",
+      "sha256": "54bb6e6dae243a68b1056569a6a1637c449fb1e689a442a773aefcc1978ade2d"
+    },
+    {
+      "name": "DSC07402.arw",
+      "sha256": "2cc20448c22411883c860a43d0a5cb6c4fc446d863b0319b98b073ce5014400e"
+    },
+    {
+      "name": "DSC07404.JPG",
+      "sha256": "1e6bcf8407654bf779f52655964de91c2519e8fdc9f591af48cb4ce6ad3556df"
+    },
+    {
+      "name": "DSC07404.arw",
+      "sha256": "24b2a66bc849bb7f03ea4f76f2843b6de0d3b497e48b5f156cb11a0fc9512527"
+    },
+    {
+      "name": "DSC07405.JPG",
+      "sha256": "25085a759314b3bb100f0fd7ecedd900f08fa31242263951606d4c368d8c1e72"
+    },
+    {
+      "name": "DSC07405.arw",
+      "sha256": "504bfc7c8860e22c2bd712c83030fc14dd096fcdf38eab8323be5780c41ac40a"
+    },
+    {
+      "name": "DSC07407.JPG",
+      "sha256": "5ba21be69a653dce54e9f720b28caf9091bed270af2c04db5b611e19dd5c82c9"
+    },
+    {
+      "name": "DSC07407.arw",
+      "sha256": "550c2c5cf9e591d44a6eef38a33bac2f99faaefa87b9f81f7a319690f231834f"
+    },
+    {
+      "name": "DSC07408.JPG",
+      "sha256": "794963076109d3d857ca23d7d100efdf75c2937b7c7eb88337eb7af542529358"
+    },
+    {
+      "name": "DSC07408.arw",
+      "sha256": "3445c31d838e9a65f4ae449c0c4d8f2ef81d656b3d19901132722f6085773c34"
+    },
+    {
+      "name": "DSC07412.JPG",
+      "sha256": "7d1960d82d3a66795ae1a6f0f7ea564b837a8fbb19c379e41565be6757102a60"
+    },
+    {
+      "name": "DSC07412.arw",
+      "sha256": "0b56cf08df262a43344b077a8309fd104d03b027174548fb5818440542cd761b"
+    },
+    {
+      "name": "DSC07415.JPG",
+      "sha256": "28e5555a3c8407e3780ee68392394aac0a4adcb24d6b65ea915bf4acb86a6e99"
+    },
+    {
+      "name": "DSC07415.arw",
+      "sha256": "4ee8f8cd11e947196db672e223d936e4afdd49d76a5afa335021a3031db65763"
+    },
+    {
+      "name": "DSC07416.JPG",
+      "sha256": "1361b7e9ca5763459f55d0d4d5c50d55681762516bfd7e3469fb62f6c74d31a3"
+    },
+    {
+      "name": "DSC07416.arw",
+      "sha256": "360e8438356d9761aa4ef60e96f264be34e457451de47fcc35166e8d06336f9b"
+    },
+    {
+      "name": "DSC07419.JPG",
+      "sha256": "0fd780c888787c6a99a49cd39c50167c9350adb70c4d8932177dd34d5908b525"
+    },
+    {
+      "name": "DSC07419.arw",
+      "sha256": "475770d03f6d10d4809cb36b41548a8fcfd4bae84c4d16029e4426e839a63dc7"
+    },
+    {
+      "name": "DSC07422.JPG",
+      "sha256": "7552e60b78b49646f8dd1d3679aa259a7556b60b39f6be27e10712010873079e"
+    },
+    {
+      "name": "DSC07422.arw",
+      "sha256": "43ab56edd1a3e4e56eadfa1c7dcf001ffc65b13e3f3f499322add43a0250fcdf"
+    },
+    {
+      "name": "DSC07423.JPG",
+      "sha256": "e90e338d97f70f58afcab82d3afd37ee295e2df4e3a38f600e20aa75d2e996eb"
+    },
+    {
+      "name": "DSC07423.arw",
+      "sha256": "e0ac61f1bd7cb8126d1c8cc135e429087e7a821b1c7869a9cc5edddd8d862742"
+    }
+  ],
+  "source_root": "/Users/yoshio/works/60-misc/40-raw-assistant/work/raw",
+  "timings_seconds": {
+    "analysis": 0.649,
+    "bracket": 0.094,
+    "candidates": 162.178,
+    "exif": 0.025,
+    "manifest": 0.064,
+    "metrics": 0.035,
+    "rawpy": 28.356
+  },
+  "total_seconds": 191.877
+}
