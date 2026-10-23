@@ -305,7 +305,7 @@ export type HighlightRecoveryEffect = {
 export type DevelopEngine = "coreimage";
 
 // ---------------------------------------------------------------------------
-// 現像候補（M3 まで隠している）— RAW縮小デコード代理による現像候補
+// 現像候補 — Core Image 縮小デコード代理による現像候補
 // ---------------------------------------------------------------------------
 
 export type DevelopmentCandidateStyle = "natural" | "stars" | "foreground" | "low_noise" | "social";
@@ -379,12 +379,15 @@ export type DevelopmentCandidatesResponse = {
     max_edge: number;
     width: number;
     height: number;
-    source: "raw_half";
+    source: "coreimage_proxy";
     /** キャッシュに保持したデコード結果の長辺。 */
     decode_edge: number;
     /** 縮小デコードを実行した回数。 */
     decodes: number;
+    renders: number;
+    evaluations: number;
   };
+  elapsed_ms: { total: number; decode: number; render: number };
   star_scene: StarSceneInfo;
   candidates: DevelopmentCandidate[];
   /** 基準より白飛び・黒つぶれ等が悪化したため返さなかった候補と、その理由。 */

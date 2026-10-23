@@ -25,6 +25,7 @@ fn main() {
             // エンジン情報（Issue #109）。
             coreimage::engine_info,
             presets::get_presets,
+            candidates::command::generate_development_candidates,
             analysis::get_analysis,
             analysis::start_analysis,
             source_folder::get_source_folder,

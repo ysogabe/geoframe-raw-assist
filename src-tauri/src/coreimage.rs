@@ -576,9 +576,8 @@ fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
 
 /// CLI を `--batch` で常駐させ、JSON Lines で複数のリクエストを流すセッション。
 ///
-/// 今は呼び出し側が無い（PSO・ブラケット合成で使う予定）ので、未使用の警告だけを抑えている。
-#[cfg_attr(not(test), allow(dead_code))]
-mod batch {
+/// PSO の代理レンダで decode ハンドルを共有する。
+pub(crate) mod batch {
     use std::collections::VecDeque;
     use std::io::{BufRead, BufReader, Write};
     use std::path::Path;
@@ -595,14 +594,14 @@ mod batch {
 
     /// `op: render` で、ハンドルが未知・解放済み・LRU で捨てられたときの `error.code`。
     /// 受け取った側はもう一度 `decode` する（CLI 0.7.0、Issue #116）。
-    pub(super) const HANDLE_NOT_FOUND: &str = "HANDLE_NOT_FOUND";
+    pub(crate) const HANDLE_NOT_FOUND: &str = "HANDLE_NOT_FOUND";
 
     /// `decode` の結果。`id` が以後の `render` / `release` に渡すハンドル。
     #[derive(Debug)]
-    pub(super) struct DecodedHandle {
-        pub(super) id: String,
+    pub(crate) struct DecodedHandle {
+        pub(crate) id: String,
         /// CLI の成功応答そのもの（`width` / `height` / `bytes` / `elapsed_ms` / `cache` など）。
-        pub(super) response: Value,
+        pub(crate) response: Value,
     }
 
     /// リクエスト（JSON オブジェクト）に `op`（と `handle`）を足した複製を作る。
@@ -629,7 +628,7 @@ mod batch {
     }
 
     /// 失敗が「ハンドルが無い（捨てられた・解放済み・未知）」か。真なら `decode` からやり直す。
-    pub(super) fn is_handle_lost(error: &CoreImageError) -> bool {
+    pub(crate) fn is_handle_lost(error: &CoreImageError) -> bool {
         error.code == HANDLE_NOT_FOUND
     }
 
@@ -653,7 +652,7 @@ mod batch {
     ///   読まないとパイプが詰まって子が止まる）。stderr は末尾だけ保持する。
     /// - 終了は `finish`（stdin を閉じて wait）。呼ばずに drop しても、stdin を閉じて短く待ち、
     ///   終わらなければ kill して回収する。
-    pub(super) struct BatchSession {
+    pub(crate) struct BatchSession {
         child: Option<Child>,
         stdin: Option<ChildStdin>,
         responses: Receiver<String>,
@@ -667,7 +666,7 @@ mod batch {
 
     impl BatchSession {
         /// `program --batch` を起動する。`timeout` は 1 リクエストごとの待ち時間（`finish` の待ちにも使う）。
-        pub(super) fn start(program: &Path, timeout: Duration) -> Result<Self, CoreImageError> {
+        pub(crate) fn start(program: &Path, timeout: Duration) -> Result<Self, CoreImageError> {
             let mut child = Command::new(program)
                 .arg("--batch")
                 .stdin(Stdio::piped())
@@ -724,22 +723,25 @@ mod batch {
         }
 
         /// まだリクエストを流せるか（タイムアウト・対応の食い違い・子の終了の後は false）。
-        pub(super) fn is_usable(&self) -> bool {
+        #[cfg(test)]
+        pub(crate) fn is_usable(&self) -> bool {
             self.usable
         }
 
         /// これまでに送ったリクエストの件数（= 最後に期待した `sequence`）。
-        pub(super) fn sent(&self) -> u64 {
+        #[cfg(test)]
+        pub(crate) fn sent(&self) -> u64 {
             self.sent
         }
 
         /// 子プロセスの pid（テストで後片付けを確かめる用）。
-        pub(super) fn pid(&self) -> Option<u32> {
+        #[cfg(test)]
+        pub(crate) fn pid(&self) -> Option<u32> {
             self.child.as_ref().map(Child::id)
         }
 
         /// 1 件を送り、応答を待つ。成功応答（`ok: true`）は JSON のまま返す。
-        pub(super) fn request(&mut self, request: &Value) -> Result<Value, CoreImageError> {
+        pub(crate) fn request(&mut self, request: &Value) -> Result<Value, CoreImageError> {
             if !self.usable {
                 return Err(CoreImageError::new(
                     "SIDECAR_SESSION_CLOSED",
@@ -828,7 +830,7 @@ mod batch {
         /// （`output` は取らない）。保持は CLI プロセスの中なので、セッションを閉じる（`finish` / drop / kill）と
         /// すべて消える。個数・メモリの上限を超えると CLI が古い順に捨てる（`render` が
         /// [`is_handle_lost`] のエラーになる）。
-        pub(super) fn decode(&mut self, request: &Value) -> Result<DecodedHandle, CoreImageError> {
+        pub(crate) fn decode(&mut self, request: &Value) -> Result<DecodedHandle, CoreImageError> {
             let response = self.request(&with_op(request, "decode", None)?)?;
             match response.get("handle").and_then(Value::as_str) {
                 Some(id) if !id.is_empty() => Ok(DecodedHandle {
@@ -845,7 +847,7 @@ mod batch {
         /// `op: render`。保持したデコード結果に後段（adjustments）だけを掛けて `output` へ書く。
         /// `request` は `output` / `format` / `jpeg_quality` / `output_color_space` / `adjustments`。
         /// adjustments のデコード段のキーが decode 時と違うと `INVALID_REQUEST`。
-        pub(super) fn render(
+        pub(crate) fn render(
             &mut self,
             handle: &str,
             request: &Value,
@@ -855,7 +857,7 @@ mod batch {
 
         /// `op: release`。ハンドルを解放する。保持していたなら true、未知・解放済み・捨て済みなら false
         /// （どちらもエラーにしない）。
-        pub(super) fn release(&mut self, handle: &str) -> Result<bool, CoreImageError> {
+        pub(crate) fn release(&mut self, handle: &str) -> Result<bool, CoreImageError> {
             let response = self.request(&with_op(
                 &Value::Object(Map::new()),
                 "release",
@@ -865,7 +867,7 @@ mod batch {
         }
 
         /// stdin を閉じ（EOF）、`timeout` 以内の終了を待つ。過ぎたら kill して `SIDECAR_TIMEOUT`。
-        pub(super) fn finish(mut self) -> Result<ExitStatus, CoreImageError> {
+        pub(crate) fn finish(mut self) -> Result<ExitStatus, CoreImageError> {
             self.usable = false;
             drop(self.stdin.take());
             let Some(mut child) = self.child.take() else {
@@ -1405,7 +1407,7 @@ impl DevelopSlot {
 }
 
 /// アプリ全体で 1 つの実行枠。
-static DEVELOP_SLOT: DevelopSlot = DevelopSlot::new(MAX_WAITING);
+pub(crate) static DEVELOP_SLOT: DevelopSlot = DevelopSlot::new(MAX_WAITING);
 
 // ---------------------------------------------------------------------------
 // 現像本体
@@ -1699,7 +1701,7 @@ fn inherit_output_exif(output: &Path, source: &[u8], width: u64, height: u64) ->
 
 /// アプリ実行時の sidecar パス。tauri-build が externalBin を実行ファイルの隣へコピーする
 /// （dev は `target/debug/`、.app は `Contents/MacOS/`）。
-fn sidecar_path() -> Result<PathBuf, CoreImageError> {
+pub(crate) fn sidecar_path() -> Result<PathBuf, CoreImageError> {
     let exe = std::env::current_exe().map_err(|error| {
         CoreImageError::new(
             "SIDECAR_NOT_FOUND",

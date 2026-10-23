@@ -1,6 +1,7 @@
+import { DevelopmentCandidates } from "./DevelopmentCandidates";
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
-import type { Adjustments, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
+import type { Adjustments, DevelopmentCandidate, DevelopmentCandidatesResponse, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
 
 type DevelopControlsProps = {
   engineStatus: EngineStatus;
@@ -19,6 +20,11 @@ type DevelopControlsProps = {
    */
   photoAccepted: boolean;
   onAcceptPhoto: () => void;
+  candidatesResponse: DevelopmentCandidatesResponse | null;
+  candidatesBusy: boolean;
+  candidatesError: string;
+  onGenerateCandidates: () => void;
+  onApplyCandidate: (candidate: DevelopmentCandidate) => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -38,6 +44,11 @@ export function DevelopControls({
   onResetAdjustments,
   photoAccepted,
   onAcceptPhoto,
+  candidatesResponse,
+  candidatesBusy,
+  candidatesError,
+  onGenerateCandidates,
+  onApplyCandidate,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -45,7 +56,7 @@ export function DevelopControls({
   hasFull,
 }: DevelopControlsProps) {
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
-  const busy = developMode !== null;
+  const busy = developMode !== null || candidatesBusy;
   const disabled = engineStatus !== "ready" || !adjustments;
 
   return (
@@ -128,7 +139,16 @@ export function DevelopControls({
           </div>
         )}
 
-        {/* 現像候補（DevelopmentCandidates）は M3 まで隠す。戻すときはここに <DevelopmentCandidates /> を差し込む。 */}
+        <DevelopmentCandidates
+          candidates={candidatesResponse?.candidates ?? []}
+          rejected={candidatesResponse?.rejected ?? []}
+          starScene={candidatesResponse?.star_scene ?? null}
+          busy={candidatesBusy}
+          error={candidatesError}
+          disabled={disabled || developMode !== null}
+          onGenerate={onGenerateCandidates}
+          onApply={onApplyCandidate}
+        />
 
         <div className="develop-actions">
           <button className="secondary-action" onClick={() => onDevelop("preview")} disabled={disabled || busy}>
