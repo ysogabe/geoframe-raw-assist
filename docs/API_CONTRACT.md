@@ -1,528 +1,406 @@
-# GeoFrame RAW Assist — API 契約（凍結版）
+# GeoFrame RAW Assist — Tauri コマンド契約
 
-> **凍結済み。変更には全ウェーブ停止が必要。**
-> この文書は Wave 0 で凍結された、Python 側と TypeScript 側の**唯一の正**である。
-> Wave 1 以降のエージェントは参照のみ行うこと。変更が必要になった場合は、
-> 実装を止めて orchestrator に差し戻し、全ウェーブ停止のうえ再凍結する。
+> **この文書はデスクトップアプリ（Tauri）のフロント ⇔ Rust 間の契約を、現行コードに合わせて記述する。**
+> 正はコードであり、食い違いを見つけたらコードを読んで本書を直す（Issue #118 で HTTP 契約から全面改訂）。
 >
-> 凍結日: 2026-08-10 / 出典: `.claude/plans/vectorized-snacking-falcon-agent-ad862d8a7d0ff47d3.md` §d・§f
-> TypeScript 側の写し: `app/lib/types.ts`（同じく凍結）
->
-> **追補 2026-08-18（現像元フォルダの選択・ユーザー承認済み）**:
-> `GET/POST /api/source-folder` を §1 に追加、サムネイル命名を §4 で変更、
-> `params_hash` に現像元フォルダのパスを追加（§1）、`SOURCE_ROOT` 定数を
-> `config.source_root()` の呼び出し時解決へ置換（§9）。
-> `Analysis.source.root` の整形を `SourceFolderInfo.display_path` と共通化（§3）。
->
-> **追補 2026-08-20（ブラケット露出合成・ユーザー承認済み）**:
-> `POST /api/merge-bracket` と `GET /merged/` を §1 に追加、`outputs/merged/` と
-> 合成JPEGの命名を §4 に追加、`POST /api/export` の `variant` に `"merged"` を追加（§1）。
-> 合成方式は Exposure Fusion（Mertens）で、HDR + トーンマッピングは採用しない。
->
-> **追補 2026-08-20b（プレビュー合成の分離・セキュリティレビュー対応）**:
-> プレビュー合成の出力先を `outputs/merged_preview/` に分離して `GET /merged-preview/` を
-> §1 に追加、§4 のディレクトリ規約に `outputs/merged_preview/` を追加、
-> `POST /api/export` の `variant:"merged"` を**本合成限定**と明記（§1）。
+> - 改訂日: 2026-10-23（Issue #118 / 設計 `docs/design/single-app-implementation-plan.md` §4 M4 の N-DOC）
+> - 前提: [ADR 0003](adr/0003-python-removal-single-app.md)（Python を外した単一アプリ）。
+>   **HTTP サーバ（`local_raw/server.py`、`http://127.0.0.1:8788`）とブラウザ単体（vite dev + Python）で動く形は廃止**した。
+>   フロントは `@tauri-apps/api` の `invoke` だけを使い、`fetch` は持たない（`src/lib/raw-api.ts` / `src/lib/coreimage-api.ts`）。
+> - 旧 HTTP 契約（凍結版、`/api/*` エンドポイント・`outputs/` ディレクトリ・rawpy パイプライン）は
+>   コミット `f3e24b0` 時点の本ファイルを参照。現行の決定と食い違う点は §10 にまとめた。
+> - TypeScript 側の写し: `src/lib/types.ts`。
+> - 節番号 §2（Adjustments）・§5（プリセット）・§9（resolve の規則）はコードのコメントから参照されている
+>   （`src-tauri/src/adjustments.rs`・`presets.rs`、`native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`、
+>   `native/coreimage-cli/README.md`）。**番号を変えないこと。**
 
 ---
 
 ## 0. 基本事項
 
-- ベースURL: `http://127.0.0.1:8788`（`RAW_ASSIST_PORT` で変更可）
-- CORS: `Access-Control-Allow-Origin` は `http://localhost:1420` / `http://127.0.0.1:1420`（Vite開発サーバ）と `tauri://localhost`（配布用ビルドがフロントエンドを読み込む本番origin。実機で `tauri build` した `.app` から実測して確認）のみ。値の意味・チェック方式は現状維持。
-- `POST` は `Origin` ヘッダが上記以外の場合 **403**（`{"error": "この画面からの操作は許可されていません。"}`）。
-  `GET` に Origin チェックは**無い**（現状維持）。
-- リクエストボディ上限: **64 KiB**。超過・0バイト・不正な `Content-Length` は **400**（`"リクエストサイズが不正です。"`）。
-- エラーレスポンスは全て `{ "error": string }`（日本語メッセージ）。
-- エラーの HTTP マッピング（現状維持）:
-  - `RawDevelopmentError` / `ValueError` / `TypeError` / `OverflowError` / `JSONDecodeError` → **400**、`{"error": str(error)}`
-  - それ以外の例外 → **500**、`{"error": "<エンドポイントごとの定型文>"}`（例: `"現像処理に失敗しました。"`）。
-    例外詳細（内部パスを含みうる）はレスポンスに載せず**サーバログにのみ**出す
-    （Wave 2-D のセキュリティ堅牢化で再凍結。旧仕様の `": <msg>"` 付き形式は廃止）
+### 0.1 呼び出し規約
+
+- 登録: `src-tauri/src/main.rs` の `tauri::generate_handler!`。コマンドは 13 本と独自スキーム `geoframe://` 1 本（§1）。
+- **引数名**: Rust 側は snake_case、JS の `invoke` に渡すキーは **camelCase**（Tauri 既定の変換。`rename_all` は使っていない）。
+  例: Rust `capture_ids: Vec<String>` ⇔ JS `invoke("merge_bracket", { captureIds, ... })`。
+- **戻り値のフィールド名はすべて snake_case**（serde の rename は無い）。
+- **エラー**は `invoke` の reject 値として届く。形はコマンドで 3 種類ある:
+
+| 形 | 使うコマンド |
+|---|---|
+| `CoreImageError` = `{ code: string, message: string }` | `get_analysis` `start_analysis` `engine_info` `develop_preview_coreimage` `develop_full_coreimage` `merge_bracket` `generate_development_candidates` |
+| `SourceFolderError` = `{ code: string, reason: string, message: string }`（`code` と `reason` は同じ値。フロントは `reason` を読む） | `set_source_folder` |
+| 素の `string`（日本語メッセージ） | `export_selection` `reveal_export` `import_to_photos` |
+
+- `message` は利用者向けの日本語文。パスを含むことがある（ローカルアプリなので許容）。
+- `get_presets` と `get_source_folder` は失敗しない（`Result` を返さない）。
+- `import_to_photos` は**写真.app 側の失敗を `Ok` の中で返す**（`status: "error"`。§1.13）。
+
+### 0.2 アプリデータディレクトリ `$APPDATA`
+
+`app.path().app_data_dir()`。識別子は `com.geoframe.rawassist`（`src-tauri/tauri.conf.json`）なので、macOS では
+`~/Library/Application Support/com.geoframe.rawassist/` になる（Tauri の既定規則による）。配下の構成は §4。
+
+### 0.3 画像の配信
+
+| 種別 | 方式 | URL |
+|---|---|---|
+| 現像・合成の出力、サムネイル | Tauri asset プロトコル。scope は `$APPDATA/coreimage/**` と `$APPDATA/thumbnails/**` のみ（`tauri.conf.json` `app.security.assetProtocol`） | `asset://localhost/<絶対パスを encodeURIComponent したもの>` |
+| 現像元フォルダのカメラ JPG | 独自スキーム `geoframe://`（`analysis::source_jpg_protocol`。§1.14） | `geoframe://localhost/source-jpg/DSC12345.JPG` |
+
+- asset URL はフロントの `convertFileSrc(path)` で作るもの（サムネイル・プレビュー）と、Rust が組み立てて返すもの
+  （`develop_full_coreimage` / `merge_bracket` の `output_url`）がある。どちらも macOS の形
+  （`asset://localhost/…`、パス全体を `encodeURIComponent` 相当で符号化）。
+- 現像元フォルダは任意の場所にあるので asset scope に入れず、`geoframe://` で `DSC\d{5}.JPG` だけを配る。
+- `csp` は `null`。capabilities（`src-tauri/capabilities/default.json`）は `core:default`・`dialog:allow-open`・
+  `dialog:allow-confirm`。アプリ独自コマンドに個別の permission は付けていない。
+
+### 0.4 共通の入力検証
+
+- **capture_id**: `^DSC[0-9]{5}$`（ASCII のみ）。違反は `INVALID_CAPTURE_ID`（`coreimage.rs`）。ファイル存在確認より前に判定する。
+- **現像元フォルダ**: `$APPDATA/config.json` の `source_root`（§4）。RAW / JPG は**そのフォルダ直下**に限る。
+  `canonicalize` 後の親ディレクトリが現像元フォルダと一致しないもの（シンボリックリンクで外へ出るもの）は拒否する。
+- **Core Image CLI の同時実行**: `DEVELOP_SLOT` は CLI を 1 本ずつ走らせ、待ちは最大 2 件。
+  さらに来た呼び出しは即 `BUSY`。プレビュー・原寸現像・合成・候補生成で共有する。キャッシュヒットはスロットを取らない。
+
+### 0.5 エラー code 一覧（`CoreImageError`）
+
+Rust が生成する code:
+
+| code | 主な条件 | 出しうるコマンド |
+|---|---|---|
+| `INVALID_CAPTURE_ID` | §0.4 の書式違反 | develop 系、merge、candidates |
+| `INVALID_CAPTURE_COUNT` | 合成の枚数が 2〜9 の外 | merge |
+| `DUPLICATE_CAPTURE_ID` | 合成の ID 重複 | merge |
+| `INVALID_BUDGET` | `budget` が 32〜512 の外 | candidates |
+| `UNKNOWN_PRESET` | プリセット名が §5 に無い | develop_full、merge、candidates |
+| `ADJUSTMENTS_INVALID` | §2 の検証違反（オブジェクトでない・未知キー・欠落キー（develop 系）・非数値・非有限・不正な `noise_reduction`） | develop 系、merge |
+| `APP_DATA_DIR_UNAVAILABLE` | `app_data_dir()` を解決できない | analysis 系、develop 系、merge |
+| `SOURCE_ROOT_NOT_CONFIGURED` | `config.json` に `source_root` が無い・空・相対パス | analysis 系、develop 系、candidates |
+| `SOURCE_ROOT_NOT_FOUND` | 現像元フォルダを解決できない・ディレクトリでない・読めない | develop 系、candidates |
+| `SOURCE_ROOT_INVALID` | 合成時に現像元フォルダを解決できない | merge |
+| `ARW_NOT_FOUND` | `<ID>.ARW` が現像元フォルダ直下に無い・通常ファイルでない・stat 失敗 | develop 系、merge、candidates |
+| `ARW_OUTSIDE_SOURCE_ROOT` | 解決後の ARW が現像元フォルダ直下にない | develop 系 |
+| `OUTPUT_DIR_FAILED` | `$APPDATA/coreimage/<sub>` を作れない・検証できない・シンボリックリンクで外へ出る | develop 系、merge、candidates |
+| `CACHE_IO_FAILED` | 合成の古いキャッシュを置き換え・検査できない | merge |
+| `PROVENANCE_WRITE_FAILED` | 現像の来歴 JSON を書けない | develop 系 |
+| `THUMBNAIL_FAILED` / `CACHE_WRITE_FAILED` | 解析中のサムネイル・解析キャッシュの書き込み失敗（**`get_analysis` の `error` に message だけが載る**。§1.1） | start_analysis（非同期） |
+| `CANDIDATES_FAILED` | 候補生成の scratch・代理画像・CLI 異常終了・スレッド異常 | candidates |
+| `BUSY` | §0.4 の待ち上限超過 | develop 系、merge、candidates |
+| `SIDECAR_NOT_FOUND` | 実行ファイルの隣に `geoframe-ci-develop` が無い（`npm run build:coreimage` 未実行） | engine_info、develop 系、merge、candidates |
+| `SIDECAR_SPAWN_FAILED` | CLI を起動できない | 同上 |
+| `SIDECAR_IO_FAILED` | CLI の SHA-256 計算・stdin 書き込み・wait の失敗 | 同上 |
+| `SIDECAR_TIMEOUT` | タイムアウトで kill（§1 各コマンドの値） | 同上 |
+| `SIDECAR_BAD_RESPONSE` | 最終行が JSON でない・構造化エラー無しで失敗・`output` が要求と違う・ファイルが無い・寸法や必須キーが欠落 | 同上 |
+| `SIDECAR_SESSION_CLOSED` | `--batch` セッションがタイムアウト等で閉じた後の要求 | candidates |
+| `INTERNAL_ERROR` | `spawn_blocking` のスレッドが異常終了 | analysis 系、develop 系、merge |
+| `INTERNAL` | 同上（**`engine_info` だけこの code**。§10.3） | engine_info |
+
+CLI（`geoframe-ci-develop`）の失敗応答 `{"ok":false,"error":{code,message}}` は **code・message をそのまま詰め替えて返す**
+（`coreimage.rs: cli_error`）。CLI の code は `native/coreimage-cli/README.md`「エラー」節が正:
+`INVALID_REQUEST` `INPUT_NOT_FOUND` `INPUT_NOT_READABLE` `OUTPUT_DIR_NOT_FOUND` `UNSUPPORTED_RAW`
+`UNSUPPORTED_DECODER_VERSION` `RENDER_FAILED` `WRITE_FAILED` `INTERNAL_ERROR`、`--batch` のみ `HANDLE_NOT_FOUND`。
+Rust が先に弾くので `INPUT_NOT_FOUND` / `INVALID_REQUEST` は通常届かない（ARW が判定と実行の間に消えた場合などに限る）。
 
 ---
 
-## 1. エンドポイント
+## 1. コマンド
 
-> ### ⚠ 実装状況（Wave 0 終了時点）— 契約は「これから実装する姿」である
->
-> **本章の契約は目標形であり、Wave 0 時点のサーバはまだこの形を返さない。**
-> 特に Wave 1-B（サーバ）と Wave 1-C（フロント機械分割）は**並列で走る**ため、
-> Wave 1-C が本契約どおりのレスポンスを期待して実装すると実行時に落ちる。注意すること。
->
-> | エンドポイント | Wave 0 時点 | 契約形の実装担当 |
-> |---|---|---|
-> | `GET /api/health` | **契約前の形**を返す: `{status, engine, rawpy_version, presets:[{name,label}]}`。<br>**`lensfun` キーは無い**。`presets[]` に `description` / `adjustments` は**無い**。 | Wave 1-B |
-> | `POST /api/raw-develop` | 動作するが**旧契約**: `adjustments` / `preview` / `params_hash` / `lens_correction` / `exif_inherited` は未対応。`filename` は旧命名 `{id}-{preset}.jpg`。 | Wave 1-A + 1-B |
-> | `GET /api/analysis`・`POST /api/analyze` | **未実装**（404） | Wave 1-B |
-> | `GET /preview/`・`GET /thumbs/` | **未実装**（404） | Wave 1-B |
-> | `POST /api/export`・`POST /api/import-to-photos` | **未実装**（404） | Wave 2-D |
-> | `GET /outputs/`・`GET /source-jpg/` | 契約どおり動作（既存） | — |
->
-> Wave 1-C は「挙動不変の機械分割」であり API 駆動化は Wave 2-C2 の担当なので、
-> **Wave 1-C では `app/lib/types.ts` の契約型を使った新規 fetch を書かないこと**（§6 参照）。
+| # | コマンド | JS 引数 | 戻り値 | エラー形 | 実装 |
+|---|---|---|---|---|---|
+| 1.1 | `get_analysis` | なし | `AnalysisStatus` | `CoreImageError` | `analysis.rs` |
+| 1.2 | `start_analysis` | `{ force?: boolean }` | `"started" \| "already_running" \| "ready"` | `CoreImageError` | `analysis.rs` |
+| 1.3 | `get_source_folder` | なし | `SourceFolderInfo` | 失敗しない | `source_folder.rs` |
+| 1.4 | `set_source_folder` | `{ path: string }` | `SourceFolderInfo` | `SourceFolderError` | `source_folder.rs` |
+| 1.5 | `get_presets` | なし | `PresetInfo[]` | 失敗しない | `presets.rs` |
+| 1.6 | `engine_info` | なし | `EngineInfo` | `CoreImageError` | `coreimage.rs` |
+| 1.7 | `develop_preview_coreimage` | `{ captureId, adjustments }` | `CoreImagePreviewResult` | `CoreImageError` | `coreimage.rs` |
+| 1.8 | `develop_full_coreimage` | `{ captureId, adjustments, preset }` | `DevelopedResult` | `CoreImageError` | `coreimage.rs` |
+| 1.9 | `merge_bracket` | `{ captureIds, preset, adjustments, preview, force }` | `MergedResult` | `CoreImageError` | `bracket.rs` |
+| 1.10 | `generate_development_candidates` | `{ captureId, preset, seed?, budget? }` | `DevelopmentCandidatesResponse` | `CoreImageError` | `candidates/command.rs` |
+| 1.11 | `export_selection` | `{ batchName, items }` | `ExportResponse` | `string` | `export.rs` |
+| 1.12 | `reveal_export` | `{ path }` | なし | `string` | `export.rs` |
+| 1.13 | `import_to_photos` | `{ batchName, album? }` | `ImportToPhotosResponse` | `string` | `photos_import.rs` |
+| 1.14 | （スキーム）`geoframe://localhost/source-jpg/<ID>.JPG` | — | JPEG バイト列 | HTTP ステータス | `analysis.rs` |
 
-### `GET /api/health` → `HealthResponse`
+### 1.1 `get_analysis`
 
-```
-{ status:"ready", engine:"rawpy/LibRaw", rawpy_version:string,
-  lensfun:{available:boolean, db_version?:string},
-  presets: PresetInfo[] }
-
-PresetInfo = { name:string, label:string, description:string,
-               adjustments: Adjustments }   // プリセット既定値 = UIスライダー初期値
-```
-
-- `lensfun.db_version` は **optional**。スパイク1の結果、lensfun にはDBスナップショット自体の
-  バージョンを返すAPIが無いため、`lensfunpy.lensfun_version`（タプル `(0, 3, 4, 0)`）を
-  `"0.3.4.0"` の形に整形して入れる。取得できない場合はキーごと省略してよい。
-- `lensfun.available` は `import lensfunpy` の成否。**false でも現像は正常動作する**（§4 参照）。
-
-### `GET /api/analysis`
+解析の状態を返す。進捗はイベントではなく**この呼び出しのポーリング**で取る（解析はイベントを emit しない）。
 
 ```
-→ { status:"absent" }
- | { status:"running", progress:{ stage:string, done:number, total:number } }
- | { status:"ready", analysis: Analysis }
+AnalysisStatus =
+  | { status: "running", progress: { stage: "scanning" | "scoring" | "grouping", done: number, total: number } }
+  | { status: "ready",   analysis: Analysis }       // §3
+  | { status: "absent",  error?: string }           // error は直前の解析失敗の message（code は載らない）
 ```
 
-### `POST /api/analyze`
+- 実行中かどうかを先に見るので、`running` は `config.json` が無くても返る。
+- `ready` はキャッシュ（§4 `analysis/<root_key>.json`）が有効なときだけ。有効条件は §3。
+- エラー: `SOURCE_ROOT_NOT_CONFIGURED`、`APP_DATA_DIR_UNAVAILABLE`、`INTERNAL_ERROR`。
+
+### 1.2 `start_analysis`
+
+- 引数 `force`（省略時 `false`）。戻り値は即時:
+  - `"already_running"` … 解析中。
+  - `"ready"` … `force=false` で有効なキャッシュがある（再解析しない）。
+  - `"started"` … バックグラウンド（`spawn_blocking`、最大 6 ワーカー）で解析を開始。直前の `error` を消す。
+- 解析中の失敗（`THUMBNAIL_FAILED`、`CACHE_WRITE_FAILED`）は `get_analysis` の `{status:"absent", error}` で見える。
+  デコードできない JPG は黙って飛ばす。
+- 対象ファイルは現像元フォルダ直下の `^DSC\d{5}\.(ARW|JPG)$`（拡張子は大小無視）。
+- エラー: `SOURCE_ROOT_NOT_CONFIGURED`、`APP_DATA_DIR_UNAVAILABLE`、`INTERNAL_ERROR`。
+
+### 1.3 `get_source_folder`
 
 ```
-body { force?:boolean } → { status:"started"|"already_running"|"ready" }
-```
-
-### `GET /api/source-folder` → `SourceFolderInfo`
-
-### `POST /api/source-folder` → `SourceFolderInfo`
-
-```
-body { path:string }        // 絶対パス。保存に成功したときのみ 200
-→ SourceFolderInfo
-
 SourceFolderInfo = {
-  path:string,              // 解決済みの絶対パス
-  display_path:string,      // 表示用。プロジェクト配下→プロジェクト相対 /
-                            // ホーム配下→"~/..." / それ以外→絶対パス
-  is_default:boolean,       // 既定（sample/100MSDCF）かどうか
-  exists:boolean,
-  readable:boolean,         // 実際に1エントリ読めたか（0組との区別に必須）
-  pairs:number,             // JPG/ARW 両方そろった組数
-  jpg_only:number,
-  arw_only:number,
-  total_bytes:number
+  path: string,           // canonicalize 済み絶対パス
+  display_path: string,   // プロジェクト直下なら相対、HOME 配下なら "~/…"、それ以外は絶対パス
+  is_default: boolean,    // 現状は常に false
+  exists: boolean, readable: boolean,
+  pairs: number, jpg_only: number, arw_only: number, total_bytes: number
 }
 ```
 
-- 件数は `analysis.scan_pairs()` の結果をそのまま使う（重複実装しない）。
-- 対象は **JPEG+RAW ペアのみ**（`DSC#####.JPG` と `DSC#####.ARW` の同名ペア）。
-  RAW 単独フォルダ・他機種は対象外。`CAPTURE_ID_PATTERN` と `/source-jpg/` の
-  12文字検証は現状維持。
-- `GET` は設定が無い / 壊れている / 保存先がもう存在しない場合、既定フォルダの情報を返す（エラーにしない）。
-- 読み取れて **0 組**の場合は**エラーにせず保存**し、`pairs: 0` を返す
-  （ユーザーが後からファイルを置くことがあるため）。
+- `config.json` が無い・読めない・`source_root` が空/相対のときは、**コンパイル時に埋め込まれた
+  `<リポジトリ>/sample/100MSDCF`** の情報を返す（表示用のフォールバック。他のコマンドは同じ状況で
+  `SOURCE_ROOT_NOT_CONFIGURED` を返す。§10.3）。
+- 件数は拡張子 `jpg`/`arw`（大小無視）とファイル名の stem で数える。解析の `DSC\d{5}` 規則より緩いので
+  `Analysis.source` の件数と一致しないことがある。
 
-POST のエラーは全て **400** で `{ "error": string, "reason": string }`:
+### 1.4 `set_source_folder`
 
-| reason | 条件 | 保存 |
-|---|---|---|
-| `invalid` | `path` が文字列でない / 空 / 絶対パスでない / パスとして不正（NUL・長さ超過等） | しない |
-| `not_found` | 存在しない | しない |
-| `not_directory` | ディレクトリでない | しない |
-| `permission_denied` | 読み取り不可（`os.scandir` が `PermissionError`） | **しない** |
-| `analysis_running` | 解析ジョブ実行中 | **しない** |
+- 引数 `path`（前後の空白は除く。絶対パス必須）。成功時は保存したフォルダの `SourceFolderInfo`。
+- `$APPDATA/config.json` へ `{ config_version: 1, source_root: <canonicalize 済みパス> }` を書く。未知のキーは保持する。
+  一時ファイル `config.<pid>-<nonce>.tmp` → rename、プロセス内の mutex で直列化。
+- 古い解析キャッシュ・サムネイルは消さない（`root_key` が変わるので読まれなくなるだけ）。
+- エラー `SourceFolderError.code`（判定順）:
 
-- `permission_denied` を「0組」と混同させないこと。macOS は `~/Pictures` / `~/Desktop` /
-  外部ボリュームへの初回アクセスで許可を求め、拒否されると `PermissionError` になる
-  （`Path.glob` はこれを握り潰すので、`readable` の判定には `os.scandir` を使う）。
-  メッセージはシステム設定での許可を案内する。
-- §0 の共通 400（64KiB 超過・不正 JSON 等）もこのエンドポイントでは
-  `reason: "invalid"` を付けて形を揃える。
-- **フォルダを切り替えると解析キャッシュは自動的に無効**になる（署名にルートパスを含むため）。
-  切り替え直後の `GET /api/analysis` は `{"status":"absent"}` を返すので、
-  フロントは `POST /api/analyze` で再解析を促すこと。現像キャッシュとサムネイルは
-  フォルダごとにキーが分かれるので、元のフォルダに戻せばそのまま再利用される。
+| code | 条件 |
+|---|---|
+| `analysis_running` | 解析中（パスより先に判定） |
+| `invalid` | 空・相対パス・その他の metadata エラー・canonicalize 失敗・`app_data_dir` 失敗・設定の保存失敗 |
+| `not_found` | パスが存在しない |
+| `permission_denied` | metadata が PermissionDenied、または `read_dir` 失敗（message でシステム設定 > プライバシーを案内） |
+| `not_directory` | ディレクトリでない |
 
-### `POST /api/raw-develop`
+### 1.5 `get_presets`
+
+`PresetInfo = { name, label, description, adjustments: Adjustments }`（§2 の 9 キー全量）。並びと値は §5。
+
+### 1.6 `engine_info`
 
 ```
-body { capture_id:string, preset:string, adjustments?:Partial<Adjustments>,
-       preview?:boolean, force?:boolean, max_edge?:number }
-→ DevelopedResult
+EngineInfo = { cli_version: string, macos_version: string, sidecar_resolved: boolean /* 成功時は常に true */ }
 ```
+
+- `macos_version` は `/usr/bin/sw_vers -productVersion`、失敗時は CLI の自己申告。`cli_version` は CLI の `--version`
+  （サイドカーのパスごとに初回成功値をキャッシュ。タイムアウト 10 秒）。
+- エラー: `SIDECAR_*`、`INTERNAL`、CLI 由来 code。
+
+### 1.7 `develop_preview_coreimage`
+
+- 引数: `captureId`、`adjustments`（§2 の **9 キー全量**。フロントの `resolveAdjustments` でプリセット値と合成済みのもの）。
+- CLI 要求の固定値: `decoder_version: "9"`、`settings: { profile: "apple_default", lens_correction: true }`、
+  `format: "jpeg"`、**`max_edge: 2400`（`PREVIEW_MAX_EDGE`。ウィンドウ・画面からは決めない固定値）**。
+- EXIF は書かない（`exif_inherited` は常に `false`）。タイムアウト 60 秒（スロット待ちを除く）。
+- 出力: `$APPDATA/coreimage/preview/<ID>_<hash16>.jpg` + `.json`（§4）。
+
+```
+CoreImagePreviewResult = {
+  capture_id, output_path /* 絶対パス */, provenance_path /* 絶対パス */,
+  width, height,
+  elapsed_ms: { decode, render_encode, total } | null,   // キャッシュヒット時は元の実行の値
+  cache_hit: boolean, preview: boolean, exif_inherited: boolean,
+  params_hash: string /* 16 hex */, decoder_version: "9", cli_version, macos_version,
+  adjustments: Adjustments /* 正規化後 */, applied: object /* CLI の applied */,
+  adjustments_applied: object | null /* CLI 0.3.0 以上。highlight_recovery の写像結果を含む */,
+  source: object /* CLI の source（lens_model, iso, camera_model ほか） */
+}
+```
+
+フロントは `toDevelopedResult`（`coreimage-api.ts`）で `DevelopedResult` に詰め替え、`convertFileSrc(output_path)` を表示に使う。
+
+### 1.8 `develop_full_coreimage`
+
+- 引数: `captureId`、`adjustments`（9 キー全量）、`preset`（プリセット名。**ラベル付けと名前の検証だけ**に使い、値は `adjustments` が正）。
+- `max_edge` を送らない（原寸）。それ以外の固定値は §1.7 と同じ。タイムアウト 60 秒。
+- **EXIF 継承あり**（§7.2）。継承に失敗しても現像は成功し `exif_inherited: false`。
+- 出力: `$APPDATA/coreimage/full/<ID>_<hash16>.jpg` + `.json`。
 
 ```
 DevelopedResult = {
   capture_id, preset, preset_label,
-  filename:string,          // {id}-{preset}-{hash10}.jpg
-  recipe_filename:string,
-  params_hash:string,
-  adjustments:Adjustments,  // 解決後の全量（Partial ではない）
-  width, height, elapsed_seconds, cached:boolean, preview:boolean,
-  lens_correction:{applied:boolean, reason?:string, lens?:string,
-                    lens_model?:string, flags?:string[], skipped?:string[],
-                    focal_length?:number, aperture?:number},
-  exif_inherited:boolean,
-  output_url:string,
-  engine?:DevelopEngine     // "rawpy" | "coreimage"（#72 で凍結後に追加した任意フィールド。型は src/lib/types.ts）
+  filename /* 出力 JPEG の basename */, recipe_filename /* 来歴 JSON の basename */,
+  params_hash /* hash16 の先頭 10 文字 */, adjustments, width, height,
+  elapsed_seconds /* 小数 2 桁 */, cached: boolean, preview: false,
+  lens_correction: { applied: boolean, lens: string | null, flags: [], reason?: "coreimage_unsupported" },
+  exif_inherited: boolean,
+  output_url: "asset://localhost/<符号化した絶対パス>",
+  engine: "coreimage",
+  highlight_recovery_effect?: object   // adjustments_applied.highlight_recovery があるときだけ
 }
 ```
 
-- `engine?`: 現像したエンジン。Python（`/api/raw-develop`）の応答には**含まれない**（未設定 = rawpy 扱い）。Tauri の Core Image プレビュー（`src-tauri/src/coreimage.rs` の結果をフロントが `toDevelopedResult` で `DevelopedResult` に詰め替えたもの）では `"coreimage"`。Core Image プレビューでは `adjustments` はフロントが解決した全量をクランプ・float 化したもの、`lens_correction` は CLI の `applied.lens_correction_enabled` から詰める（歪曲・色収差・周辺減光の内訳 `flags` は空。未適用時の `reason` は `coreimage_unsupported`）、`exif_inherited` は常に false（CLI は EXIF を書かない契約）。
+エラー（判定順）: `UNKNOWN_PRESET` → `ADJUSTMENTS_INVALID` → `INVALID_CAPTURE_ID` → `APP_DATA_DIR_UNAVAILABLE` →
+`SIDECAR_NOT_FOUND` → `SOURCE_ROOT_*` → `ARW_*` → `OUTPUT_DIR_FAILED` → `BUSY` → `SIDECAR_*` / CLI 由来 →
+`PROVENANCE_WRITE_FAILED`。§1.7 も `UNKNOWN_PRESET` を除き同じ。
 
-- `preview:true` → rawpy `half_size=False`（プレビュー / 本現像とも full-size デモザイクを共有し、画角を一致させる） + `max_edge=1600`、出力先 `outputs/preview/`（2〜5秒）。
-- 本現像は `outputs/developed/`（10〜20秒）。
-- `max_edge` の許容範囲は **1200〜6048**（範囲外は 400 `"最大辺は1200〜6048pxで指定してください。"`）。
-- **`output_url` にはキャッシュバスター `?v=<st_mtime_ns>` が付く**（現行実装の挙動を維持）。
-  例: `http://127.0.0.1:8788/outputs/DSC02943-nightscape-a1b2c3d4e5.jpg?v=1786088071771443048`
-  フロント（Wave 2-C2）は `output_url` を**そのまま `<img src>` に使うこと**。パスとして再構成しない。
+### 1.9 `merge_bracket`
 
-#### キャッシュキー（既存バグの解消）
+露出ブラケット（解析の `bracket` グループ）を Core Image で現像し、**MTB 位置合わせ + Mertens Exposure Fusion** で 1 枚にする（HDR + トーンマップは採用しない）。
 
-`params_hash` = `sha1(canonical JSON of { 解決後 adjustments, preset名, max_edge,
-rawpy/Pillow/engine バージョン, lensfun 適用有無, **現像元フォルダの解決済み絶対パス**,
-暗いシーンの固定倍率（該当時 5.0、非該当 null） })[:10]`
-
-- **暗いシーンのデコード**（2026-09 追補, Issue #50）。EV100 = log2(N²/t) − log2(ISO/100)
-  （N=F値, t=露光秒）が **6.0 以下**のシーンは、LibRaw の auto_bright が暗い画面を過剰に持ち上げて
-  星空・夜景の空を灰白色に飛ばすため、`no_auto_bright=True` の**固定倍率**
-  （`bright = 5.0 × 2^exposure`、`exp_shift=1.0`）でデコードし、レンズ補正はビネットだけを強制スキップ
-  （歪曲・TCA は従来どおり。`lens_correction.skipped` に `vignetting_forced_skip`）する。
-  それ以外のシーンは従来どおり auto_bright 有効（`auto_bright_thr=0.01`、`bright=2^exposure`）で不変。
-  EXIF はペアJPGから読み、F値・露光秒・ISO のどれかが欠けるときは RAW 埋め込みサムネイル
-  （JPEG のとき）の EXIF から読む。それでも読めなければ暗いシーン扱いにしない。
-  判定結果はレシピの `dark_scene: { ev100, dark_scene, bright_k, source }`
-  （`source` は `pair_jpg` / `raw_thumbnail` / null）に記録する。
-  現像候補（§候補生成）の縮小デコード代理も同じ判定・同じデコード方式を使う。
-  ブラケット合成（`/api/merge-bracket`）は元から `no_auto_bright=True` の独自パラメータなので対象外。
-  `ENGINE_VERSION` 17 / `RECIPE_VERSION` 11（レシピに `dark_scene` を追加）で現像・合成の既存キャッシュは無効になる。
-
-- **現像元フォルダのパスを必ず含める**（2026-08-18 追補）。`capture_id` はカメラの連番なので
-  カードが違えば別の写真に同じ ID が付く。含めないと、別フォルダの同名 ID を同じプリセットで
-  現像したときに**他人の写真の現像結果が `cached: true` で返る**。
-
-- ファイル名に `hash10` として埋め込む。
-- **ヒット判定はレシピJSON内の `params_hash` の完全一致**で行う
-  （現行の「id+preset のみ」でのキャッシュ判定はバグとして廃止する）。
-
-### `POST /api/merge-bracket`
-
-```
-body { capture_ids:string[], preset:string, adjustments?:Partial<Adjustments>,
-       preview?:boolean, force?:boolean, max_edge?:number }
-→ MergedResult
-```
+- 引数（**すべて必須**。`max_edge` 引数は無い）:
+  - `captureIds: string[]` … 2〜9 枚。**昇順に並べ替えてから処理・記録**する。重複は `DUPLICATE_CAPTURE_ID`。
+    どのフレームを混ぜるかはフロントの責務（1 グループに別シーンの AEB が混ざりうるため）。
+  - `preset: string`、`adjustments: object` … `resolve_adjustments(preset, adjustments)` で解決（§9。部分指定も可）。
+  - `preview: boolean` … プレビュー合成か本合成か。
+  - `force: boolean` … `true` でキャッシュを見ずに古い出力を消して再合成。フロントは常に `false`。
+- CLI 要求（1 回）: `mode: "merge"`、`format: "jpeg"`、`jpeg_quality: 0.92`、`decoder_version: "9"`、
+  `settings: { profile: "apple_default", lens_correction: true }`、`adjustments`、
+  `merge: { align: true, max_shift_ratio: 0.02, edge: "crop", weights: { contrast: 1, saturation: 1, exposure: 0 } }`。
+  - **preview は `max_edge: 2400`（`PREVIEW_MAX_EDGE`、固定）。本合成は `max_edge` を送らない**（原寸。共通 crop で数 px 小さくなりうる）。
+  - `exposure` / `highlight_recovery` は CLI が全フレームで 0 に固定し `adjustments_applied.ignored` に記録する。
+    `wb_temp` / `noise_reduction` / デコーダのシャープは各フレームのデコードに、残りの後段は合成結果に 1 回だけ効く。
+- **基準フレームの規則（2 つは別物）**:
+  - 位置合わせの基準 = **昇順に並べた列の中央** `index = count / 2`（整数除算。2 枚→1、3 枚→1、5 枚→2。
+    `MergeCore.swift`、来歴の `merge.reference_index`）。
+  - **ファイル名の先頭 ID・EXIF 継承元 = 昇順の先頭** `capture_ids[0]` のペア JPG（`bracket.rs`）。
+  - 位置合わせが成立しない（`align_failed` / `shift_exceeds_ratio` / `empty_common_crop`）ときはシフト無しで合成し
+    `aligned: false`、理由は来歴の `merge.reason`。探索上限は `floor(min(w,h) × 0.02)` px。
+- EXIF: 本合成のみ先頭フレームのペア JPG から継承（§7.2）。preview は継承しない。継承できなくても合成は成功。
+- タイムアウト: preview 120 秒、本合成 240 秒。
+- 出力: 本合成 `$APPDATA/coreimage/merged/`、プレビュー `$APPDATA/coreimage/merged_preview/`（**ディレクトリで分ける**。
+  書き出しが「原寸かどうか」をディレクトリと来歴で判定するため。§1.11）。命名・キャッシュは §4。
 
 ```
 MergedResult = {
-  capture_ids:string[],     // 昇順に正規化して返す
-  frames:number,
-  preset, preset_label,
-  filename:string,          // {先頭id}-merged{枚数}-{preset}-{hash10}.jpg
-  recipe_filename:string,
-  params_hash:string,
-  adjustments:Adjustments,  // 解決後の全量（Partial ではない）
-  width, height, elapsed_seconds, cached:boolean, preview:boolean,
-  aligned:boolean,          // 位置合わせ(AlignMTB)が成立したか
-  lens_correction:{applied:boolean, reason?:string, lens?:string,
-                    lens_model?:string, flags?:string[], skipped?:string[],
-                    focal_length?:number, aperture?:number},
-  exif_inherited:boolean,
-  output_url:string         // 本合成 /merged/<file>?v=<st_mtime_ns>
-                            // プレビュー /merged-preview/<file>?v=<st_mtime_ns>
+  capture_ids: string[] /* 昇順 */, frames: number, preset, preset_label,
+  filename, recipe_filename, params_hash /* 10 hex */,
+  adjustments /* 解決後の 9 キー全量 */, width, height, elapsed_seconds,
+  cached: boolean, preview: boolean, aligned: boolean,
+  lens_correction: { applied: boolean, flags: [], reason?: "coreimage_unsupported" | "inconsistent_across_frames",
+                     lens?: string, lens_model?: string /* 先頭フレームの source.lens_model */ },
+  exif_inherited: boolean,
+  output_url: "asset://localhost/<符号化した絶対パス>?v=<mtime_ns>"
 }
 ```
 
-`MergedResult.lens_correction` はフレーム別の補正結果を要約した値である。`applied` は全フレームが
-`true` の場合だけ `true`、全フレームが `false` の場合だけ `false` になり、混在時は
-`{applied:false, reason:"inconsistent_across_frames"}` になる。`flags` / `skipped` /
-`focal_length` / `aperture` は、全フレームにキーが存在して値も一致する場合だけ共有フィールドとして
-埋まり、キー欠落または不一致があればそのキーは省略される。全不適用時の `reason` は先頭フレームの
-値（無ければ `unknown`）を使い、`lens_model` は先頭フレームに値がある場合に記録する。
+- `lens_correction.reason` の語彙は 2 値（`tests/fixtures/coreimage_merge_lens_reasons.json` が正）:
+  `coreimage_unsupported`（全フレームで CI のレンズ補正を適用できなかった）、
+  `inconsistent_across_frames`（フレーム間で適用状態が揃わなかった）。
+- エラー: `INVALID_CAPTURE_COUNT` `INVALID_CAPTURE_ID` `DUPLICATE_CAPTURE_ID` `UNKNOWN_PRESET` `ADJUSTMENTS_INVALID`
+  `APP_DATA_DIR_UNAVAILABLE` `SOURCE_ROOT_INVALID` `ARW_NOT_FOUND` `CACHE_IO_FAILED` `OUTPUT_DIR_FAILED` `BUSY`
+  `SIDECAR_*` `INTERNAL_ERROR`、CLI 由来。
 
-露出を変えて撮ったブラケット（解析の `exposure_bracket`）を **Exposure Fusion（Mertens）**
-で1枚に合成する。HDR 合成 + トーンマッピングは採用しない。
+### 1.10 `generate_development_candidates`
 
-- `preview:true` → rawpy `half_size=False`（プレビュー / 本合成とも full-size デモザイクを共有し、画角を一致させる） + `max_edge=1600`、出力先 `outputs/merged_preview/`。
-  本合成は `outputs/merged/`（2026-08-20b 追補）。**プレビューと本合成はディレクトリで分ける**:
-  `params_hash` が違うのでファイル名は衝突しないが、同居しているとサーバ側で「原寸か
-  プレビューか」を判定できず、`POST /api/export` の `variant:"merged"` に長辺1600pxの合成を
-  マスターとして書き出せてしまう（現像側の `outputs/developed/` と `outputs/preview/` と同じ形）。
-- `output_url` はサーバ側が `preview` の値でルートを切り替えて付与する
-  （`preview:true` は `/merged-preview/<filename>`、それ以外は `/merged/<filename>`。
-  いずれもキャッシュバスター `?v=<st_mtime_ns>` 付き）。フロントは `output_url` を
-  **そのまま `<img src>` に使うこと**。パスとして再構成しない。
+1 枚の RAW について、スタイル別の現像候補（`Adjustments`）を多目的 PSO で探す。
 
-- **フレーム数は 2〜9 枚**。範囲外は 400（`"合成できるのは2〜9枚です。"`）。
-  上限があるのは「1グループ＝1シーン」を保証できないため（実データに1グループ20枚＝
-  別シーンの AEB 4セット分が存在する）。**どのフレームを混ぜるかの選択はフロントの責務**で、
-  エンジンは受け取ったものを合成する。
-- `capture_ids` は現像元フォルダ直下に限定し（`resolve()` 後の親一致）、重複は 400。
-  戻り値・ファイル名・EXIF 継承元・位置合わせの基準は**昇順に正規化した順**に揃える。
-- 処理順序（固定）: rawpy(**`no_auto_bright=True`**) → lensfun補正 → AlignMTB →
-  MergeMertens → クリップ → resize → shadow_lift (float32) → Brightness → Contrast →
-  Color → Sharpness → save(exif, icc)
-- **`no_auto_bright=True` が要**。`develop_raw` 側の自動明るさ補正はフレームごとに露出を
-  正規化するため、そのまま流用すると**ブラケットの露出差が消えて合成が無意味になる**
-  （実測: 同ブラケット5枚を `develop_raw` すると平均輝度が 46.7〜49.4 に揃ってしまう）。
-- `Adjustments` のうち **`exposure` と `highlight_recovery` は使わない**（どちらも rawpy 段で
-  フレームごとの露出・ハイライト処理を動かすパラメータであり、合成の前提を壊すため）。特に
-  Mertens Exposure Fusion は複数フレームの露出差そのものを情報として使うため、rawpy 段の
-  ハイライト復元モードを個々のフレームに適用すると復元の効き方が揃わず、フュージョンの前提が
-  崩れる。`highlight_recovery` は no-op とし、複数露出からハイライト情報を統合する Mertens
-  自体の処理に任せる。`wb_temp` / `noise_reduction` は全フレームに同一に効くので反映する。
-  トーン調整は**合成結果に対して1回だけ**適用する。
-- （2026-09-29 追補）撮影時シャープ（§2）の ISO 依存には**先頭フレーム**（昇順正規化後）の ISO を使う
-  （RAW の `iso_speed`、無ければ先頭フレームのペアJPG EXIF。EXIF 継承元と同じ基準）。
-  `noise_reduction="light"` の FBDD の ISO 適応（§2、ISO<800 で Off）は各フレームのデコードで
-  そのフレーム自身の ISO により判定する。
-- EXIF は**先頭フレームのペアJPGから継承**（`Orientation` は 1 に正規化）。
-- `aligned` は結果であって**キャッシュキーには入らない**（合成を回すまで判らず、
-  ファイル名の決定に間に合わないため）。`params_hash` には位置合わせの**版**が入る。
-- 全フレームで lensfun の解決自体が成功していても、焦点距離が一致しない場合は、
-  幾何ワープを揃えられないため全フレーム無補正へフォールバックする。この場合の reason は
-  `lens_params_inconsistent_across_frames` であり、一部フレームのレンズ解決失敗を表す
-  `inconsistent_across_frames` とは別物である（Sony E PZ 16-50mm のパワーズーム等での
-  ズーム位置の微小なずれを検出するため）。焦点距離と絞りの両方が一致しない場合もこちらになる。
-- （2026-09 追補, Issue #36）焦点距離が一致し**絞りだけ**が一致しない場合（S/P モードの
-  露出ブラケット等）は、全フレーム無補正にはしない。lensfun で絞りが効くのはビネットモデル
-  だけで歪曲/TCA の幾何は焦点距離のみで決まるため、幾何補正は全フレームで維持し、ビネットだけを
-  全フレームで強制スキップする。各フレームと集約の `lens_correction.skipped` には
-  `vignetting_aperture_inconsistent_across_frames` が入る（lens.py 内部の
-  `vignetting_forced_skip` はこの群理由に置き換わる）。集約 `lens_correction` からは値が
-  割れる `aperture` が落ちる。ビネット較正しか無いレンズでは結果的に `applied:false` となり、
-  reason が `vignetting_aperture_inconsistent_across_frames` になる。
-- 事前の焦点距離一致検証を通過しても、実行時に一部フレームだけ歪曲/TCA（幾何補正）
-  が失敗することがある（`tca_map_unexpected_shape` / `geometry_non_finite` /
-  `geometry_correction_failed`）。この場合 `apply_lens_correction` は成功済みのビネット
-  補正だけを保持した部分適用状態（`applied:true`）を返すため、ビネット用のグループ判定
-  （`skipped` の `vignetting_*` 系）では検出できない。歪曲補正は放射状のワープで位置合わせ
-  では混在を除去できないため、これを検出したら全フレーム無補正へフォールバックし、reason
-  は `geometry_inconsistent_across_frames` になる。
-  ただし lens.py は補正フラグが1つも立たないと `skipped` を返さず、先頭の理由だけを
-  `reason` にする（`applied:false`）。そのためビネットのスキップ（強制スキップ含む）と
-  幾何失敗が同じフレームで重なると、幾何理由が見えない。これを補うため、グループ処理の
-  最終状態で `applied` がフレーム間で混在した場合（補正全体の失敗 `error:...` を含む）も、
-  同じ reason `geometry_inconsistent_across_frames` で全フレーム無補正へフォールバックする
-  （Issue #36 の PR #64 レビュー対応）。全フレーム `applied:false` の場合はこの対象外。
-
-#### キャッシュキー
-
-`params_hash` = `sha1(canonical JSON of { **ソート済み capture_ids**, 解決後 adjustments,
-preset名, max_edge, preview, lensfun 適用可否, 位置合わせの版,
-rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの解決済み絶対パス** })[:10]`
-
-- `capture_ids` と現像元フォルダのパスを**必ず含める**。`capture_id` はカメラの連番なので、
-  含めないと別フォルダの同じIDに対して**他人の写真の合成結果が `cached: true` で返る**。
-- **`ENGINE_VERSION` も含める**（2026-08-21 追補）。合成はレンズ補正・トーン処理・JPEG保存を
-  §2 の現像パイプラインと共有しているので、そちらの出力が変わる修正で `ENGINE_VERSION` を
-  上げても、含めないと**合成側のキャッシュだけが無効化されず古い結果を返し続ける**。
-  （2026-09-29 追補: 撮影時シャープの既定化で `ENGINE_VERSION` は 16、`RECIPE_VERSION` は 10 になった。§2 参照）
-- ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
-
-#### Tauri Core Image 実装の固定契約（#84）
-
-デスクトップ版は上記 Python エンドポイントとは別に Tauri コマンド `merge_bracket` を呼ぶ。
-フロントから渡すキーは `{ captureIds, preset, adjustments, preview, force }` に固定し、
-`captureIds` はID配列、`preset` はプリセット名、`adjustments` は9キー全量、`preview` は
-boolean、`force` はbooleanとする。`max_edge` はフロント引数に含めない。
-
-Rust は Swift CLI の合成リクエストを固定し、preview では `max_edge: 2400` を指定し、full では
-`max_edge` キーを省略する。レンズ補正理由のUI共通語彙は次の2値で、名称と意味は
-`tests/fixtures/coreimage_merge_lens_reasons.json` を正とする。
-
-- `coreimage_unsupported`: 全フレームで Core Image のレンズ補正を適用できなかった。
-- `inconsistent_across_frames`: フレーム間でレンズ補正の適用状態が一致しなかった。
-
-### `POST /api/development-candidates`
-
-```
-body { capture_id:string, preset:string, seed?:number, budget?:number }
-→ DevelopmentCandidatesResponse
-```
-
-`capture_id` は `DSC` + 5桁数字、`preset` は `GET /api/health` の既存プリセット名である。
-`seed` は 0 以上の32bit整数（省略時は `capture_id:preset` から導出）、`budget` は 32〜512 の整数（省略時 48）に
-限定する。型違い、範囲外、未知キーは 400、選択中フォルダに元ARWが無い場合は 404、
-その他の予期しない失敗は 500（共通のエラー形式）とする。
-
-このエンドポイントは **カメラJPGではなく ARW の縮小デコード**を代理画像にする（旧版の
-「JPG＋独自トーン式」は本番現像を予測できなかったため作り直した）。
-
-- ARW が無ければ 404（ペアJPGだけでは生成しない）。EXIF（ISO・露光時間・撮影時刻）は
-  ペアJPGから読む（JPGが無ければ EXIF なしで続行）。パスは `source_root` 直下の
-  `<capture_id>.ARW` に限定し、`resolve()` 後の親が一致しないもの（シンボリックリンク等）は 404。
-- デコードは `rawpy` の `half_size=True`。デコード時パラメータは engine の
-  `_postprocess_params` をそのまま使い（`half_size` だけ差し替え。暗いシーンは本番と同じ
-  固定倍率デコード）、`float32 [0,1]` へ変換して
-  長辺 1280px に縮めた配列を `(highlight カテゴリ, noise_reduction, exposure)` をキーに
-  LRU キャッシュ（最大24枚）する。同一キーは再デコードしない。
-- 評価は engine の後段関数そのもの（`_apply_shadow_lift_array` → 長辺640pxへ `_resize_array` →
-  `_apply_tone_array`）を適用する。`develop_raw` の後段と同じ順序で、独自のトーン式は持たない。
-  （2026-09-29 追補）撮影時シャープ（§2）の ISO 依存も本番と揃えるため、ISO は RAW の `iso_speed`、
-  無ければペアJPGの EXIF から取り、`render_proxy(..., iso=)` 経由で後段へ渡す。デコードキャッシュの
-  キーは変えない（`noise_reduction="light"` の FBDD は ISO で切り替わるが、同一 ARW ではキー内で ISO は一定）。
-  **レンズ補正（`apply_lens_correction`）は代理では省略**する（幾何補正が中心のため）。
-  full-size デモザイクではないので、ノイズ・細部の絶対値は本番と厳密には一致しない。
-- **`highlight_recovery` は連続値として探索しない**。rawpy のデコード時に効く3段階
-  （`<=0` Clip / `<75` Blend / `>=75` ReconstructDefault、engine と同じ境界）をカテゴリとして
-  扱い、各カテゴリの代表値（0 / 50 / 85。プリセット値が同カテゴリならプリセット値）を返す。
-- `exposure` は 0.5EV 格子へスナップしてデコード時の `bright` に渡し、返す値もスナップ後。
-  `wb_temp` は探索せずプリセット値のまま返す。`noise_reduction` はスタイルごとに決め、その値で
-  デコードしたキャッシュで評価する。探索するのは exposure / shadow_lift / brightness /
-  contrast / saturation / sharpness と highlight カテゴリで、決定的な多目的PSO（Pareto front）で行う。
-- `natural` は**プリセット値そのもの**（基準画像）で PSO 予算は使わず、他スタイルに配分する。
-  指標の「基準との差」（`source_deviation`、別名 `baseline_deviation`）は、この基準画像との
-  平均絶対差である。star 系指標は基準側も候補と同じ関数・同じ条件で計算する。
-- **安全策**: 基準より `highlight_clip` / `shadow_clip` が 0.10（絶対値）以上悪化する候補は
-  返さない。`low_noise` は基準より `noise_flat` が悪化したら、`foreground` は基準の暗部
-  （輝度下位25%）の平均輝度が 0.005 以上明るくならなければ返さない。返さなかった候補は
-  `rejected: [{id, reason}]` に理由付きで入る（`natural` は常に返す）。
-- 所要時間は1枚あたり概ね3〜16秒（デコード回数に依存。`proxy.decodes` に実回数）。
-
-星空ゲートは **EXIF を主信号**にする。露光時間 >= 2秒 かつ EV100 <= −2（`exif_state:"night"`）のとき、
-代理画像（gray − ガウシアンぼかし）の局所コントラストで数えた小さな点光源の密度が 0.0008 点/画素以上
-（長辺640pxで約220点）で、輝度0.85以上の大面積光源が2%以下なら `star_scene.is_star_scene=true`
-（背景の暗さは問わないので天の川が広がる星空も判定できる）。露光時間 < 2秒、または EV100 > −2 と
-分かる写真（`exif_state:"daylight"`）は画像に依らず星空にしない。EXIF が無い・露光時間かEV100が不明
-（`exif_state:"unknown"`）のときは安全側の厳しい画像条件（暗い背景 >= 0.72、点密度 >= 0.002、
-明部の合計面積 <= 0.5%）をすべて満たす場合だけ星空とする。星候補はこの場合だけ返し、
-通常写真へ星最適化を強制しない。返却順は `natural` を先頭に、`stars`、`foreground`、
-`low_noise`、`social` の順で最大5件（画像特性に合わないスタイル・安全策で落ちたスタイルは省略）とする。
+- 引数: `captureId`、`preset`、`seed?: number`（u32）、`budget?: number`。フロント（`App.tsx`）は `captureId` と `preset` だけ送る。
+  - `budget` 既定 48、範囲 32〜512（外れは `INVALID_BUDGET`）。
+  - `seed` 既定 = SHA-256(`"{capture_id}:{preset}"`) の先頭 4 バイト（big-endian）。
+- 評価は長辺 **640 px の代理画像**（`renderer.rs: MAX_EDGE`。プレビューの 2400 とは別）で行う。
+  CLI は `--batch` セッション（要求ごとに 60 秒のタイムアウト。全体の締め切りは無い）。
+- スタイル: `natural`（プリセット値そのもの・最適化しない）と `social` は常に。`stars`（星空と判定）、
+  `foreground`（暗部画素の比率が大きい）、`low_noise`（ISO ≥ 1600 などノイズが多い）は条件付き。
+- 進捗イベント: `development-candidates-progress` を emit
+  `{ capture_id, preset, stage: "decode" | <style id> | "done", completed, total }`（現行フロントは listen していない）。
+- ファイル: `$APPDATA/coreimage/candidates/pso-<pid>-<n>/`（0700）を scratch に使い、終了時（成功・失敗・panic）に消す。結果のキャッシュは無い。
 
 ```
 DevelopmentCandidatesResponse = {
-  capture_id, preset, seed, budget,
-  proxy: { max_edge:number, width:number, height:number, source:"raw_half",
-           decode_edge:number, decodes:number },
-  star_scene: { is_star_scene:boolean, star_count:number,
-                dark_background_ratio:number, bright_point_ratio:number,
-                star_point_density:number|null, exif_night:boolean,
-                exif_state:"night"|"daylight"|"unknown", star_halo:number,
-                star_color_saturation:number },
-  candidates: DevelopmentCandidate[],
-  rejected: { id:"stars"|"foreground"|"low_noise"|"social", reason:string }[]
-}
-DevelopmentCandidate = {
-  id:"natural"|"stars"|"foreground"|"low_noise"|"social",
-  label:string, description:string, adjustments:Adjustments,
-  metrics:object, score:number, reasons:string[]
+  capture_id, preset, seed /* 実効値 */, budget /* 実効値 */,
+  proxy: { max_edge /* 実際の代理画像の長辺 */, width, height, source: "coreimage_proxy",
+           decode_edge: 640, decodes, renders, evaluations },
+  star_scene: { is_star_scene, star_count, star_point_density /* null 可 */, dark_background_ratio,
+                bright_point_ratio, exif_night, exif_state: "night" | "daylight" | "unknown",
+                star_halo, star_color_saturation },
+  candidates: [{ id, label, description, adjustments /* 9 キー全量 */, metrics, score /* 0..100 */, reasons: string[] /* ≤4 */ }],
+  rejected: [{ id, reason }],
+  elapsed_ms: { total, decode, render }
 }
 ```
 
-`star_scene.star_point_density`（点/画素）は点光源を実際に測ったときだけ数値になり、測っていないとき（EXIF が daylight、night で大面積光源が上限超え、EXIF 不明で暗背景などの前提条件に落ちた場合）は `null`。
+- `metrics` は 21 キー: `highlight_clip` `shadow_clip` `noise_flat` `source_noise_flat` `detail` `source_detail` `halo`
+  `color_saturation_clip` `tonal_range` `source_deviation` `shadow_mean` `star_count` `star_halo` `star_color_saturation`、
+  旧 Python 互換の別名 `highlight_clipping` `shadow_crushing` `flat_region_noise` `detail_halo` `color_clip` `tone_range`
+  `baseline_deviation`（`candidates/metrics.rs`）。
+- `candidates` は `natural` が先頭、以降はスタイル順。乱数列の Python 実装との一致は求めない（ADR 0003 §4）。
+- エラー: `INVALID_CAPTURE_ID` `INVALID_BUDGET` `UNKNOWN_PRESET` `SOURCE_ROOT_*` `ARW_NOT_FOUND` `OUTPUT_DIR_FAILED`
+  `BUSY` `CANDIDATES_FAILED` `SIDECAR_*`（`SIDECAR_SESSION_CLOSED` を含む）、Rust の `--batch` セッションが出す `INVALID_REQUEST`、CLI 由来（`HANDLE_NOT_FOUND` を含む）。
 
-候補は調整値だけを返す。候補の選択は人が行い、選択しただけではRAW現像を実行しない。
+### 1.11 `export_selection`
 
-### `POST /api/export`
+選んだ写真を `$APPDATA/export/<batch>/` へ**バイト列のままコピー**し、`manifest.json` を書く（再エンコードしない）。
 
-```
-body { batch_name:string,   // [A-Za-z0-9_-]+ に正規化
-       items: ExportItem[] }
-ExportItem = { capture_id:string, variant:"camera_jpg"|"developed"|"merged",
-               developed_filename?:string,   // variant="developed" 時必須（raw-develop の filename）
-               merged_filename?:string }     // variant="merged" 時必須（merge-bracket の filename）
-→ { export_dir:string, manifest_path:string, files:string[],
-    skipped:{capture_id:string, reason:string}[] }
-```
-
-`outputs/export/<batch_name>/` へ `shutil.copy2` + `manifest.json` 生成（マニフェスト仕様はプラン §3）。**元ファイルは非破壊**。
-
-`variant:"merged"` は `outputs/merged/` 配下を対象とし、`"developed"` と同じ構造で扱う
-（`resolve()` 後の親一致で確認・レシピJSONを manifest に取り込む）。`merged_filename` は
-`{capture_id}-merged{枚数}-` で始まること（中置が無い現像済みファイル名は 400）。
-
-`variant:"merged"` は**本合成限定**（2026-08-20b 追補）。プレビュー合成は
-`outputs/merged_preview/` にあり、ここでは参照しないので構造的に書き出せない。
-加えて二段目の防御として、**取り込むレシピJSON が `preview:true`（`output.preview`）の場合は
-400** とする（`"プレビュー品質の合成は書き出せません。本合成をやり直してください。"`）。
-「ファイルが単に無い」は `skipped[]`、「入力の取り違え・検証違反」は 400 という
-既存の切り分けに従う（`variant` の取り違えを 400 にしているのと同じ扱い）。
-
-この二段目の防御は `variant:"developed"` にも同じく効く（2026-08-21 追補）。現像レシピにも
-`output.preview` が書かれるので（§2 / `engine.develop_raw`）、プレビュー現像が
-`outputs/developed/` に紛れ込んだ場合に無警告でマスターとして書き出されないようにする。
-文言は合成側と共用（`camera_jpg` はレシピを持たないので対象外）。
-
-**成果物の出所を検証する**（2026-08-21 追補）。`outputs/developed/` と `outputs/merged/` は
-現像元フォルダに依らない固定ディレクトリなので、フォルダ A で作った成果物は B へ
-切り替えた後もそこに残っている。`capture_id` はカメラの連番でカードをまたぐと衝突するため、
-取り込むレシピJSONに記録された出所（現像 `source.path` / 合成 `source.root`）が
-**現在の現像元フォルダと一致しない場合は `skipped[]`** に積む（実体は A なのに manifest の
-`exif` / `group` だけ B、という自己矛盾を防ぐ。解析キャッシュ側は署名照合で同じ取り違えを
-防いでいる）。理由の文言は「成果物が見つからない」と同じにする。レシピに出所が
-**記録されていない**場合（`camera_jpg`・`source` を持たない古い形式）は判定材料が無いので
-従来どおり書き出す。
-
-### `POST /api/import-to-photos`
+- 引数: `batchName: string`、`items: ExportItem[]`（1〜500 件）。
+  - `batch_name`: 前後空白除去、1〜64 文字。`/` `\` NUL `..` を含むとエラー。それ以外の `[A-Za-z0-9_-]` 以外の文字は `_` に置換。
+  - `ExportItem = { capture_id, variant: "camera_jpg" | "developed" | "merged", developed_filename?, merged_filename? }`
+    （`capture_id` は前後空白除去・大文字化して §0.4 で検証）。
+- variant ごとの規則:
+  - `camera_jpg` … 現像元フォルダの `<ID>.JPG` をコピー。
+  - `developed` … `$APPDATA/coreimage/full/<developed_filename>` と来歴 `.json`（`mode == "full"`）が必要。
+    `coreimage/preview/` にしか無いものは「プレビュー品質の画像は書き出せません。」で拒否。
+  - `merged` … `$APPDATA/coreimage/merged/<merged_filename>` だけを見る（`merged_preview/` は拒否）。来歴の
+    `kind == "exposure_fusion"`・`preview == false`・`request.max_edge` 無し・`capture_ids` が昇順 2〜9 で先頭が
+    `capture_id` と一致・ファイル名の ID/枚数/プリセット/ハッシュ・`output_size` と `output_sha256` の一致を検証する。
+    **`merged` の `capture_id` は合成の先頭（最小）ID を渡す**。
+- 元ファイルが無いものはエラーにせず `skipped` に入れる。出力名の重複も `skipped`。
+- 書き出し全体をプロセス内 mutex で直列化。一時ファイル `.export-<pid>-<n>.tmp` → rename。
 
 ```
-body { batch_name:string, album?:string }   // album 既定 "GeoFrame RAW Assist <batch>"
-→ { status:"ok", imported:number, album:string }
- | { status:"error", error:string, stderr?:string }
+ExportResponse = { export_dir: string, manifest_path: string, files: string[] /* 絶対パス、manifest を除く */,
+                   skipped: [{ capture_id, reason }] }
 ```
 
-`outputs/export/<batch>/` 配下の `*.jpg` のみ対象。`osascript` は**配列形式で呼ぶ**（文字列連結でのスクリプト生成は禁止）。
-
-### `POST /api/drive-upload`
+`manifest.json`（整形 JSON + 末尾改行）:
 
 ```
-body { batch_name:string }
-→ { status:"started"|"already_running" }
+{ manifest_version: 1, app: "geoframe-raw-assist", batch_name, created_at /* UTC RFC3339 */,
+  source_root /* manifest からの相対パス（無理なら絶対） */,
+  items: [{ capture_id, variant, exported_file, exported_sha256,
+            source: { jpg, arw, jpg_sha256 }, recipe /* developed/merged は来歴 JSON 全量、camera_jpg は null */,
+            group: { id, kind, raw_level, was_recommended, user_selected: true } | null,
+            exif: { captured_at, iso, lens_model, focal_length } }] }
 ```
 
-`outputs/export/<batch_name>/` 直下のファイルを Google Drive の「GeoFrame」フォルダ
-**直下**へアップロードする（バッチごとのサブフォルダは作らない。消費側の GeoFrame 本体
-アプリが「GeoFrame」フォルダを**非再帰**で走査するため、サブフォルダへ入れると認識されない）。
-Drive 上のファイル名には `<batch_name>-` プレフィックスを付ける
-（例 `26_08_hiuchi-DSC04431.JPG`）。平置きではバッチ間で `DSC04431.JPG` や
-`manifest.json` が衝突するため。`batch_name` は正規化済みの名前。
-OAuth（デスクトップアプリ、`local_raw/drive_client_secret.json`）経由。
-バックグラウンドジョブとして実行し、進捗は `GET /api/drive-upload` でポーリングする。
+エラーは日本語の `string`（例: 「バッチ名にパス区切りは使用できません。」「書き出す写真は1〜500枚で指定してください。」
+「variant は camera_jpg / developed / merged を指定してください。」「合成JPEGがレシピに記録された出力と一致しません。」）。
 
-Drive 上のファイル名（**プレフィックス込み**）が既に存在する場合は既アップロード済みと
-みなしスキップする（上書きしない。部分失敗からの再実行で「まだ無いものだけ」を送る
-レジューム動作）。
+### 1.12 `reveal_export`
 
-### `GET /api/drive-upload`
+- 引数 `path`（`ExportResponse.export_dir` を渡す）。canonicalize 後に `$APPDATA/export` の**中**（それ自身は不可）である
+  ことを確かめ、`/usr/bin/open -R <path>` で Finder に表示する。
+- エラー: 「書き出し先以外は表示できません。」「Finder で表示できませんでした。」、存在しないパスは I/O エラー文。
+
+### 1.13 `import_to_photos`
+
+`$APPDATA/export/<batch>/` 直下の `*.jpg`（大小無視・名前順。manifest に無い JPG も含む）を写真.app のアルバムへ取り込む。
+
+- 引数: `batchName`、`album?`（省略時 `"GeoFrame RAW Assist " + 正規化後の batch 名`。指定時は空・120 文字超・改行/NUL 不可）。
+- `osascript <bundle の photos_import.applescript> <album> <file>...`（引数配列で渡し、文字列連結しない）。
+  タイムアウト 180 秒（スクリプト側は 170 秒）。スクリプトは `bundle.resources`、開発時は `scripts/photos_import.applescript`。
+- 入力の不正（batch 名・書き出しフォルダが無い・対象 JPG が無い・album 名）は `Err(string)`。
+- **osascript の結果は `Ok` で返す**:
 
 ```
-→ { status:"idle", configured:boolean }
- | { status:"running", batch_name:string, progress:{ stage:string, done:number, total:number, bytes_done:number, bytes_total:number, skipped:string[] } }
- | { status:"done", batch_name:string, uploaded:number, total:number, skipped:string[], folder_url:string }
- | { status:"error", batch_name:string, error:string, error_kind:string }
+ImportToPhotosResponse =
+  | { status: "ok", imported: number, album: string }
+  | { status: "error", error: string, stderr?: string /* 先頭 500 文字 */ }
 ```
 
-`configured:false` は `local_raw/drive_client_secret.json` が未配置・不正な場合。
-`error_kind` は `auth_revoked` / `quota` / `rate_limit` / `dependencies_missing` /
-`network` / `consent_timeout` / `unknown` のいずれか。
+- 許可エラー（stderr に `-1743` `-1728` `Not authorized` 等）は「「写真」の操作が許可されていません。」+ 案内
+  「「システム設定 > プライバシーとセキュリティ > オートメーション」で、GeoFrame RAW Assist（アプリ本体）に「写真」の操作を許可してください。」。
+  TCC の許可先はアプリ本体。
 
-`stage` は `authenticating` → （初回・失効時のみ）`waiting_for_consent` →
-`resolving_folder` → `uploading` の順に進む。`progress.done` / `bytes_done` は
-**スキップ分も含む「処理済み」**（含めないと再実行時に進捗バーが 100% に届かない）。
-実際に送った件数は `done` 応答の `uploaded` が持ち、`uploaded + skipped.length == total`。
+### 1.14 `geoframe://` スキーム（元 JPG 配信）
 
-`skipped` の要素は**ローカルのファイル名**（`<batch_name>-` プレフィックスを**含まない**。
-画面にはバッチ内で見慣れた名前を出すため）。スキップ判定に使う Drive 側の名前は
-プレフィックス込みなので、両者は一致しない。
-`folder_url` は「GeoFrame」フォルダ**自体**への URL（バッチごとのフォルダは無い）。
-`done` / `error` はメモリ上のみ保持し、サーバ再起動で `idle` に戻る。
-
-### 静的ファイル配信
-
-| ルート | 実体 | 状態 |
-|---|---|---|
-| `GET /outputs/<file>` | `outputs/developed/` | 既存 |
-| `GET /preview/<file>` | `outputs/preview/` | 新規（Wave 1-B） |
-| `GET /merged/<file>` | `outputs/merged/` | 新規（2026-08-20 追補） |
-| `GET /merged-preview/<file>` | `outputs/merged_preview/` | 新規（2026-08-20b 追補） |
-| `GET /thumbs/<file>` | `outputs/thumbnails/` | 新規（Wave 1-B） |
-| `GET /source-jpg/<DSCxxxxx.JPG>` | 現像元フォルダ（`config.source_root()`。既定 `sample/100MSDCF/`） | 既存 |
-
-- いずれも `resolve()` 後に親ディレクトリが所定のルートと一致することを検証する（パストラバーサル防止、現状維持）。
-- `/source-jpg/` のファイル名検証（現状維持）: `DSC` 始まり・`.JPG` 終わり・**長さ12文字**・4〜8文字目が数字。
-  不一致は **400** `"無効なJPGファイル名です。"`、存在しない場合は **404** `"元JPGが見つかりません。"`。
-- 未定義URLは **404** `"未対応のURLです。"`。
+- URL: `geoframe://localhost/source-jpg/DSC12345.JPG`。パスは `^/source-jpg/(DSC[0-9]{5})\.JPG$` に限る
+  （URL 上は大文字 `.JPG` 固定。実ファイルの拡張子の大小は問わない）。フロントは文字列で組み立てる
+  （`convertFileSrc` は `/` を `%2F` にするため使わない。`raw-api.ts`）。
+- 応答: 200 `image/jpeg` / 400「無効なJPGファイル名です。」/ 404「現像元フォルダが未設定です。」「元JPGが見つかりません。」/
+  500「元JPGを読めません。」「アプリのデータフォルダを取得できません。」。エラー本文は `text/plain`。
+  全応答に `Access-Control-Allow-Origin: *`。Range・キャッシュヘッダは無い。
 
 ---
 
@@ -530,192 +408,123 @@ Drive 上のファイル名（**プレフィックス込み**）が既に存在�
 
 ```
 Adjustments = {
-  exposure: number,           // EV -2.0..+2.0 → rawpy bright = 2**ev（exp_shift は1.0）
-  wb_temp: number,            // -100..100。camera_whitebalance の R/B ゲインをスケールし user_wb へ
-  shadow_lift: number,        // 0..100。8bit LUTと同じ式をfloat32 (0..1)へ連続適用（JPEG化前）
-  highlight_recovery: number, // 0..100。rawpy: Clip / Blend / ReconstructDefault の3段階。Core Image（CLI 0.6.0、#81）: exposure / shadow_lift へ写像して加算
-  brightness: number,         // 0.7..1.4  (float32 RGB配列を倍率適用)
+  exposure: number,           // EV -2.0..+2.0
+  wb_temp: number,            // -100..100
+  shadow_lift: number,        // 0..100
+  highlight_recovery: number, // 0..100。CLI 0.6.0（#81）が exposure / shadow_lift へ写像して加算する
+  brightness: number,         // 0.7..1.4
   contrast: number,           // 0.8..1.4
-  saturation: number,         // 0.0..1.5  (0 = モノクロ)
-  sharpness: number,          // 0.8..1.6（1.0 = カメラJPEG相当の撮影時シャープ。2026-09-29 追補）
-  noise_reduction: "off" | "light" | "full"
+  saturation: number,         // 0.0..1.5（0 = モノクロ）
+  sharpness: number,          // 0.8..1.6（1.0 = カメラJPEG相当の撮影時シャープ）
+  noise_reduction: "off" | "light" | "full"   // 大文字小文字を区別
 }
 ```
 
-- リクエストの `adjustments` は `Partial<Adjustments>`。未指定キーはプリセット既定値で埋める（`resolve_adjustments`）。
-- **数値の範囲外は上記範囲へクランプ、未知キー・不正型・不正な noise_reduction は reject（400）。**（§9 と統一。Wave 1-A 実装済みの挙動を正とする） `DevelopedResult.adjustments` は解決後（クランプ後）の全量を返す。
+検証・正規化は `src-tauri/src/adjustments.rs: normalize_adjustments` の 1 か所:
 
-### 実装マッピング（プラン §f 後半）
-
-- `exposure` → `exp_shift = 1.0`、`bright = 2**ev`（自動明るさ補正との二重適用を避ける）
-- `wb_temp` → `raw.camera_whitebalance` を基準に R×(1+0.003·t)、B×(1−0.003·t) で `user_wb`
-  （t=0 のときは従来どおり `use_camera_wb=True`）
-- `highlight_recovery` → rawpy の `HighlightMode` へ離散マッピングする。`hr<=0` は `Clip`、
-  `0<hr<75` は `Blend`、`hr>=75` は `ReconstructDefault`（75境界を含む）。
-  Core Image（プレビュー、CLI 0.6.0、#81）では区分線形の写像 `0 → (0EV, 0)`・`60 → (−0.7EV, +40)`・
-  `90 → (−1.0EV, +55)`・`100 → (−1.1EV, +60)` を `exposure` / `shadow_lift` に**加算**する（lift は 100 で頭打ち）。
-  `{exposure 0, shadow_lift 0, hr 60}` と `{−0.7, 40, hr 0}` は同じ画。詳細は `native/coreimage-cli/README.md`・
-  [`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §2・§3。
-- `shadow_lift` → 本番経路では256エントリLUTを使わず、8bit LUTと同じ式を float32 (0..1) へ
-  連続適用する（JPEG化前）。
-- `brightness` → float32 RGB配列へ `image *= brightness` の倍率適用（最終クリップは後段）。
-- `saturation == 0` → Rec.709 luma のRGB複製
-- **処理順序（固定）**: rawpy postprocess (16bit; `highlight_recovery` は上記 `HighlightMode` へ
-  マッピング) → 65535除算で float32化 → lensfun補正 → shadow_lift (float32) → resize →
-  Brightness → Contrast → Color → Sharpness → 8bit化 → save(exif, icc)
-
-> **（2026-09-29 追補）撮影時シャープの既定化と `noise_reduction="light"` の ISO 適応**
-> （`ENGINE_VERSION` 15→16 / `RECIPE_VERSION` 9→10。根拠は 2026-09 の実測）。上記の処理順序は変わらない。
->
-> **`sharpness`**: 従来は `sharpness == 1.0` でシャープ無し、`> 1.0` で輝度USM（σ0.8 固定・閾値 1/255 固定・
-> gain = `(s−1)×1.5`）、`< 1.0` でRGB全体のぼかし（σ0.8）だった。これを、**`sharpness == 1.0` が「カメラJPEG相当の
-> 撮影時シャープ（Rec.709 輝度限定USM）」を意味する**ように変更した。契約範囲 0.8..1.6 はその強さの倍率で、
-> `gain = 基準gain × (1 + (sharpness − 1) × 1.5)`（`0 <= gain <= 1.2` にクランプ）。従来の
-> **`sharpness < 1` のぼかし挙動は廃止**し、弱いシャープになる（ぼかしにはならない）。
-> - σ と基準 gain は**出力長辺**（リサイズ後の配列の長辺）で決まる。長辺 ≤2000px: σ0.6 / 基準gain 0.5、
->   ≥4000px: σ0.8 / 基準gain 0.7、その間は線形補間。
-> - ISO は `raw.other.iso_speed`、取れなければペアJPGの EXIF の ISO（`develop_raw`）を使う。
->   コアリング閾値（輝度差の絶対値がこれ以下なら捨てる）は ISO≤400 で 0、ISO≥1600 で 1/255、間は線形。
->   ISO が不明なら 0.5/255。gain は ISO≤1600 で ×1.0、ISO 1600→3200 で ×1.0→×0.5 へ線形に減衰し、
->   ISO≥3200 は ×0.5（ISO 不明時は減衰なし）。ISO 減衰は上記の gain 計算（上限 1.2 のクランプ後）に掛かる。
-> - 出力が変わるため `ENGINE_VERSION` を 15→16 に上げた（`params_hash` に入るので旧キャッシュは無効化される）。
->
-> **`noise_reduction`**: `"light"` の FBDD を ISO で切り替える。従来は常に FBDD Light だったが、
-> **ISO が分かって 800 未満なら FBDD Off**、ISO が 800 以上または不明なら従来どおり Light。
-> `"full"` / `"off"` は不変（ISO に依存しない）。単体現像（`_postprocess_params`）と
-> ブラケット合成（`_merge_postprocess_params`）の両デコード経路で同じ判定（`_fbdd_mode_for`）を使う。
->
-> **レシピJSON**: トップレベルに `"iso": number | null` を追加した（`RECIPE_VERSION` 9→10）。
-> 撮影時シャープに実際に使った ISO（RAW の `iso_speed`、無ければペアJPG EXIF）で、不明なら `null`。FBDD の判定は RAW の ISO のみで行う（デバッグ用。`DevelopedResult` の型は変えない）。
-
-- `highlight_recovery` の旧来の連続ソフトニーは、rawpy の16bit出力を65535で正規化した値が常に
-  `<=1.0` で実質何もしていなかったため廃止した。現在の離散3段階・75境界の方式は、閾値の前後で
-  rawpy の `HighlightMode` が切り替わる不連続を新たに生む（隣接するプリセットやスライダー値で
-  階調が急変しうる）。これはトレードオフを承知のうえで、低コストな方式としてユーザー判断により
-  意図的に採用されたものであり、見落としではない。
-- **入力範囲の不変条件**: `_apply_tone_array` は入力が `[0,1]` にプリクリップ済みであることを
-  前提とする。`develop_raw` 経路ではレンズ補正（最大4.0までのヘッドルームを許容しうる）の後に
-  `_apply_shadow_lift_array` が、`merge-bracket` 経路では同じくレンズ補正の後に `_merge_frames` が
-  クリップすることで担保する。この順序を将来入れ替えると静かに壊れる。
-- この安全性は `_resize_array` が再標本化を行う場合に常に `cv2.INTER_AREA`（非負重みの加重平均で
-  オーバーシュートしない補間方式）を使うことにも依存する（微小縮小の先行中央クロップは再標本化
-  なし）。補間方式は過去に何度か変更されており、同一入力の実測では `INTER_AREA` が
-  `min=0.0134/max=0.9723` に収まる一方、`INTER_CUBIC` は `min=-0.2312/max=1.2251` まで超過した。
-  将来リンギングを起こしうる補間へ変更すると、範囲外の値がクリップされないままトーン処理へ渡る
-  可能性がある。
-- `_resize_array` の DEFAULT_MAX_EDGE（6000px）基準の先行中央クロップは `max_edge <= 6000` の
-  場合にだけ行う。`max_edge` が DEFAULT_MAX_EDGE を超える場合は先行クロップを行わない。この
-  判定はプレビューと本現像で画角を一致させるための設計だが、上限超過の `max_edge` には適用されない。
+- **数値の範囲外は上記範囲へクランプ**（拒否しない）。整数は f64 に、`-0.0` は `0.0` に正規化。
+- 未知キー・bool/文字列/null/配列/オブジェクト・非有限値・不正な `noise_reduction` は `ADJUSTMENTS_INVALID`。
+- 出力のキー順は固定（入力の順序や int/float の違いでキャッシュキーが変わらない）。
+- `develop_preview_coreimage` / `develop_full_coreimage` は **9 キー全量が必須**（欠落も `ADJUSTMENTS_INVALID`）。
+  部分指定を許すのは `resolve_adjustments` を通す `merge_bracket`（§9）。
+- 値から Core Image（`CIRAWFilter` と後段チェーン）への写像は CLI が持つ（`native/coreimage-cli/README.md`）。
+  `highlight_recovery` の写像は区分線形 `0 → (0EV, 0)`・`60 → (−0.7EV, +40)`・`90 → (−1.0EV, +55)`・`100 → (−1.1EV, +60)` を
+  `exposure` / `shadow_lift` に加算（lift は 100 で頭打ち）。詳細は [`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §2・§3。
 
 ---
 
 ## 3. 分析データ型
 
+`get_analysis` の `analysis`（`analysis.rs: build_analysis`。`ANALYSIS_VERSION = 3`）:
+
 ```
 Analysis = {
-  analysis_version: 2, generated_at: string,
-  source: { root:string,         // 表示用。SourceFolderInfo.display_path と同じ整形
-            pairs:number, jpg_only:number, arw_only:number, total_bytes:number },
-  summary: { groups:number, raw_candidates:number, needs_review:number },
-  photos: Record<string, PhotoInfo>,
+  analysis_version: 3, scored: true,
+  generated_at: string,            // ローカル時刻 %Y-%m-%dT%H:%M:%S%:z
+  source: { root /* display_path と同じ整形 */, pairs, jpg_only, arw_only, total_bytes },
+  summary: { groups, raw_candidates /* raw.level が recommended|strong のグループ数 */, needs_review /* confidence < 0.6 */ },
+  photos: { [capture_id]: PhotoInfo },
   groups: GroupInfo[]
 }
 
-PhotoInfo = { capture_id, captured_at, iso, f_number, shutter, focal_length,
-  exposure_bias, lens_model, orientation, width, height,
-  sharpness_raw:number,
-  sharpness_score:number,        // グループ内正規化 0-100
-  highlight_clip_ratio:number, shadow_clip_ratio:number, mean_luma:number,
-  overall_score:number,
-  thumb:string }                 // 例 "/thumbs/3f9a1c02-DSC02703.webp"（§4 の命名）
+PhotoInfo = {
+  capture_id, captured_at: string | null, iso: number | null,
+  f_number, shutter, focal_length, exposure_bias: number | null, lens_model: string | null,
+  orientation: number, width, height,
+  sharpness_raw /* 3 桁 */, sharpness_score /* 0..100 */,
+  highlight_clip_ratio, shadow_clip_ratio /* 5 桁 */, mean_luma /* 2 桁 */, overall_score,
+  thumb: string                    // サムネイル JPEG の絶対パス（URL ではない。表示は convertFileSrc）
+}
 
-GroupInfo = { id:number, kind:"burst"|"bracket"|"similar"|"single",
-  title:string,                  // 例 "10:42 連写 3枚"
-  start_at:string, end_at:string,
-  capture_ids:string[], recommended_capture_id:string, confidence:number,
-  recommendation_reasons:{code:string, text:string}[],
-  raw:{ level:"none"|"maybe"|"recommended"|"strong", label:string,
-        reason_codes:string[], reasons:string[] } }
+GroupInfo = {
+  id: number, kind: "burst" | "bracket" | "similar" | "single",
+  title: string,                   // "HH:MM 連写|ブラケット|類似|単写 N枚"（時刻不明は --:--）
+  start_at: string | null, end_at: string | null,
+  capture_ids: string[],           // 時刻順
+  recommended_capture_id: string, confidence: number,
+  recommendation_reasons: [{ code: "single_shot" | "sharpest" | "highlight_retained" | "balanced" | "close_call", text }],
+  raw: { level: "none" | "maybe" | "recommended" | "strong", label: string,
+         reason_codes: ("night_scene" | "high_iso" | "highlight_clipping" | "deep_shadows" | "exposure_bracket")[],
+         reasons: string[] }
+}
 ```
 
-`raw.reason_codes` の語彙: `high_iso` / `night_scene` / `highlight_clipping` / `deep_shadows` / `exposure_bracket`
-（日本語文は `raw.reasons[]` に併記）。
+- `close_call` は confidence < 0.6 のとき付く。
+- **キャッシュの有効条件**（すべて満たすときだけ `ready`）: `analysis_version == 3`、`scored == true`、
+  内部キー `_source_signature`（現像元フォルダの解決済みパスと対象ファイル名一覧の SHA-1。返却時には除く）が一致、
+  全 `photos[*].thumb` が存在。**ファイルの中身・mtime・サイズは見ない**。無効なキャッシュは削除せず「無い」扱い。
 
 ---
 
-## 4. ファイル命名・ディレクトリ規約（凍結）
+## 4. ファイル命名・ディレクトリ規約
 
-### 命名
-
-| 種別 | 命名 |
-|---|---|
-| 現像JPEG | `{capture_id}-{preset}-{hash10}.jpg` 例: `DSC02943-nightscape-a1b2c3d4e5.jpg` |
-| 合成JPEG | `{先頭capture_id}-merged{枚数}-{preset}-{hash10}.jpg` 例: `DSC04510-merged5-neutral_recovery-a1b2c3d4e5.jpg` |
-| レシピJSON | 上記と同一ステム + `.json` |
-| サムネイル | `{root_key}-{capture_id}.webp`（長辺640 / quality 80） |
-| 解析キャッシュ | `analysis.json` |
-
-`hash10` は §1 の `params_hash`（sha1 先頭10文字）。
-
-`root_key` は**現像元フォルダの解決済み絶対パスの sha1 先頭8文字**（`config.root_key_for()`）。
-`capture_id` はカメラの連番でカードをまたぐと衝突するため、接頭辞が無いと別フォルダの解析が
-サムネイルを上書きする。**サブディレクトリは掘らずフラットな接頭辞にする**こと:
-`server._serve_from_root()` が `resolve()` 後の親ディレクトリ一致でパストラバーサルを弾いており、
-ネストするとこの防御を緩める必要が出る。
-
-> 旧命名のサムネイル `outputs/thumbnails/{capture_id}.webp` は**無視する。削除しない**
-> （ヒットしなくなるだけ）。
-
-> 既存キャッシュ `outputs/developed/{id}-{preset}.jpg`（旧命名、数件）は新命名移行後は**無視する。削除しない**。
-
-### ディレクトリ
+すべて `$APPDATA`（§0.2）配下。リポジトリ内の `outputs/` は使わない。
 
 ```
-outputs/
-  developed/    本現像JPEG + レシピJSON          → GET /outputs/
-  preview/      プレビュー現像(full-sizeデモザイク,1600px) → GET /preview/
-  merged/       ブラケット露出合成JPEG + レシピJSON → GET /merged/
-  merged_preview/ 合成プレビュー(full-sizeデモザイク,1600px)  → GET /merged-preview/
-  thumbnails/   解析用サムネ .webp               → GET /thumbs/
-  analysis/     analysis.json                    （HTTP直接配信なし。/api/analysis 経由）
-  export/       <batch_name>/ + manifest.json    （HTTP直接配信なし）
+$APPDATA/
+  config.json                    { config_version: 1, source_root: <絶対パス>, ...未知キーは保持 }
+  analysis/<root_key>.json       解析キャッシュ（.json.tmp → rename）
+  thumbnails/<root_key>-<ID>.jpg 解析用サムネイル（長辺 ≤640・拡大しない・JPEG quality 80・Orientation 適用済み）  [asset scope]
+  coreimage/                                                                                                    [asset scope]
+    preview/<ID>_<hash16>.jpg|.json   プレビュー現像（長辺 2400）
+    full/<ID>_<hash16>.jpg|.json      原寸現像（EXIF 継承）
+    merged_preview/<stem>.jpg|.json   合成プレビュー（長辺 2400）
+    merged/<stem>.jpg|.json           本合成（EXIF 継承）
+    candidates/pso-<pid>-<n>/         候補生成の scratch（0700、終了時に削除）
+  export/<batch>/                  書き出し（コピーした JPEG + manifest.json）
 ```
 
-`outputs/` 全体が `.gitignore` 済み。JSON の書き込みは全て **tmp + `os.replace`** のアトミック方式
-（既存 `_save_recipe` と同方式）。
+- 旧版（Python / Drive 時代）の残骸 `logs/`（`raw-engine.log`）・`drive_auth.json` が残っていることがあるが、現行コードは読み書きしない。
 
-`config.json`（現像対象フォルダ等の設定）と Drive の `drive_auth.json`（OAuthトークン）は
-`outputs/` には含まれず、OS標準のアプリデータディレクトリ（`local_raw/paths.app_data_dir()`）に
-保存される（2026-08-23 追補）。
+- `root_key` = 現像元フォルダの解決済み絶対パスの SHA-1 先頭 8 文字（`coreimage.rs: root_key_for`）。
+  `capture_id` はカメラの連番でカードをまたぐと衝突するため接頭辞にする。
+- 合成の `stem` = `{昇順先頭ID}-merged{枚数}-{preset}-{params_hash10}`（例 `DSC04510-merged5-neutral_recovery-a1b2c3d4e5`）。
+
+### 4.1 キャッシュキーと来歴 JSON
+
+| 対象 | キー | 含めるもの |
+|---|---|---|
+| 現像（preview / full） | SHA-256 の先頭 16 hex（`hash16`）。`DevelopedResult.params_hash` はその先頭 10 文字 | `CACHE_KEY_SCHEMA = 3`、`output` を除く CLI 要求全量（ARW の絶対パス・mode・`max_edge`（preview のみ）・format・decoder_version・settings・正規化後 adjustments）、CLI `--version` 応答、CLI バイナリの SHA-256、ARW のサイズと mtime(ns)、full のみ `rust_exif { schema: 1, ペア JPG の SHA-256, software }` |
+| 合成 | SHA-256 の先頭 10 hex | `MERGE_SCHEMA = 2`、CLI 要求全量、preset、source_root、各 ARW の `{size, mtime_ns}`、CLI の版とバイナリ SHA-256、本合成のみ `rust_exif` |
+
+- 来歴 JSON（出力 JPEG と同じステム）= CLI 応答 + Rust が足したもの。現像は `exif_inherited`・`mode`・`request`。
+  合成は `kind: "exposure_fusion"`・`capture_ids`・`preset {name,label}`・`adjustments`・`preview`・`source_root`・
+  `params_hash`・`exif_inherited`・`engine { name: "coreimage mtb+mertens", cli_version, macos_version, merge_version }`・
+  `request`・`lens_correction`・`output_size`・`output_sha256`（EXIF 継承後の値）。
+- ヒット条件: JPEG と JSON がともに通常ファイルで JSON の `ok == true`（合成はさらに要求・ハッシュ・`output_sha256` 等の一致）。
+  JPEG だけが残っているのは前回の途中終了とみなして作り直す。ヒット時は JPEG の mtime を更新する。
+- 書き込みは一時ファイル → rename のアトミック方式。10 分より古い一時ファイルは次の現像時に掃除する。
+- 容量上限: 各ディレクトリで 600 組または 1.5 GB を超えたら、mtime の古い順に 80% まで削除する（直前に書いた組は残す）。
 
 ---
 
-## 5. プリセット11種（凍結版・プラン §f + 2026-08-19 追補）
+## 5. プリセット 11 種
 
-全プリセットは `Adjustments` の全キーを持つ。rawpy 固定値は AHD / sRGB / 16bit（最終JPEGは8bit）。
-数値は初期案であり、**Wave 3 で実画像を見ながら微調整してよい**（キー構成と name は凍結）。
-
-> **定義の正は Rust 側へ移る（Issue #80）。** プリセット表と `resolve_adjustments` は
-> `src-tauri/src/presets.rs`、値域（§2）と検証・正規化は `src-tauri/src/adjustments.rs` が持つ。
-> デスクトップアプリの UI は Tauri コマンド `get_presets`（戻り値は `PresetInfo[]`）から一覧を取り、
-> ブラウザモードと取得失敗時だけ `GET /api/health` の `presets` を使う。
-
-> **#81（2026-10-22）で数値を Core Image 向けに再調整し、Python と分けた。**
-> - **Rust（Core Image プレビュー）** … 下の「CI 値」。`apple_default`・decoder 9・レンズ補正 ON の既定（`d_base`）を基準に、
->   非救済の 8 プリセットは `highlight_recovery` 0（= CI 既定 + 後段の個性）、hr > 0 は救済系 3 プリセットだけ。
->   フィクスチャ `src-tauri/tests/fixtures/presets.json`（Rust のテストが一致を検証。再生成は
->   `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`）。
-> - **Python（rawpy の本現像・書き出し、ブラウザモード）** … 下の「legacy 値」のまま（rawpy 取りやめ #90 まで）。
->   フィクスチャ `tests/fixtures/presets_legacy_rawpy.json`（`.venv/bin/python scripts/export_presets_fixture.py --write`）。
-> - 数値は意図して違う。name / label / description / 並び / キー構成 / 値域 / NR の選択肢の一致は
->   `tests/test_presets_fixture.py` が 2 本を突き合わせて守る（キー構成と name の凍結は変えない）。
-> - プレビュー（CI・新値）と書き出し（rawpy・旧値）は見え方もプリセット値も違う。オーナー判断で受容（#90 で解消）。
->   overrides は「触ったキーの絶対値」で両方の表に重なるので、基準値が違うキー（例 `highlight_rescue` の `shadow_lift`
->   CI 0 / rawpy 15）では同じスライダー操作でプレビューと書き出しの動く向きが逆になりうる。
-> - CI 値は設計書 [`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §7.2 の初期案。ハーネスでの
->   計測と目視（§7.3〜§8）は未完（[`coreimage-preset-retune-report.md`](coreimage-preset-retune-report.md)）。
-
-**CI 値（Rust、Core Image プレビュー）。** 右端は `highlight_recovery` を写像して加算した実効値。
+定義の正は `src-tauri/src/presets.rs`（`PRESETS`）。フィクスチャ `src-tauri/tests/fixtures/presets.json` と Rust のテストが一致を守る
+（再生成: `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`）。UI は `get_presets` で一覧を取る。
+値は #81（2026-10-22）で Core Image 向けに再調整した初期案（[`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §7.2。
+計測と目視は [`coreimage-preset-retune-report.md`](coreimage-preset-retune-report.md) で継続）。
+既定プリセットは `neutral_recovery`（`DEFAULT_PRESET`）。右端は `highlight_recovery` を写像して加算した実効値。
 
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction | 実効 (EV, lift) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -731,255 +540,113 @@ outputs/
 | `backlit_rescue` | 逆光 | 0.0 | 0 | 30 | 60 | 1.0 | 1.0 | 1.02 | 1.02 | light | (−0.7, 70) |
 | `vivid_travel` | ビビッド | 0.0 | 0 | 10 | 0 | 1.0 | 1.07 | 1.10 | 1.05 | light | (0, 10) |
 
-**legacy 値（Python、rawpy）。** #81 以前の表のまま。
+> **2026-08-19 の 2 種追加の理由（ユーザー承認済み）**: 解析は「黒つぶれ」「白飛び」を推薦理由に出すのに救済プリセットが
+> 白飛び側にしか無かったため、`shadow_rescue` と `backlit_rescue` を足した。逆光は専用の検出コードを持たず、
+> `highlight_clipping` と `deep_shadows` が同時に立つことをシグナルにする（初期プリセット選択はフロント `app-state.ts`）。
 
-| name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `neutral_recovery` | 階調回復 | 0.0 | 0 | 15 | 60 | 1.0 | 1.03 | 1.02 | 1.04 | light |
-| `landscape_clear` | 風景クリア | 0.0 | 0 | 10 | 55 | 1.0 | 1.10 | 1.08 | 1.15 | light |
-| `nightscape` | 夜景ノイズ低減 | 0.0 | -3 | 15 | 55 | 1.0 | 1.04 | 1.0 | 1.02 | full |
-| `sunset_glow` | 夕景・マジックアワー | -0.1 | 12 | 8 | 70 | 1.0 | 1.05 | 1.07 | 1.03 | light |
-| `indoor_warm` | 室内・料理 | 0.1 | 5 | 18 | 55 | 1.0 | 1.02 | 1.03 | 1.02 | light |
-| `portrait_soft` | 人物・柔らか | 0.0 | 3 | 12 | 60 | 1.0 | 0.98 | 1.0 | 0.96 | light |
-| `monochrome_street` | モノクロ | 0.0 | 0 | 10 | 60 | 1.0 | 1.08 | 0.0 | 1.04 | light |
-| `highlight_rescue` | 白飛び救済 | -0.3 | 0 | 15 | 90 | 1.0 | 1.0 | 1.0 | 1.02 | light |
-| `shadow_rescue` | 黒つぶれ救済 | 0.0 | 0 | 45 | 65 | 1.0 | 1.0 | 1.0 | 1.01 | full |
-| `backlit_rescue` | 逆光 | 0.0 | 0 | 50 | 80 | 1.0 | 1.0 | 1.02 | 1.02 | light |
-| `vivid_travel` | ビビッド | 0.0 | 0 | 10 | 55 | 1.0 | 1.07 | 1.10 | 1.05 | light |
-
-> **追補 2026-08-19（プリセット2種追加・ユーザー承認済み）**
-> 解析は「暗部の黒つぶれ」「白飛び」を推薦理由として出すのに、救済プリセットは
-> 白飛び側にしか無かった。`shadow_rescue`（黒つぶれ救済）と `backlit_rescue`（逆光）を追加する。
-> 逆光は専用の検出コードを持たず、`highlight_clipping` と `deep_shadows` が
-> **同時に立つこと**をシグナルとして扱う（初期プリセット選択の規則は §6 を参照）。
->
-> 数値は実写で確認済み（プレビュー現像・SDカードの実データ）:
-> - `shadow_rescue` — 黒つぶれ 45.04% → **14.31%**、平均輝度 34.8 → 58.2（白飛びは 1.12% → 1.67%）
-> - `backlit_rescue` — 白飛び 1.41% → **0.13%**、黒つぶれ 34.37% → **19.06%**
->   （`highlight_rescue` を同じ写真に当てると平均輝度 23.6・黒つぶれ 42.83% まで沈むため、
->   逆光には別プリセットが要る、という判断の根拠）
-
-> **Wave 0 時点の実装は旧3種**（`neutral_recovery` / `landscape_clear` / `nightscape`、旧キー体系
-> `exp_shift` / `auto_bright_thr` / `contrast` / `color` / `sharpness`）が `local_raw/presets.py` に
-> 値を変えずに移設された状態。9種化と `Adjustments` キー体系への移行は **Wave 1-A** の担当
-> （その後 2026-08-19 追補でさらに2種追加され、現在は §5 のとおり11種）。
+旧 rawpy 向けの値（legacy 表、`tests/fixtures/presets_legacy_rawpy.json`）は Python 参照実装用で、本契約の対象外（#117 で削除予定）。
 
 ---
 
 ## 6. TypeScript 側の取り決め
 
-- 契約型の写しは **`app/lib/types.ts`**（凍結）。
-- `RawPreset` の union 型は **廃止**。プリセットは `string` + `PresetInfo[]` を `/api/health` から動的取得する
-  （Python 側とのプリセット二重定義を解消するため）。
-- Wave 1-C の機械分割では `app/lib/types.ts` に**既存定義のまま**移設し、`types.contract.ts` と一時併存させた。
-  Wave 2-C2 で `app/lib/types.ts` へ一本化済み（`types.contract.ts` は削除）。
-- `app/page.tsx` は Wave 0 時点では契約型を**インポートしない**（挙動不変を保つため）。
+- 契約型の写しは `src/lib/types.ts`。`invoke` を呼ぶのは `src/lib/raw-api.ts`（解析・フォルダ・プリセット・書き出し・取り込み）と
+  `src/lib/coreimage-api.ts`（エンジン情報・現像・合成）、候補生成は `src/App.tsx`。
+- プリセットは `string` + `get_presets` の `PresetInfo[]` で扱う（union 型は持たない）。
+- 現像・合成に渡す `adjustments` はフロントの `resolveAdjustments`（`app-state.ts`）で 9 キー全量にしてから送る。
+- reject 値はコマンドごとに形が違う（§0.1）。`CoreImageError` は `code` で、`SourceFolderError` は `reason` で分岐する。
 
 ---
 
-## 7. Wave 0 スパイク結果の反映（詳細は `docs/spikes-wave0.md`）
+## 7. エンジンと EXIF の確定事項
 
-### lensfun DB の扱い（契約に影響する確定事項）
+### 7.1 Core Image CLI（サイドカー）
 
-1. **同梱DB（lensfunpy 1.18.0 / lensfun 0.3.4）に Sigma 10-18mm F2.8 DC DN は無い。**
-   カメラ `Sony ILCE-6400` と `E 55-210mm f/4.5-6.3 OSS` は同梱DBでヒットする。
-2. 追加DBは **`local_raw/lensfun_db/*.xml`** を `lensfunpy.Database(paths=[...])` に渡す方式。
-   同梱DBとマージされる（`load_bundled=True` が既定）。
-   **`local_raw/lensfun_db/` は Wave 0 時点で存在しない。** Wave 1-A が作成すること。
-   **ディレクトリが存在しない場合・空の場合の両方で正常動作する**ように実装する
-   （`glob` が空リストなら `lensfunpy.Database()` と等価に扱う）。
-3. **EXIF の `LensModel` にはレンズメーカー名が入らない**（実測: `10-18mm F2.8 DC DN | Contemporary 023`）。
-   `find_lenses(camera, maker=None, lens=<EXIF値>)` と、`maker=None` で呼ぶこと。
-4. `db_version` は `lensfunpy.lensfun_version` タプルを整形した文字列。DBスナップショット固有の版番号は存在しない。
-5. lensfun が使えない／レンズが見つからない場合も **現像は必ず成功させる**。
-   `lens_correction` に `{applied:false, reason:...}` を記録する。lens.py の事前解決で現れる
-   reason は `lens_not_in_db` / `camera_not_found` / `lensfunpy_unavailable` /
-   `error:opencv_unavailable` / `error:focal_or_aperture_missing` / `error:<msg>`。
-   `LensResolution.unapplied()` のフォールバックは `unknown`、補正フラグが一つも立たず
-   較正自体が無い場合は `lens_not_calibrated` である。補正フラグが一つも立たないまま
-   skipped 理由がある場合は、skipped の先頭値が reason に昇格し、`skipped[]` 自体は返さない。
-   適用時は `flags` に `vignetting` / `distortion` / `tca` の実適用分を記録する。部分適用時の
-   `skipped[]` に現れうる値は `vignetting_forced_skip` / `vignetting_profile_focal_guard` /
-   `vignetting_highlight_headroom` / `vignetting_non_finite` /
-   `vignetting_color_modification_failed` / `tca_map_unexpected_shape` /
-   `geometry_non_finite` / `geometry_correction_failed` である。ブラケット合成時のみ、
-   群理由として `vignetting_aperture_inconsistent_across_frames`（絞りだけがフレーム間で
-   一致しない。Issue #36）も現れうる。幾何補正は、配列の長辺
-   `max(height,width)` が **4000px以上なら `INTER_CUBIC`、未満なら `INTER_LINEAR`** とし、
-   TCA較正がある場合はRGB別マップで歪曲補正と一度に適用する。
+- バイナリ `geoframe-ci-develop`（`tauri.conf.json` の `externalBin`。`npm run build:coreimage` が作る）。
+  実行ファイルと同じディレクトリ（開発時 `target/debug/`、`.app` では `Contents/MacOS/`）から探す。
+- 単発要求は stdin に JSON 1 個 → 最終の空でない stdout 行を JSON 応答として読む。候補生成は `--batch`（JSON Lines、
+  `sequence` 照合、op `decode` / `render` / `release`）。CLI の要求・応答の詳細は `native/coreimage-cli/README.md`。
+- CLI は出力 JPEG に撮影 EXIF / GPS を書かない（sRGB ICC は書く）。EXIF は Rust が後から付ける（§7.2）。
 
-### EXIF 継承（契約に影響する確定事項）
+### 7.2 EXIF 継承（`src-tauri/src/exif_inherit.rs`。ADR 0003 §3.1・§6 決定 5、2026-10-22 オーナー確定）
 
-1. **Pillow 単独で実装する。piexif は導入しない**（実機 Sony JPEG での round-trip 検証済み）。
-2. `DevelopedResult.exif_inherited` は、`build_inherited_exif()` が成功して
-   `image.save(..., exif=...)` に渡せた場合に `true`。
-3. `Orientation` は**必ず 1 に正規化**（rawpy 出力は正立のため、元の 8 を継承すると二重回転になる）。
-4. `MakerNote`(0x927C) は**意図的に破棄**する。レシピに `"makernote": "dropped"` を記録する。
-
-### 撮影データ実測に基づく注意（Wave 1-B のロジックに影響）
-
-- `SubsecTimeOriginal` は sample 281枚すべてで**存在しない** → 撮影時刻の分解能は **1秒**。
-  `PhotoInfo.captured_at` は秒精度になる。グループ化のソートは `DateTimeOriginal` + ファイル名連番で安定化させること。
-- `ExposureBiasValue` は **96.4% が非ゼロ**（-0.3 が182枚、+0.3 が89枚、0.0 が10枚）。
-  常用の露出補正であってブラケット撮影ではない。`raw.level = "maybe"` の判定条件
-  「ExposureBias ≠ 0」および `GroupInfo.kind = "bracket"` の判定は、
-  **そのままでは大量誤検出になる**ため Wave 1-B で条件を見直すこと（しきい値は定数として外出しする）。
+- **対象**: 原寸現像（`develop_full_coreimage`）と本合成（`merge_bracket` の `preview: false`）だけ。プレビューは継承しない。
+- **継承元**: 現像元フォルダ直下のカメラのペア JPG `<ID>.JPG`（合成は**昇順先頭 ID** のもの）。現像元フォルダ外を指すものは使わない。
+- **方式**: ペア JPG の EXIF APP1 を**バイト列のままコピー**し、必要なエントリだけ同じ長さで書き換える（再シリアライズしない）。
+  コピーした APP1 は出力 JPEG の SOI の直後に置き、出力側の既存 EXIF APP1 は捨てる（ICC の APP2 などは保つ）。
+- **変えるもの**: `Orientation`(0x112) → 1（CLI 出力は正立のため）、`PixelXDimension` / `PixelYDimension` → 出力寸法、
+  `Software`(0x131) → `"GeoFrame RAW Assist (Core Image)"`（無ければ足す）。
+- **落とすもの**: `MakerNote`(0x927C) のエントリ（実体バイトは参照されないまま残る）。IFD1（サムネイル IFD）へのリンク。
+- **GPS**: **GPS IFD (0x8825) はカメラのペア JPG にあればそのまま継承する（消さない）。アプリが新たに GPS を書くことはしない。**
+- **失敗時**: 現像・合成は失敗させない。ペア JPG が無い・構造が想定外・必須タグ欠落・APP1 が 65533 バイト超などは
+  `exif_inherited: false` で CLI の JPEG をそのまま残す（理由は返さない・GPS や画素値はログに出さない）。
 
 ---
 
-## 8. テスト運用（Wave 0 で変更済み）
+## 8. テスト運用
 
-- `package.json` の `test:raw` の unittest discover パターンを
-  `-p 'test_raw_*.py'` → **`-p 'test_*.py'`** に拡大した。
-  Wave 1 以降に追加される `tests/test_exif.py` / `test_lens.py` / `test_analysis.py` / `test_export.py` が
-  自動的に収集される。**新規テストファイルは `tests/test_*.py` の命名にすること。**
-- `tests/rendered-html.test.mjs` の `281組のペアを解析しました` assert は
-  **Wave 2-C2 まで変更しない**（Wave 1-C の機械分割が挙動不変であることの証明に使うため）。
+検証コマンドと画面の確認観点はリポジトリ直下の `CLAUDE.md`「ビルド / 検証コマンド」「画面の確認観点」に置く
+（`docs/design/single-app-implementation-plan.md` §6 の内容）。契約に関わる自動テスト:
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）… 入力検証・キャッシュキー・出力先分離・
+  EXIF 継承（合成 GPS の保持・MakerNote の除去）・プリセットのフィクスチャ一致。
+- `swift test --package-path native/coreimage-cli` … CLI の要求検証・合成モード（中央 pivot、境界枚数）。
+- `npm test` … reducer と `raw-api` / `coreimage-api` の invoke 引数。
 
 ---
 
-## 9. モジュール間インターフェース（orchestrator が Wave 1 dispatch 前に凍結）
+## 9. resolve の規則（`presets.rs: resolve_adjustments`）
 
-Wave 1 並列実装（A: engine 系 / B: analysis+server）間の import 契約。ここに書かれた名前・シグネチャは両者とも変更禁止（変更が必要なら orchestrator へ差し戻し）。
+- `resolve_adjustments(preset_name, overrides)` はプリセット既定値に `overrides` を上書きマージし、§2 の `normalize_adjustments` に通して 9 キー全量を返す。
+  - 未知のプリセット名 → `UNKNOWN_PRESET`。
+  - `overrides` が `null` / 省略 → プリセット値そのまま。オブジェクト以外 → `ADJUSTMENTS_INVALID`。
+  - 未知キー・不正な型・非有限値・不正な `noise_reduction` → `ADJUSTMENTS_INVALID`。数値の範囲外はクランプ。
+- 使う場所: `merge_bracket`（フロントの `adjustments` を overrides として渡す）、`generate_development_candidates`（`overrides = None` で基準値を作る）。
+- `develop_preview_coreimage` / `develop_full_coreimage` は resolve を通さず、フロントが解決した 9 キー全量を `normalize_adjustments` で検証するだけ。
+  （`presets.rs` の docコメント「現状 Tauri コマンドからは使っていない」は古い。§10.3）
 
-### `local_raw/presets.py`（所有: Wave 1-A）
+---
 
-- `PRESETS: dict[str, dict]` — key = preset name（§5のとおり11種）。各値は `{"label": str, "description": str, "adjustments": {<§2 Adjustments 全キー>}}`
-- `preset_infos() -> list[dict]` — 契約 `PresetInfo[]` そのもの（`/api/health` 用。Wave 1-B はこれを呼ぶだけ）
-- `resolve_adjustments(preset_name: str, overrides: dict | None = None) -> dict` — プリセット既定値に overrides をマージし **Adjustments 全キー**を返す。未知キー・不正型・未知 preset 名は `RawDevelopmentError`、数値の範囲外は §2 の範囲へクランプ
-- `DEFAULT_PRESET = "neutral_recovery"`
+## 10. 旧記述との差分（現行の決定との区別）
 
-### `local_raw/paths.py`（2026-08-23 追補）
+Issue #83 / #84 の本文、旧 HTTP 契約（`f3e24b0` 時点の本ファイル）、設計書には、現行コード・オーナー決定と違う記述が残っている。
+**下表の「現行」が正**。
 
-アプリの状態ファイル（設定・認証トークン）の保存先ディレクトリ解決と、旧パスからの移行。
-他のどのモジュールにも依存しない葉ノード（`config.py` はほぼ全エントリポイントの最上流にあるため）。
-外部ライブラリは使わない（標準ライブラリのみ）。
+### 10.1 ブラケット合成（#83 / #84）
 
-- `APP_IDENTIFIER = "com.geoframe.rawassist"` — `tauri.conf.json` の `identifier` と一致させること
-- `app_data_dir() -> Path` — OS標準のアプリデータディレクトリ（macOS: `~/Library/Application Support/<APP_IDENTIFIER>`、Windows: `%APPDATA%/<APP_IDENTIFIER>`、それ以外: `$XDG_DATA_HOME/<APP_IDENTIFIER>`）。ディレクトリ自体は作成しない
-- `migrate_legacy_file(old_path, new_path, *, mode=None) -> bool` — `old_path` にだけ実体があれば `new_path` へ一度だけ移す。**例外は一切投げない**。冪等性の条件は「`new_path` が既に存在するか」だけ
+| 旧記述 | 出典 | 現行 | 根拠 |
+|---|---|---|---|
+| 位置合わせの基準フレームは `inputs` の先頭 / 昇順先頭 ID を基準フレーム・EXIF 継承元・ファイル名先頭にする | #83「やること」2、#84「capture_ids の検証」、旧 §1 `merge-bracket`、`coreimage-feature-migration.md:271` | **位置合わせの基準は中央 pivot（`count / 2`）**。昇順先頭 ID を使うのは **EXIF 継承元とファイル名の先頭**だけ | `MergeCore.swift`（`let pivot = images.count / 2`）、`bracket.rs`（`pair_jpeg(&source_root, &capture_ids[0])`）、`coreimage-merge-core-report.md` |
+| `merge_bracket(capture_ids, preset, adjustments, preview, force, max_edge)` / プレビューの長辺はフロントが `max_edge` で決める | #84「やること」、旧 §1 `body.max_edge` | **`max_edge` 引数は無い**。preview は `PREVIEW_MAX_EDGE = 2400` 固定、本合成は `max_edge` を送らず原寸 | `bracket.rs: merge_bracket`、`coreimage.rs: PREVIEW_MAX_EDGE` |
+| プレビュー合成は長辺 1600（rawpy full-size デモザイク） | 旧 §1・§4 | 長辺 2400（Core Image、`apple_default`・decoder 9・レンズ補正 ON） | 同上 |
+| JPEG 保存で GPS は書かない / Rust 側で EXIF を継承するとき GPS・MakerNote は書かない | #83「やること」5、#84「EXIF 継承」 | CLI は EXIF / GPS を書かない（これは正しい）。**Rust の継承でカメラ JPG の GPS IFD はそのまま残す**。MakerNote は破棄。アプリが新たに GPS を書くことはしない | ADR 0003 §6 決定 5、`exif_inherit.rs`（テスト `assert_synthetic_gps_metadata`） |
+| フロントはブラウザモードでは従来の HTTP（`POST /api/merge-bracket`） | #84「フロント」 | HTTP は廃止。Tauri の `invoke("merge_bracket")` のみ | ADR 0003、`coreimage-api.ts` |
+| キャッシュキーは sha1 先頭 10 文字、rawpy/Pillow/OpenCV/lensfun の版を含む | 旧 §1 キャッシュキー | SHA-256 先頭 10 hex、`MERGE_SCHEMA`・CLI の版とバイナリ SHA-256・ARW の size/mtime・`rust_exif` を含む | `bracket.rs`、§4.1 |
+| レンズ補正の理由は lensfun 由来の多数の語彙（`lens_params_inconsistent_across_frames` 等） | 旧 §1 | 2 値 `coreimage_unsupported` / `inconsistent_across_frames` | `bracket.rs`、`tests/fixtures/coreimage_merge_lens_reasons.json` |
 
-> ⚠️ **`ensure_migrated()` は import 時には呼ばない契約。** `config.py` / `drive_upload.py` の `ensure_migrated()` はどちらも、モジュールロード時ではなく実アプリの `__main__` エントリポイント（`server.main()` / `engine.main()` / `bracket.main()`）から明示的に呼ぶ設計になっている。`npm run test:raw`（`unittest discover`）は対象モジュールを `import` するため、import 時に移行を走らせるとテスト実行だけで実データ（現像元フォルダの設定・生のOAuthリフレッシュトークン）が動いてしまうため。
->
-> **新しい `__main__` エントリポイントを追加する場合は、対応する `ensure_migrated()`（`config.ensure_migrated()` は必須、Google Drive機能を使うなら `drive_upload.ensure_migrated()` も）を、設定を読む処理より前に呼ぶこと。** 呼び忘れると、そのエントリポイント経由では移行が起きず、`config.source_root()` の「例外を投げない」設計により**静かに** `DEFAULT_SOURCE_ROOT` へフォールバックする（気づきにくい形で壊れる）。
->
-> 呼ぶ位置は「意味のある実行だと確定してから」（2026-08-23 追補）。argparse を使う CLI（`engine.main()` / `bracket.main()`）は `parse_args()` の**直後**で呼ぶ。`--help` や引数エラーは `SystemExit` で抜けるため、その前に置くと**起動しない実行でも不可逆なファイル移動が走る**。argparse を持たない `server.main()` は `main()` の先頭でよい。あわせて、移行通知は stdout が機械可読な契約を持つ CLI（末尾で `json.dumps` を出す）では **stderr** へ出すこと。
+### 10.2 アプリ全体（HTTP 廃止・保存先）
 
-### `local_raw/config.py`（2026-08-18 追補）
+| 旧記述 | 現行 |
+|---|---|
+| `http://127.0.0.1:8788` の `/api/*`、CORS・Origin チェック・64 KiB 上限、エラーは `{error}` + HTTP ステータス | Tauri コマンド 13 本 + `geoframe://` スキーム（§1）。エラーは §0.1 の 3 形。`geoframe://` スキームだけが HTTP 風ステータスを返す |
+| `outputs/{developed,preview,merged,merged_preview,thumbnails,analysis,export}/`（リポジトリ内） | `$APPDATA/{coreimage/{full,preview,merged,merged_preview,candidates},thumbnails,analysis,export}/`（§4）。`export` は単数形 |
+| 現像 JPEG 名 `{id}-{preset}-{hash10}.jpg` | `{ID}_{hash16}.jpg`（`coreimage/full/` と `coreimage/preview/`） |
+| サムネイル `{root_key}-{id}.webp` を `/thumbs/` で配信、`PhotoInfo.thumb` は URL | `{root_key}-{ID}.jpg`、`thumb` は絶対パス（asset プロトコルで表示） |
+| 書き出しの `developed_filename` は `raw-develop` の `{id}-{preset}-{hash10}.jpg`、検証は `outputs/developed/` | `variant` の 3 値（`camera_jpg` / `developed` / `merged`）は不変。`developed_filename` は `coreimage/full/` の `{ID}_{hash16}.jpg`、検証は来歴 JSON の `mode == "full"` |
+| プリセットは `GET /api/health` から取得、legacy rawpy 値とも二重管理 | `get_presets`（Rust）のみ。legacy 値は契約外 |
+| 解析は `POST /api/analyze` → `GET /api/analysis` | `start_analysis` → `get_analysis` のポーリング |
+| Drive アップロード（`/api/drive-upload`） | アプリには無い（将来 N-F で設計からやり直し） |
+| ブラウザ（vite dev）で画面を検証する | Tauri（`tauri:dev` / `.app`）で検証する。vite 単体では動かない |
 
-現像元フォルダの検証・永続化。保存先は `paths.app_data_dir() / "config.json"`（tmp + `os.replace` のアトミック書き込み。2026-08-23 追補: 旧保存先は `outputs/config.json`）。
+### 10.3 既知の不整合（コード側の宿題。挙動は上の各節のとおり）
 
-- `DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "sample" / "100MSDCF"`
-- `source_root() -> Path` — 現在の設定を解決して返す。設定が無い / 壊れている / 保存先がもう
-  存在しない場合は `DEFAULT_SOURCE_ROOT` にフォールバックし、**例外は投げない**。
-  「読めないだけ」のフォルダはフォールバックしない（UI が許可を案内できるようにするため）
-- `set_source_root(path, *, analysis_running: bool = False) -> Path` — 検証して保存。
-  失敗は `SourceFolderError`（`ValueError` 派生・`reason` 属性つき）で、**保存しない**
-- `root_key_for(path) -> str` / `source_root_key() -> str` — sha1 先頭8文字（§4 の `root_key`）。
-  内部で必ず `resolve()` し、`params_hash` に混ぜるパス文字列と正規化を共有する
-- `display_path(path) -> str` — §1 の `display_path`
-- `source_folder_info(root=None) -> dict` — §1 の `SourceFolderInfo`（件数は `scan_pairs()` 由来）
-- `ensure_migrated() -> bool`（2026-08-23 追補） — 旧パス `outputs/config.json` からの一度きりの移行。呼び出しは実アプリの起動経路（`main()`）からのみ、モジュールロード時には呼ばない
-
-> ⚠️ **どのモジュールでも `SOURCE_ROOT = config.source_root()` のようにモジュールレベルで
-> 束縛しないこと。** import 時に固定され、フォルダ切り替えが半分しか効かなくなる。
-> 参照はすべてリクエスト処理時の関数呼び出しで解決する。
-
-### `local_raw/engine.py`（所有: Wave 1-A）
-
-- 既存 export 維持: `OUTPUT_ROOT` / `PROJECT_ROOT` / `CAPTURE_ID_PATTERN` / `RawDevelopmentError` / `develop_raw` / `PRESETS`（構造は新 presets.py 準拠に変わる）
-- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。現像元フォルダは `config.source_root()` で
-  **呼び出し時に**解決する。`develop_raw()` は 1 リクエストにつき 1 回だけ解決し、パス組み立て・
-  トラバーサル検査・`params_hash` で同じ値を使う。レシピの `source.path` は
-  プロジェクト外フォルダでも壊れないよう相対化に失敗したら絶対パスのまま入る
-- 追加 export: `PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "preview"`
-- `develop_raw(capture_id: str, preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
-  — 戻り値は契約 `DevelopedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側（Wave 1-B）が付与**する: `preview == true` のファイルは `/preview/<filename>`、それ以外は `/outputs/<filename>` として URL を組む（既存の `?v=<mtime_ns>` 方式を踏襲）
-- （2026-09-29 追補）後段関数のシグネチャに keyword 専用引数 `iso` が増えた（撮影時シャープの ISO 依存。§2）:
-  `apply_post_decode_chain(rgb, adjustments, max_edge, *, iso: float | None = None)` /
-  `_apply_tone_array(rgb, adjustments, *, iso: float | None = None)`。`iso=None`（不明）は
-  コアリング閾値 0.5/255・gain 減衰なしの扱い。`development_candidates.render_proxy(decoded, adjustments, iso: float | None = None)` も同様。
-  `ENGINE_VERSION = 16` / `RECIPE_VERSION = 10`（レシピに `"iso": number | null` を追加）。
-  （2026-09-29 追補、Issue #50）暗いシーン判定の追加で `ENGINE_VERSION = 17` / `RECIPE_VERSION = 11`（レシピに `"dark_scene"` を追加）。
-
-### `local_raw/bracket.py`（2026-08-20 追補）
-
-ブラケット露出合成（Exposure Fusion / Mertens）。`server.py` は呼び出し時に import する。
-
-- `MERGED_ROOT = PROJECT_ROOT / "outputs" / "merged"`（`/merged/` 配信元。**本合成のみ**）
-- `MERGED_PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "merged_preview"`
-  （`/merged-preview/` 配信元。2026-08-20b 追補）
-- `MIN_FRAMES = 2` / `MAX_FRAMES = 9`
-- `merge_bracket(capture_ids: list[str], preset_name: str, *, adjustments: dict | None = None, preview: bool = False, force: bool = False, max_edge: int = 6000) -> dict`
-  — 戻り値は契約 `MergedResult` から `output_url` を除いた全キー。**`output_url` はサーバ側が付与**する: `preview == true` のファイルは `/merged-preview/<filename>`、それ以外は `/merged/<filename>`（いずれも `?v=<mtime_ns>` 付き。`develop_raw` の `/preview/` と `/outputs/` の切り替えと同じ形）
-- 保存先も `preview` で分ける（`preview == true` → `MERGED_PREVIEW_ROOT`）。同居させると
-  サーバ側で原寸とプレビューを区別できず、`POST /api/export` にプレビューをマスターとして
-  書き出せてしまう
-- 合成用のデコードは `engine._postprocess_params()` を**流用しない**。露出差を保つ
-  `_merge_postprocess_params()`（`no_auto_bright=True`）を使う。`shadow_lift` とトーンは
-  `engine._apply_shadow_lift_array()` / `engine._apply_tone_array()` を再利用する。RAWは16bitで受け、合成結果の8bit化は最後に行う
-- `cv2.createAlignMTB().process(src, dst)` は **src と同じリストを渡して in-place で受ける**。
-  空リストは何も書かれず、事前確保したリストは**1枚が全面0になる**（実測 OpenCV 5.0.0）
-
-### `local_raw/lens.py`（所有: Wave 1-A）
-
-- `lensfun_info() -> dict` — `{"available": bool, "db_version": "0.3.4.0"?}`（`/api/health` の `lensfun` キーへそのまま入る形。db_version 不明時はキー省略）
-
-### `local_raw/analysis.py`（所有: Wave 1-B）
-
-- `THUMBS_ROOT = PROJECT_ROOT / "outputs" / "thumbnails"`（`/thumbs/` 配信元）
-- **`SOURCE_ROOT` 定数は廃止（2026-08-18 追補）**。`scan_pairs()` / `_source_signature()` /
-  `read_cached_analysis()` / `build_analysis()` は引数省略時に `config.source_root()` を
-  呼び出し時解決する。`_source_signature()` は**解決済みルートパスを署名に含む**
-  （含めないと似た構成の別フォルダで解析キャッシュが流用される）
-- `is_analysis_running() -> bool` — `POST /api/source-folder` の `analysis_running` 判定用
-- 分析ジョブ管理（開始/状態取得）の内部 API は 1-B が自由に設計してよい（server.py も 1-B 所有のため外部契約は §1 の HTTP 契約のみ）
-
-### `local_raw/drive_upload.py`（2026-08-22 追補）
-
-書き出し済みバッチの Google Drive アップロード（OAuth デスクトップアプリ）。
-`server.py` はハンドラ関数内で呼び出し時に import する（ただし `server.main()` 自身は
-`ensure_migrated()` を呼ぶため起動時に import する。2026-08-23 追補）。
-
-- `CLIENT_SECRET_PATH = PROJECT_ROOT / "local_raw" / "drive_client_secret.json"`（**source control 対象外**）
-- `TOKEN_PATH = paths.app_data_dir() / "drive_auth.json"` — リフレッシュトークン（2026-08-23 追補: 旧保存先は `outputs/drive_auth.json`）。
-  `os.open(..., O_EXCL, 0o600)` で作成した tmp へ書いてから `os.replace`（`write_text` 後の
-  `chmod` だと一瞬 world-readable な窓が空くため）
-- `SCOPES = ["https://www.googleapis.com/auth/drive"]` / `DRIVE_FOLDER_NAME = "GeoFrame"`
-- `is_drive_configured() -> bool` — §1 の `configured`（client secret が存在し `installed` キーを持つか）
-- `start_drive_upload(batch_name: str) -> str` — `"started"` | `"already_running"`。
-  同期検証（バッチ名・書き出しフォルダの存在・対象0件・client secret）の失敗は `ValueError`（→400）
-- `get_drive_upload_state() -> dict` — §1 の `GET /api/drive-upload` ペイロード
-- `DriveUploadError(kind, message)` — `kind` がそのまま `error_kind` になる
-- `ensure_migrated() -> bool`（2026-08-23 追補） — 旧パス `outputs/drive_auth.json` からの一度きりの移行（`mode=0o600`）。呼び出しは `server.main()` からのみ、モジュールロード時には呼ばない
-
-> ⚠️ **google 系ライブラリをモジュールのトップレベルで import しないこと。**
-> 未インストール環境でも `import local_raw.drive_upload` は成功する必要がある
-> （`GET /api/drive-upload` が `configured` を返せるようにするため）。遅延 import は
-> `_google_error_types()` / `_credentials_from_payload()` / `_refresh_credentials()` /
-> `_build_service()` / `_media_file_upload()` / `_run_oauth_consent()` に閉じ込める。
-
-### `src-tauri/src/main.rs`（2026-08-25 追補）
-
-RAW エンジン（Python サブプロセス）の stdout/stderr は `<app_handle.path().app_data_dir()>/logs/raw-engine.log`
-（Rust 側の `open_raw_engine_log` が起動毎に作成・truncate して書く。append し続けるログではない。
-0600 で作成し、既存ファイルに対しても `set_permissions` で明示的に 0600 へ揃える）へ
-リダイレクトされる。app-data ディレクトリの解決・`logs/` の作成・ファイルオープンのいずれかに
-失敗した場合のみ、警告を stderr に出したうえで親プロセスの stdio へフォールバックする
-（`Stdio::inherit()`。起動自体は失敗させない）。
-
-> ⚠️ Rust 側の `app_handle.path().app_data_dir()`（Tauri 標準 API）と `local_raw/paths.py` の
-> `app_data_dir()` は**同じディレクトリを指すことを意図しているが、実装は別物**。
-> `paths.py` 側は `Path.home()` 解決失敗時に `Path.cwd()` へフォールバックする経路を持つが
-> （`paths.py` の `_home()` を参照）、Rust 側には対応するフォールバックが無い。両者が一致しない
-> 状況（`HOME` 未設定等、極めて稀）では RAW エンジンのログと Python 側の状態ファイル
-> （`config.json` 等）が別ディレクトリに出うる。
->
-> Python サブプロセスは `PYTHONUNBUFFERED=1` で起動される（`spawn_raw_engine`）。ファイル
-> リダイレクト先ではブロックバッファになり、アプリ終了時の `Child::kill()`（Unix では
-> SIGKILL、flush の機会なし）でバッファ中の出力が失われるため。
-
-### 並列作業の約束事
-
-- Wave 1-A は **local_raw/server.py を起動も編集もしない**（ポート 8788 は 1-B の検証専用）
-- 作業中のテストは自分の所有ファイルを対象に module 指定で実行する（例: `.venv/bin/python -m unittest tests.test_analysis`）。`npm run test:raw` のフルスイートは他エージェントの編集途中ファイルを拾いうるため、失敗が自分の所有外なら無視し、最終判定は orchestrator が行う
+- `engine_info` だけスレッド異常の code が `INTERNAL`（他は `INTERNAL_ERROR`）。
+- `SourceFolderError` は `code` と `reason` に同じ値を二重に持つ。
+- `get_source_folder` は未設定時にビルド機のパス `<リポジトリ>/sample/100MSDCF` を返すが、解析・現像は `SOURCE_ROOT_NOT_CONFIGURED`。
+- 書き出し系 3 コマンドのエラーが `code` を持たない素の文字列。`import_to_photos` は失敗を `Ok` で返す。
+- `DevelopedResult.output_url` / `MergedResult.output_url` は Rust が macOS の asset URL 形を直書きしている（他 OS では未検証）。
+  `develop_full_coreimage` の URL にはキャッシュバスター `?v=` が無い。
+- `src/lib/types.ts` の古い記述: 冒頭の「Python 側との唯一の正」、`PhotoInfo.thumb` の `/thumbs/…webp` 例、書き出し先の `outputs/export/<batch>/`、
+  `PhotoInfo.captured_at` / `GroupInfo.start_at` / `end_at` が `string`（実際は null 可）、`PhotoInfo.orientation` が `number | null`（実際は常に数値）。
+- `presets.rs: resolve_adjustments` の docコメント「Tauri コマンドからは使っていない」は古い（§9）。
+- `generate_development_candidates` の進捗イベントをフロントが listen していない。
