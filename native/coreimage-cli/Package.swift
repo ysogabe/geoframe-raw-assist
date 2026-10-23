@@ -14,6 +14,6 @@ let package = Package(
         .target(name: "CoreImageDevelop"),
         // stdin/stdout の入出力だけを担う薄い実行ターゲット。
         .executableTarget(name: "geoframe-ci-develop", dependencies: ["CoreImageDevelop"]),
-        .testTarget(name: "CoreImageDevelopTests", dependencies: ["CoreImageDevelop"]),
+        .testTarget(name: "CoreImageDevelopTests", dependencies: ["CoreImageDevelop"], resources: [.process("Fixtures")]),
     ]
 )
