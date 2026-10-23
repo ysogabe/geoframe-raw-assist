@@ -53,12 +53,12 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const DECODER_VERSION: &str = "9";
 const PROFILE: &str = "apple_default";
 const LENS_CORRECTION: bool = true;
-const PREVIEW_MAX_EDGE: u32 = 2400;
+pub(crate) const PREVIEW_MAX_EDGE: u32 = 2400;
 const FORMAT: &str = "jpeg";
 
 /// これより古い `.tmp` は放置された一時ファイルとみなして消す。現像 1 回のウォッチドッグ
 /// （60 秒）より十分長く取り、走行中の現像の一時ファイルには触れない。
-const STALE_TEMP_AGE: Duration = Duration::from_secs(10 * 60);
+pub(crate) const STALE_TEMP_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// キャッシュ名ハッシュの入力形式の版。ハッシュ入力の組み立てや、Rust 側の
 /// Adjustments 正規化規則（クランプ・float 化）を変えたら上げる。
@@ -68,8 +68,8 @@ const CACHE_KEY_SCHEMA: u32 = 3;
 
 /// キャッシュ上限（設計書 §2.3、オーナー判断 8）。件数は `.jpg` + `.json` の組を 1 件と数える。
 /// 超えたら mtime の古い組から消して上限の 80% まで落とす。
-const CACHE_MAX_ENTRIES: usize = 600;
-const CACHE_MAX_BYTES: u64 = 1_500_000_000;
+pub(crate) const CACHE_MAX_ENTRIES: usize = 600;
+pub(crate) const CACHE_MAX_BYTES: u64 = 1_500_000_000;
 
 /// CLI の実行待ちに並べる件数（走行中の 1 本を除く）。超えたら BUSY（設計書 §2.4）。
 const MAX_WAITING: usize = 2;
@@ -403,10 +403,10 @@ fn enumerate_arw(root: &Path, capture_id: &str) -> Result<PathBuf, CoreImageErro
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct SidecarOutput {
-    status: ExitStatus,
-    stdout: String,
-    stderr: String,
+pub(crate) struct SidecarOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 fn read_all_in_thread<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<String> {
@@ -427,7 +427,7 @@ fn read_all_in_thread<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHa
 ///   すぐには kill せず、同じウォッチドッグで終了を待つ。stdout に CLI の構造化エラー
 ///   （`{"ok":false,"error":{"code",...}}`）があればそれを返し、無い・読めないときだけ
 ///   `SIDECAR_IO_FAILED` にする（CLI が出した本当の原因を捨てないため）。
-fn run_sidecar(
+pub(crate) fn run_sidecar(
     program: &Path,
     args: &[&str],
     stdin_bytes: Option<&[u8]>,
@@ -531,7 +531,7 @@ fn is_cli_error_response(response: &Value) -> bool {
 }
 
 /// stdout の最後の非空行を JSON として読む（契約上 stdout は JSON 1 行だけ）。
-fn parse_response(output: &SidecarOutput) -> Result<Value, CoreImageError> {
+pub(crate) fn parse_response(output: &SidecarOutput) -> Result<Value, CoreImageError> {
     let line = output
         .stdout
         .lines()
@@ -557,7 +557,7 @@ fn parse_response(output: &SidecarOutput) -> Result<Value, CoreImageError> {
 }
 
 /// CLI の失敗応答 `{"ok":false,"error":{"code","message"}}` をそのまま詰め替える。
-fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
+pub(crate) fn cli_error(response: &Value, status: ExitStatus) -> CoreImageError {
     let error = response.get("error");
     let code = error.and_then(|e| e.get("code")).and_then(Value::as_str);
     let message = error.and_then(|e| e.get("message")).and_then(Value::as_str);
@@ -961,19 +961,19 @@ pub(crate) mod batch {
 /// `--version` の応答（cli_version + macOS バージョンを含む）の正規形と、その中の 2 値、
 /// およびサイドカー実行ファイルの SHA-256。
 #[derive(Debug, Clone)]
-struct CliVersion {
-    fingerprint: String,
-    cli_version: String,
-    macos_version: String,
+pub(crate) struct CliVersion {
+    pub(crate) fingerprint: String,
+    pub(crate) cli_version: String,
+    pub(crate) macos_version: String,
     /// 実行ファイル本体の SHA-256（16 進 64 桁）。cli_version を上げ忘れたまま CLI の実装
     /// （写像の定数など）が変わっても、キャッシュが古い出力を返さないようにする。
-    binary_sha256: String,
+    pub(crate) binary_sha256: String,
 }
 
 /// サイドカー実行ファイルの SHA-256（16 進）。パスごとにプロセスで 1 回だけ計算して覚える
 /// （.app 内のバイナリは起動中に変わらない前提。数 MB を現像のたびに読まない）。
 /// 読めなければ `SIDECAR_IO_FAILED`（失敗は覚えない）。
-fn sidecar_sha256(sidecar: &Path) -> Result<String, CoreImageError> {
+pub(crate) fn sidecar_sha256(sidecar: &Path) -> Result<String, CoreImageError> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(digest) = cache
@@ -1006,7 +1006,7 @@ fn sidecar_sha256(sidecar: &Path) -> Result<String, CoreImageError> {
 
 /// sidecar ごとに `--version` の結果を覚えておく（プロセス寿命中は変わらない前提）。
 /// 失敗は覚えない（次回また試す）。
-fn cli_version(sidecar: &Path) -> Result<CliVersion, CoreImageError> {
+pub(crate) fn cli_version(sidecar: &Path) -> Result<CliVersion, CoreImageError> {
     static CACHE: Mutex<Option<(PathBuf, CliVersion)>> = Mutex::new(None);
     {
         let guard = CACHE
@@ -1084,7 +1084,7 @@ fn base_request(
 
 /// キーを再帰的に辞書順へ並べた JSON 文字列。serde_json の `preserve_order` が依存経由で
 /// 有効になっても（Map が挿入順になっても）ハッシュが変わらないようにする。
-fn canonical_json(value: &Value) -> String {
+pub(crate) fn canonical_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -1222,7 +1222,7 @@ fn regular_files(dir: &Path) -> Vec<(String, PathBuf, fs::Metadata)> {
 /// 以上経ったものを消す。CLI をタイムアウトで kill すると、CLI が output と同じディレクトリに
 /// 作る `.<output名>.<UUID>.tmp` が残るため。シンボリックリンクは追わず（symlink_metadata）、
 /// 削除の失敗は無視する（掃除は best effort）。
-fn cleanup_stale_temps(dir: &Path, max_age: Duration) {
+pub(crate) fn cleanup_stale_temps(dir: &Path, max_age: Duration) {
     let now = SystemTime::now();
     for (name, path, metadata) in regular_files(dir) {
         if !(name.starts_with('.') && name.ends_with(".tmp")) {
@@ -1274,7 +1274,10 @@ fn cleanup_legacy_outputs_once(coreimage_dir: &Path) {
 fn cache_entry_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r"^(DSC[0-9]{5}_[0-9a-f]{16})\.(?:jpg|json)$").expect("valid regex")
+        Regex::new(
+            r"^((?:DSC[0-9]{5}_[0-9a-f]{16}|DSC[0-9]{5}-merged[2-9]-[A-Za-z0-9_-]+-[0-9a-f]{10}))\.(?:jpg|json)$",
+        )
+        .expect("valid regex")
     })
 }
 
@@ -1292,7 +1295,12 @@ struct CacheEntry {
 /// 両方を上限の 80% 以下まで落とす。`keep_stem`（いま書いた組）は消さない。シンボリック
 /// リンク・ディレクトリ・名前の形が違うファイルには触れない。best effort（失敗は無視）。
 /// 消した組の数を返す。
-fn prune_cache(dir: &Path, max_entries: usize, max_bytes: u64, keep_stem: Option<&str>) -> usize {
+pub(crate) fn prune_cache(
+    dir: &Path,
+    max_entries: usize,
+    max_bytes: u64,
+    keep_stem: Option<&str>,
+) -> usize {
     let mut entries: HashMap<String, CacheEntry> = HashMap::new();
     for (name, path, metadata) in regular_files(dir) {
         let Some(found) = cache_entry_pattern().captures(&name) else {
@@ -1422,7 +1430,7 @@ fn create_new_file(path: &Path) -> std::io::Result<fs::File> {
         .open(path)
 }
 
-fn write_provenance(path: &Path, body: &str) -> Result<(), CoreImageError> {
+pub(crate) fn write_provenance(path: &Path, body: &str) -> Result<(), CoreImageError> {
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1483,8 +1491,20 @@ fn prepare_output_dirs(
     app_data_dir: &Path,
     mode: DevelopMode,
 ) -> Result<(PathBuf, PathBuf), CoreImageError> {
+    prepare_output_subdir(app_data_dir, mode.as_str())
+}
+
+/// `<app_data_dir>/coreimage/<name>/` を作り、canonicalize した親・子を返す。
+/// `name` は内部定数に限定し、symlink と canonical containment は通常現像と同じ規則で検証する。
+pub(crate) fn prepare_output_subdir(
+    app_data_dir: &Path,
+    name: &str,
+) -> Result<(PathBuf, PathBuf), CoreImageError> {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
+        return Err(output_dir_error("出力サブフォルダ名が不正です"));
+    }
     let coreimage_dir = app_data_dir.join(OUTPUT_DIR_NAME);
-    let mode_dir = coreimage_dir.join(mode.as_str());
+    let mode_dir = coreimage_dir.join(name);
     fs::create_dir_all(app_data_dir).map_err(|error| {
         output_dir_error(format!(
             "アプリのデータフォルダを作れません: {}: {error}",
@@ -1717,9 +1737,9 @@ pub(crate) fn develop(
     Ok(developed)
 }
 
-const EXIF_SOFTWARE: &str = "GeoFrame RAW Assist (Core Image)";
+pub(crate) const EXIF_SOFTWARE: &str = "GeoFrame RAW Assist (Core Image)";
 
-fn inherit_output_exif(output: &Path, source: &[u8], width: u64, height: u64) -> bool {
+pub(crate) fn inherit_output_exif(output: &Path, source: &[u8], width: u64, height: u64) -> bool {
     let attempt = || -> Option<()> {
         let width = u32::try_from(width).ok()?;
         let height = u32::try_from(height).ok()?;

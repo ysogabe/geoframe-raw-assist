@@ -5,6 +5,7 @@
 
 mod adjustments;
 mod analysis;
+mod bracket;
 mod candidates;
 mod coreimage;
 mod exif_inherit;
@@ -19,6 +20,8 @@ fn main() {
         // 元 JPG の配信（Issue #110）: geoframe://localhost/source-jpg/DSC12345.JPG
         .register_asynchronous_uri_scheme_protocol("geoframe", analysis::source_jpg_protocol)
         .invoke_handler(tauri::generate_handler![
+            // ブラケット合成（Issue #84）。
+            bracket::merge_bracket,
             // Core Image プレビュー・原寸現像（Issue #108）。
             coreimage::develop_full_coreimage,
             coreimage::develop_preview_coreimage,
