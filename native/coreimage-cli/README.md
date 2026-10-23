@@ -28,7 +28,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 
 スモークテストは `/Volumes/Backup/100MSDCF/DSC04430.ARW`（横位置）/ `DSC04553.ARW`（縦位置, Orientation=8）が
 読めるときだけ走り、無ければ skip される。個別上書き（下記）のスモークは、上記か星空サンプル
-（`~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
+（リポジトリの `work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
 最初に読めるものを使う。診断モード（0.4.0）のスモークのうち線形読み出し・`baseline_exposure`・`linear_space_filter` の確認は
 明るい空のカット `/Volumes/Backup/100MSDCF/DSC04705.ARW`（または環境変数 `GEOFRAME_CI_DIAG_ARW`）が読めるときだけ走る。
 テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。

@@ -47,3 +47,4 @@ __pycache__/
 /CLAUDE.md
 /AGENTS.md
 /.omp/
+/.playwright-mcp/

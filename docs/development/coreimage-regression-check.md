@@ -48,7 +48,7 @@ OS が決める値（シャープ・NR・色温度の推定など）が変わっ
 ```sh
 npm run build:coreimage
 scripts/coreimage-regression-applied.sh <ベースラインと同じ ARW のフォルダ>
-# 例: scripts/coreimage-regression-applied.sh ~/works/60-misc/40-raw-assistant/work/raw
+# 例: scripts/coreimage-regression-applied.sh work/raw
 ```
 
 スクリプトは各 ARW を基本設定で preview 現像し（出力は `work/regression/<macOS のバージョン>/`、gitignore 済み）、
