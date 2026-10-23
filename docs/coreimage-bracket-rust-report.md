@@ -71,3 +71,12 @@ cargo test --manifest-path src-tauri/Cargo.toml real_cli_merge_export_smoke -- -
 - cache hitでは通常ファイル検査に加え、非ゼロサイズと実ファイルのSHA-256/sizeがrecipeと一致することを要求する。recipe欠落・不正値・JPEGの置換/破損/空ファイルはcache missとして再生成する。
 - merged exportも同じ指紋を再検証し、指紋が欠落または不一致の画像は拒否する。JPEGデコードは追加せず、mockのsynthetic bytesも保存時の内容fingerprintで検査する。
 - `merge_cache_requires_matching_complete_recipe` に出力差替えと0 byteの再生成を追加し、`exports_only_verified_full_merged_recipe` に改変/空JPEGの拒否を追加した。
+
+
+## 親側のJPEG整合性修正後QA（2026-10-23）
+
+- `6b74ec8` のJPEG fingerprint修正後、親側で `cargo test --all-targets` は148 passed / 8 ignored / 0 failed、`cargo build` は成功・警告0、`git diff --check` も成功した。
+- CLI 0.8.0を明示した `real_cli_merge_export_smoke --ignored` は1 passed（60.95秒）。preview/full、EXIF継承後のfingerprint、cache hit、export/manifestのバイト一致、preview拒否、元RAW不変を確認した。以前の16.91秒とは実行条件の負荷を揃えていないため、性能比較には使わない。
+- オーナーは現状素材で接続検証を進める方針を選択した。同一露出RAWのコピーとsynthetic GPSによる検証で、実AEB／三脚長秒ブラケットの画質QAは未実施。
+- 隔離QAアプリ（com.geoframe.rawassist.qa84）でCLI 0.8接続と2ペアの読み込み・解析開始を確認した。最初の試験JPGはRust EXIF readerが読めず2単写へ分離したため、最小EXIFへ作り直し、本番と同じkamadak-exif 0.6のread_from_containerで合成日時・EV・共通レンズを親側でも確認した。
+- その後、画面操作ツールのアプリ再選択が2508秒返らず、返ったAXはWeb documentのみで画面内容を取得できなかった。修正素材の再解析、GUIでのpreview/full合成・採用・export、および候補生成のIPC操作は未確認。CLI結合の成功をGUI成功とは扱わない。
