@@ -40,7 +40,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 B=.build/release/geoframe-ci-develop
 
 $B --version
-# {"cli_version":"0.7.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
+# {"cli_version":"0.8.0","engine":"coreimage","macos_version":"27.0.1","ok":true}
 
 $B --capabilities                                   # OS が α6400 をサポートするか
 $B --capabilities /Volumes/Backup/100MSDCF/DSC04430.ARW   # ＋そのファイルで使える decoderVersion
@@ -52,7 +52,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","output":"/tmp/ci-poc/DSC
 `--capabilities` の応答例:
 
 ```json
-{"adjustments":{"ignored":[],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.7.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
+{"adjustments":{"ignored":[],"post_kernel":"metal","supported":true},"camera_model_names":["Sony Alpha ILCE-6400","Sony Alpha ILCE-6400A"],"cli_version":"0.8.0","diagnostics":{"post_filters":["CIHighlightShadowAdjust","CIToneCurve","CIExposureAdjust","CIColorClamp"],"supported":true},"engine":"coreimage","ilce6400_supported":true,"macos_version":"27.0.1","ok":true,"output_formats":{"jpeg":"8-bit JPEG, sRGB IEC61966-2.1 ICC embedded","tiff16":"16-bit RGB TIFF, Display P3 ICC embedded (default) or sRGB with output_color_space \"srgb\""},"probe_input":"/Volumes/Backup/100MSDCF/DSC04430.ARW","profiles":["neutral","apple_default"],"request_decoder_versions":["8","9"],"supported_decoder_versions":["8","9"]}
 ```
 
 `supportedDecoderVersions` は CIRAWFilter のファイル単位 API なので、probe ファイルを渡したときだけ
@@ -334,6 +334,22 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04705.ARW","output":"'$PWD'/work/dia
   "decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true,"boost_amount":0,"gamut_mapping":false},
   "diagnostics":{"skip_write":true,"dump_float":{"path":"'$PWD'/work/diag/s1.f32"}}}' | $B
 ```
+
+## 合成モード（CLI 0.8.0、Issue #83 PR-B）
+
+`mode: "merge"` は 2〜9 枚の絶対 `.ARW` パスを一つのリクエストで受け、逐次RAWデコード → AlignMTB/Mertens融合 → 後段調整 → JPEG出力を行う。単発 stdin と `--batch` の1行は同じ parser / `merge()` 実装を通る。
+
+```json
+{"mode":"merge","inputs":["/abs/a.ARW","/abs/b.ARW"],"output":"/abs/merged.jpg","max_edge":2400,"decoder_version":"9","settings":{"profile":"apple_default","lens_correction":true},"adjustments":{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":0,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"},"merge":{"align":true,"max_shift_ratio":0.02,"edge":"crop","weights":{"contrast":1,"saturation":1,"exposure":0}}}
+```
+
+`max_edge` を省くと原寸、指定するとその長辺以下にデコードする（64..20000）。出力はJPEGのみ。`diagnostics` と `tiff16` は不可。全9個のadjustmentキーが必須で、`exposure` と `highlight_recovery` は各フレーム共通化のため0固定として `adjustments_applied.ignored` に記録する。ホワイトバランス、ノイズ低減、デコーダシャープはRAW現像時に全フレームへ同条件で適用し、shadow lift / brightness / contrast / saturation / USM は合成後に一度だけ掛ける。`settings.exposure_ev` は0以外を拒否する。
+
+応答には `merge` の検出・適用シフト、共通crop、重み、フレーム別 `applied` / `source`、`elapsed_ms` を含める。CLIはRAWのEXIF/GPSを出力へ継承しない。Rust側の後続処理が担う。
+
+デコード前にRAWの寸法からworking-memoryを推定し、4 GBまたは物理メモリから1.5 GBを引いた予算（小さい方）を超えるリクエストを拒否する。見積もりは入力1画素あたり17 bytes（保持UInt16 RGBと融合中間面を含む）。24 MP×9枚は約3.67 GB。
+
+9個のハードリンクを使った同一画像9枚の24 MP原寸smokeでは、57.63秒、maximum RSS 3.28 GiB、peak footprint 3.41 GiBを計測した。これは資源検証であり、ブラケット画質の検証ではない。実AEB / 三脚長秒RAWが無いため実写画質確認は未完了で、Issue #83を閉じる確認に残す。測定条件・CLIとの差分は [`docs/coreimage-merge-mode-report.md`](../../docs/coreimage-merge-mode-report.md) を参照。
 
 ## レスポンス（stdout に JSON 1 行）
 

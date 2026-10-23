@@ -42,6 +42,14 @@ public final class BatchProcessor {
                     defer { context.clearCaches() }
                     return try handleOperation(op, object, sequence: current)
                 }
+                if RequestParser.isMergeRequest(data) {
+                    defer { context.clearCaches() }
+                    let request = try RequestParser.parseMerge(data)
+                    var response = try merge(request, context: context)
+                    response.sequence = current
+                    log("#\(current) ok merge jpeg \(response.width)x\(response.height) total=\(response.elapsed_ms.total)ms")
+                    return encodeJSONLine(response)
+                }
                 let request = try RequestParser.parse(data)
                 // 使い回す CIContext のキャッシュは 1 件ごとに捨てる。捨てないと同じ RAW を続けて回したときに
                 // 1 件あたりの時間が伸び続けた（30 件で 1.3 秒 → 2.3 秒。README「バッチモード」の計測）。

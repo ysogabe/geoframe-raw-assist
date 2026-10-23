@@ -1,7 +1,7 @@
 import Foundation
 
 /// CLI のバージョン。応答 JSON の `cli_version` に載る。
-public let cliVersion = "0.7.0"
+public let cliVersion = "0.8.0"
 
 /// 失敗応答の `error.code`。README のエラーコード表と一致させること。
 public enum ErrorCode: String, Encodable {
@@ -422,6 +422,10 @@ public enum RequestParser {
 
 /// ファイルシステムに対する事前検証（読むだけ。書き込みはしない）。
 public enum PathValidator {
+    public static func validate(_ request: MergeRequest, fileManager: FileManager = .default) throws {
+        for input in request.inputs { try validateInput(input, fileManager: fileManager) }
+        for input in request.inputs { try validateOutput(request.output, input: input, fileManager: fileManager) }
+    }
     public static func validate(_ request: DevelopRequest, fileManager: FileManager = .default) throws {
         try validateInput(request.input, fileManager: fileManager)
         try validateOutput(request.output, input: request.input, fileManager: fileManager)

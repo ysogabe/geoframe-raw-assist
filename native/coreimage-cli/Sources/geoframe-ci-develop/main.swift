@@ -57,6 +57,13 @@ if let unknown = arguments.first {
 
 let data = FileHandle.standardInput.readDataToEndOfFile()
 do {
+    if RequestParser.isMergeRequest(data) {
+        let request = try RequestParser.parseMerge(data)
+        let response = try merge(request)
+        log("ok merge jpeg \(response.width)x\(response.height) total=\(response.elapsed_ms.total)ms")
+        emit(encodeJSONLine(response))
+        exit(0)
+    }
     let request = try RequestParser.parse(data)
     let response = try develop(request)
     log("ok \(response.mode) \(response.format) \(response.width)x\(response.height) total=\(response.elapsed_ms.total)ms")

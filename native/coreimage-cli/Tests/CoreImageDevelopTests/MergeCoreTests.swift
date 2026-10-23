@@ -67,6 +67,14 @@ final class MergeCoreTests: XCTestCase {
         XCTAssertEqual(result.crop, MergeCrop(x: 0, y: 0, width: 96, height: 96))
     }
 
+    func testAlignmentCanBeDisabledWithoutShiftFallback() throws {
+        let image = MergeRGBImage(width: 4, height: 4, pixels: Array(repeating: 0.5, count: 48))
+        let result = try MergeCore.merge([image, image], align: false)
+        XCTAssertFalse(result.aligned)
+        XCTAssertNil(result.reason)
+        XCTAssertEqual(result.appliedShiftsXY.map { [$0.0, $0.1] }, [[0, 0], [0, 0]])
+    }
+
     func testFlatImagesDoNotProduceNaNsAndFallBackUnaligned() throws {
         let flat = MergeRGBImage(width: 16, height: 16, pixels: Array(repeating: 0.4, count: 16 * 16 * 3))
         let result = try MergeCore.merge([flat, flat])
