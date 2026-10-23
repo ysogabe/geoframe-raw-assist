@@ -20,7 +20,7 @@
 
 ### 0.1 呼び出し規約
 
-- 登録: `src-tauri/src/main.rs` の `tauri::generate_handler!`。コマンドは 14 本（§1）。
+- 登録: `src-tauri/src/main.rs` の `tauri::generate_handler!`。コマンドは 13 本と独自スキーム `geoframe://` 1 本（§1）。
 - **引数名**: Rust 側は snake_case、JS の `invoke` に渡すキーは **camelCase**（Tauri 既定の変換。`rename_all` は使っていない）。
   例: Rust `capture_ids: Vec<String>` ⇔ JS `invoke("merge_bracket", { captureIds, ... })`。
 - **戻り値のフィールド名はすべて snake_case**（serde の rename は無い）。
@@ -327,7 +327,7 @@ DevelopmentCandidatesResponse = {
   `baseline_deviation`（`candidates/metrics.rs`）。
 - `candidates` は `natural` が先頭、以降はスタイル順。乱数列の Python 実装との一致は求めない（ADR 0003 §4）。
 - エラー: `INVALID_CAPTURE_ID` `INVALID_BUDGET` `UNKNOWN_PRESET` `SOURCE_ROOT_*` `ARW_NOT_FOUND` `OUTPUT_DIR_FAILED`
-  `BUSY` `CANDIDATES_FAILED` `SIDECAR_*`（`SIDECAR_SESSION_CLOSED` を含む）、CLI 由来（`HANDLE_NOT_FOUND` を含む）。
+  `BUSY` `CANDIDATES_FAILED` `SIDECAR_*`（`SIDECAR_SESSION_CLOSED` を含む）、Rust の `--batch` セッションが出す `INVALID_REQUEST`、CLI 由来（`HANDLE_NOT_FOUND` を含む）。
 
 ### 1.11 `export_selection`
 
@@ -494,6 +494,8 @@ $APPDATA/
   export/<batch>/                  書き出し（コピーした JPEG + manifest.json）
 ```
 
+- 旧版（Python / Drive 時代）の残骸 `logs/`（`raw-engine.log`）・`drive_auth.json` が残っていることがあるが、現行コードは読み書きしない。
+
 - `root_key` = 現像元フォルダの解決済み絶対パスの SHA-1 先頭 8 文字（`coreimage.rs: root_key_for`）。
   `capture_id` はカメラの連番でカードをまたぐと衝突するため接頭辞にする。
 - 合成の `stem` = `{昇順先頭ID}-merged{枚数}-{preset}-{params_hash10}`（例 `DSC04510-merged5-neutral_recovery-a1b2c3d4e5`）。
@@ -626,7 +628,7 @@ Issue #83 / #84 の本文、旧 HTTP 契約（`f3e24b0` 時点の本ファイル
 
 | 旧記述 | 現行 |
 |---|---|
-| `http://127.0.0.1:8788` の `/api/*`、CORS・Origin チェック・64 KiB 上限、エラーは `{error}` + HTTP ステータス | Tauri コマンド 14 本（§1）。エラーは §0.1 の 3 形。`geoframe://` スキームだけが HTTP 風ステータスを返す |
+| `http://127.0.0.1:8788` の `/api/*`、CORS・Origin チェック・64 KiB 上限、エラーは `{error}` + HTTP ステータス | Tauri コマンド 13 本 + `geoframe://` スキーム（§1）。エラーは §0.1 の 3 形。`geoframe://` スキームだけが HTTP 風ステータスを返す |
 | `outputs/{developed,preview,merged,merged_preview,thumbnails,analysis,export}/`（リポジトリ内） | `$APPDATA/{coreimage/{full,preview,merged,merged_preview,candidates},thumbnails,analysis,export}/`（§4）。`export` は単数形 |
 | 現像 JPEG 名 `{id}-{preset}-{hash10}.jpg` | `{ID}_{hash16}.jpg`（`coreimage/full/` と `coreimage/preview/`） |
 | サムネイル `{root_key}-{id}.webp` を `/thumbs/` で配信、`PhotoInfo.thumb` は URL | `{root_key}-{ID}.jpg`、`thumb` は絶対パス（asset プロトコルで表示） |
