@@ -104,7 +104,7 @@ fn candidate(
     json!({"id":style,"label":label,"description":description,"adjustments":a,"metrics":m,"score":score(m,style,base),"reasons":reasons(style,m,base,star)})
 }
 /// GPS は読み出さず、星判定に必要な3項目だけを既存 EXIF リーダーから受け取る。
-fn exif_hints(root: &Path, capture: &str) -> ExifHints {
+pub(super) fn exif_hints(root: &Path, capture: &str) -> ExifHints {
     let path = std::fs::read_dir(root)
         .ok()
         .into_iter()

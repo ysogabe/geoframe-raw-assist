@@ -79,6 +79,10 @@ pub struct Renderer {
     scratch: Scratch,
     input: PathBuf,
     handles: HashMap<String, String>,
+    max_edge: usize,
+    #[cfg(test)]
+    /// 直近 render の CLI 応答 `adjustments_applied`（計測ハーネスが USM σ/gain 等を記録する）。
+    pub last_applied: Value,
     pub decodes: usize,
     pub renders: usize,
     pub decode_ms: f64,
@@ -91,6 +95,19 @@ impl Renderer {
         Self::new_with_scratch_parent(sidecar, input, parent)
     }
 
+    /// 計測専用（#57）: 代理の長辺だけを変える。本番は常に [`MAX_EDGE`]。
+    #[cfg(test)]
+    pub fn new_with_edge(
+        sidecar: &Path,
+        input: &Path,
+        scratch: &Path,
+        max_edge: usize,
+    ) -> Result<Self, CoreImageError> {
+        let mut renderer = Self::new(sidecar, input, scratch)?;
+        renderer.max_edge = max_edge;
+        Ok(renderer)
+    }
+
     pub(super) fn new_with_scratch_parent(
         sidecar: &Path,
         input: &Path,
@@ -101,6 +118,9 @@ impl Renderer {
             scratch: Scratch::new(&scratch)?,
             input: input.to_path_buf(),
             handles: HashMap::new(),
+            max_edge: MAX_EDGE,
+            #[cfg(test)]
+            last_applied: Value::Null,
             decodes: 0,
             renders: 0,
             decode_ms: 0.0,
@@ -120,7 +140,7 @@ impl Renderer {
     }
     fn decode(&mut self, a: &Value) -> Result<String, CoreImageError> {
         let handle = self.session.decode(
-            &json!({"input":self.input,"mode":"preview","max_edge":MAX_EDGE,"decoder_version":"9",
+            &json!({"input":self.input,"mode":"preview","max_edge":self.max_edge,"decoder_version":"9",
             "settings":{"profile":"apple_default","lens_correction":true},"adjustments":a}),
         )?;
         self.decode_ms += handle.response["elapsed_ms"]["total"]
@@ -136,13 +156,24 @@ impl Renderer {
         Ok(handle.id)
     }
     pub fn render(&mut self, a: &Value) -> Result<RgbImage, CoreImageError> {
+        self.render_with_quality(a, Some(1.0))
+    }
+    /// `jpeg_quality` が None なら要求から省き CLI 既定（原寸現像と同じ）に委ねる。
+    pub(super) fn render_with_quality(
+        &mut self,
+        a: &Value,
+        jpeg_quality: Option<f64>,
+    ) -> Result<RgbImage, CoreImageError> {
         let key = Self::key(a);
         let handle = match self.handles.get(&key) {
             Some(h) => h.clone(),
             None => self.decode(a)?,
         };
         let output = self.scratch.0.join("proxy.jpg");
-        let request = json!({"output":output,"format":"jpeg","jpeg_quality":1.0,"adjustments":a});
+        let mut request = json!({"output":output,"format":"jpeg","adjustments":a});
+        if let Some(q) = jpeg_quality {
+            request["jpeg_quality"] = json!(q);
+        }
         let response = match self.session.render(&handle, &request) {
             Err(e) if is_handle_lost(&e) => {
                 let handle = self.decode(a)?;
@@ -152,6 +183,10 @@ impl Renderer {
         };
         self.render_ms += response["elapsed_ms"]["total"].as_f64().unwrap_or(0.0);
         self.renders += 1;
+        #[cfg(test)]
+        {
+            self.last_applied = response["adjustments_applied"].clone();
+        }
         let image =
             image::open(&output).map_err(|e| error(format!("代理画像を読めません: {e}")))?;
         RgbImage::from_dynamic(&image).map_err(error)
