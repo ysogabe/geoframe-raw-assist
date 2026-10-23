@@ -320,6 +320,20 @@ rawpy/Pillow/OpenCV/bracket/engine バージョン, **現像元フォルダの�
   （2026-09-29 追補: 撮影時シャープの既定化で `ENGINE_VERSION` は 16、`RECIPE_VERSION` は 10 になった。§2 参照）
 - ヒット判定はレシピJSON内の `params_hash` の完全一致（現像と同じ）。
 
+#### Tauri Core Image 実装の固定契約（#84）
+
+デスクトップ版は上記 Python エンドポイントとは別に Tauri コマンド `merge_bracket` を呼ぶ。
+フロントから渡すキーは `{ captureIds, preset, adjustments, preview, force }` に固定し、
+`captureIds` はID配列、`preset` はプリセット名、`adjustments` は9キー全量、`preview` は
+boolean、`force` はbooleanとする。`max_edge` はフロント引数に含めない。
+
+Rust は Swift CLI の合成リクエストを固定し、preview では `max_edge: 2400` を指定し、full では
+`max_edge` キーを省略する。レンズ補正理由のUI共通語彙は次の2値で、名称と意味は
+`tests/fixtures/coreimage_merge_lens_reasons.json` を正とする。
+
+- `coreimage_unsupported`: 全フレームで Core Image のレンズ補正を適用できなかった。
+- `inconsistent_across_frames`: フレーム間でレンズ補正の適用状態が一致しなかった。
+
 ### `POST /api/development-candidates`
 
 ```

@@ -19,10 +19,10 @@ static NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 pub struct ExportItem {
-    capture_id: String,
-    variant: String,
-    developed_filename: Option<String>,
-    merged_filename: Option<String>,
+    pub(crate) capture_id: String,
+    pub(crate) variant: String,
+    pub(crate) developed_filename: Option<String>,
+    pub(crate) merged_filename: Option<String>,
 }
 
 pub(crate) fn normalize_batch_name(raw: &str) -> Result<String, String> {
@@ -312,7 +312,11 @@ fn relative(path: &Path, base: &Path) -> String {
         .into_owned()
 }
 
-fn export_batch(data: &Path, batch: &str, items: Vec<ExportItem>) -> Result<Value, String> {
+pub(crate) fn export_batch(
+    data: &Path,
+    batch: &str,
+    items: Vec<ExportItem>,
+) -> Result<Value, String> {
     let _guard = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let batch = normalize_batch_name(batch)?;
     if items.is_empty() || items.len() > 500 {

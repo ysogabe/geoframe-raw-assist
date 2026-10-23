@@ -4,7 +4,7 @@
 //! The sidecar receives one `mode: merge` request for all sorted RAW inputs.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -211,14 +211,80 @@ fn result_from_recipe(
     })
 }
 
-fn valid_cache(image: &Path, recipe_path: &Path) -> Option<Value> {
+fn valid_cache(
+    image: &Path,
+    recipe_path: &Path,
+    capture_ids: &[String],
+    preset: &str,
+    preset_label: &str,
+    adjustments: &Value,
+    preview: bool,
+    source_root: &Path,
+    request: &Value,
+    params_hash: &str,
+) -> Option<Value> {
     let image_meta = fs::symlink_metadata(image).ok()?;
     let recipe_meta = fs::symlink_metadata(recipe_path).ok()?;
     if !image_meta.file_type().is_file() || !recipe_meta.file_type().is_file() {
         return None;
     }
     let recipe: Value = serde_json::from_slice(&fs::read(recipe_path).ok()?).ok()?;
-    (recipe["ok"] == true && recipe["kind"] == "exposure_fusion").then_some(recipe)
+    let frames_match = recipe["frames"].as_array().is_some_and(|frames| {
+        let Some(inputs) = request["inputs"].as_array() else {
+            return false;
+        };
+        frames.len() == capture_ids.len()
+            && frames.iter().zip(inputs).all(|(frame, input)| {
+                &frame["input"] == input
+                    && frame["width"].as_u64().is_some()
+                    && frame["height"].as_u64().is_some()
+                    && frame["applied"]["lens_correction_enabled"]
+                        .as_bool()
+                        .is_some()
+                    && frame["source"].is_object()
+            })
+    });
+    let complete = recipe["preset"]["label"] == preset_label
+        && recipe["width"].as_u64().is_some_and(|width| width > 0)
+        && recipe["height"].as_u64().is_some_and(|height| height > 0)
+        && recipe["elapsed_ms"]["total"].as_f64().is_some()
+        && recipe["merge"]["aligned"].as_bool().is_some()
+        && recipe["lens_correction"] == lens_summary(recipe["frames"].as_array()?)
+        && recipe["exif_inherited"].as_bool().is_some()
+        && frames_match;
+    (recipe["ok"] == true
+        && recipe["kind"] == "exposure_fusion"
+        && recipe["capture_ids"] == json!(capture_ids)
+        && recipe["preset"]["name"] == preset
+        && &recipe["adjustments"] == adjustments
+        && recipe["preview"] == preview
+        && recipe["source_root"] == json!(source_root.to_string_lossy())
+        && &recipe["request"] == request
+        && recipe["params_hash"] == params_hash
+        && complete)
+        .then_some(recipe)
+}
+
+fn remove_stale_cache_file(path: &Path) -> Result<(), CoreImageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            fs::remove_file(path).map_err(|error| {
+                invalid(
+                    "CACHE_IO_FAILED",
+                    format!("合成キャッシュを置き換えられません: {error}"),
+                )
+            })
+        }
+        Ok(_) => Err(invalid(
+            "OUTPUT_DIR_FAILED",
+            "合成キャッシュの出力先が通常ファイルではありません",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(invalid(
+            "CACHE_IO_FAILED",
+            format!("合成キャッシュを確認できません: {error}"),
+        )),
+    }
 }
 
 fn merge_blocking(
@@ -256,6 +322,11 @@ fn merge_blocking(
     }
 
     let version = coreimage::cli_version(sidecar)?;
+    let preset_label = crate::presets::preset_infos()
+        .into_iter()
+        .find(|info| info.name == preset)
+        .map(|info| info.label.to_string())
+        .unwrap_or_default();
     let source_jpeg = if preview {
         None
     } else {
@@ -311,18 +382,44 @@ fn merge_blocking(
             "出力先が合成フォルダの外になります",
         ));
     }
+    let mut expected_request = request.clone();
+    expected_request["output"] = json!(output.to_string_lossy());
     if !force {
-        if let Some(recipe) = valid_cache(&output, &provenance) {
+        if let Some(recipe) = valid_cache(
+            &output,
+            &provenance,
+            &capture_ids,
+            &preset,
+            &preset_label,
+            &key_payload["request"]["adjustments"],
+            preview,
+            &source_root,
+            &expected_request,
+            &params_hash,
+        ) {
             return result_from_recipe(&recipe, &output, true);
         }
     }
 
     let _slot = slot.acquire()?;
     if !force {
-        if let Some(recipe) = valid_cache(&output, &provenance) {
+        if let Some(recipe) = valid_cache(
+            &output,
+            &provenance,
+            &capture_ids,
+            &preset,
+            &preset_label,
+            &key_payload["request"]["adjustments"],
+            preview,
+            &source_root,
+            &expected_request,
+            &params_hash,
+        ) {
             return result_from_recipe(&recipe, &output, true);
         }
     }
+    remove_stale_cache_file(&output)?;
+    remove_stale_cache_file(&provenance)?;
     request["output"] = json!(output.to_string_lossy());
     let body = request.to_string();
     let child = coreimage::run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
@@ -330,24 +427,32 @@ fn merge_blocking(
     if response["ok"] != true || !child.status.success() {
         return Err(coreimage::cli_error(&response, child.status));
     }
-    if response["output"].as_str() != Some(output.to_string_lossy().as_ref())
+    let output_canonical = output.canonicalize().ok();
+    let response_output_canonical = response["output"]
+        .as_str()
+        .and_then(|path| Path::new(path).canonicalize().ok());
+    if response_output_canonical.is_none()
+        || response_output_canonical != output_canonical
         || !fs::symlink_metadata(&output).is_ok_and(|metadata| metadata.file_type().is_file())
+        || output_canonical.as_ref().and_then(|path| path.parent()) != Some(output_dir.as_path())
     {
         return Err(invalid(
             "SIDECAR_BAD_RESPONSE",
             "Core Image CLI の出力先が依頼と一致しないか、出力ファイルがありません",
         ));
     }
-    if response["mode"] != "merge"
-        || response["format"] != "jpeg"
-        || response["inputs"].as_array().map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(PathBuf::from)
-                .collect::<Vec<_>>()
-        }) != Some(inputs.clone())
-    {
+    let response_inputs = response["inputs"].as_array();
+    let inputs_match = response_inputs.is_some_and(|values| {
+        values.len() == inputs.len()
+            && values.iter().zip(&inputs).all(|(value, expected)| {
+                value
+                    .as_str()
+                    .and_then(|path| Path::new(path).canonicalize().ok())
+                    .as_ref()
+                    == Some(expected)
+            })
+    });
+    if response["mode"] != "merge" || response["format"] != "jpeg" || !inputs_match {
         return Err(invalid(
             "SIDECAR_BAD_RESPONSE",
             "Core Image CLI の合成応答が依頼と一致しません",
@@ -370,7 +475,11 @@ fn merge_blocking(
         ));
     }
     for (frame, input) in frames.iter().zip(&inputs) {
-        if frame["input"].as_str() != Some(input.to_string_lossy().as_ref())
+        if frame["input"]
+            .as_str()
+            .and_then(|path| Path::new(path).canonicalize().ok())
+            .as_ref()
+            != Some(input)
             || frame["width"].as_u64().is_none()
             || frame["height"].as_u64().is_none()
             || frame["applied"]["lens_correction_enabled"]
@@ -384,6 +493,11 @@ fn merge_blocking(
             ));
         }
     }
+    response["inputs"] = json!(inputs
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>());
+    response["output"] = json!(output_canonical.unwrap().to_string_lossy().into_owned());
     if response["merge"]["merge_version"].as_u64().is_none()
         || response["elapsed_ms"]["total"].as_f64().is_none()
     {
@@ -391,6 +505,12 @@ fn merge_blocking(
             "SIDECAR_BAD_RESPONSE",
             "CLI の合成 metadata または処理時間が不完全です",
         ));
+    }
+    let frames = response["frames"]
+        .as_array_mut()
+        .expect("validated frame array");
+    for (frame, input) in frames.iter_mut().zip(&inputs) {
+        frame["input"] = json!(input.to_string_lossy().into_owned());
     }
     let exif_inherited = if preview {
         false
@@ -402,7 +522,7 @@ fn merge_blocking(
     let lens = lens_summary(&frames);
     response["kind"] = json!("exposure_fusion");
     response["capture_ids"] = json!(capture_ids);
-    response["preset"] = json!({"name": preset, "label": crate::presets::preset_infos().into_iter().find(|info| info.name == preset).map(|info| info.label).unwrap_or_default()});
+    response["preset"] = json!({"name": preset, "label": preset_label});
     response["adjustments"] = key_payload["request"]["adjustments"].clone();
     response["preview"] = json!(preview);
     response["source_root"] = json!(source_root.to_string_lossy());
@@ -483,6 +603,7 @@ pub async fn merge_bracket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::os::unix::fs::PermissionsExt;
 
     struct TestDir(PathBuf);
@@ -531,6 +652,16 @@ print(json.dumps(response))
         path
     }
 
+    fn mock_cli_with_response_edit(dir: &Path, edit: &str) -> PathBuf {
+        let path = mock_cli(dir);
+        let script = fs::read_to_string(&path).unwrap().replace(
+            "print(json.dumps(response))",
+            &format!("{edit}\nprint(json.dumps(response))"),
+        );
+        fs::write(&path, script).unwrap();
+        path
+    }
+
     fn fixture() -> (TestDir, TestDir, TestDir, PathBuf, Value) {
         let app = TestDir::new("app");
         let source = TestDir::new("source");
@@ -566,6 +697,14 @@ exit 1
 
     #[test]
     fn lens_reason_vocabulary_is_stable() {
+        let ui_vocabulary: [&str; 2] = serde_json::from_str(include_str!(
+            "../../tests/fixtures/coreimage_merge_lens_reasons.json"
+        ))
+        .expect("shared UI lens reason fixture must be valid JSON");
+        assert_eq!(
+            ui_vocabulary,
+            [REASON_LENS_UNSUPPORTED, REASON_LENS_INCONSISTENT]
+        );
         assert_eq!(REASON_LENS_UNSUPPORTED, "coreimage_unsupported");
         assert_eq!(REASON_LENS_INCONSISTENT, "inconsistent_across_frames");
         let supported = lens_summary(&[
@@ -858,5 +997,378 @@ exit 1
         )
         .unwrap();
         assert_ne!(switched.params_hash, upgraded_result.params_hash);
+    }
+
+    #[test]
+    fn mock_cli_accepts_canonical_aliases_and_rejects_mismatches() {
+        let (app, source, bin, _cli, adjustments) = fixture();
+        let alias_dir = source.path().join("alias");
+        std::os::unix::fs::symlink(source.path(), &alias_dir).unwrap();
+        let cli = mock_cli_with_response_edit(
+            bin.path(),
+            r#"response["inputs"]=[p.replace(os.path.dirname(p)+"/", os.path.dirname(p)+"/alias/") for p in response["inputs"]]
+for frame in response["frames"]: frame["input"]=frame["input"].replace(os.path.dirname(frame["input"])+"/", os.path.dirname(frame["input"])+"/alias/")
+response["output"] += ".alias"
+os.symlink(request["output"], response["output"])"#,
+        );
+        let accepted = merge_blocking(
+            app.path(),
+            &cli,
+            vec!["DSC00001".into(), "DSC00002".into()],
+            "neutral_recovery".into(),
+            adjustments.clone(),
+            true,
+            false,
+            &DevelopSlot::new(2),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let accepted_recipe: Value = serde_json::from_slice(
+            &fs::read(
+                app.path()
+                    .join("coreimage")
+                    .join(PREVIEW_DIR)
+                    .join(&accepted.recipe_filename),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted_recipe["inputs"],
+            json!([
+                source
+                    .path()
+                    .join("DSC00001.ARW")
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy(),
+                source
+                    .path()
+                    .join("DSC00002.ARW")
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+            ])
+        );
+        assert_eq!(
+            accepted_recipe["output"],
+            json!(app
+                .path()
+                .join("coreimage")
+                .join(PREVIEW_DIR)
+                .join(&accepted.filename)
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy())
+        );
+        assert!(accepted_recipe["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|frame| {
+                frame["input"].as_str().is_some_and(|input| {
+                    Path::new(input).parent() == source.path().canonicalize().ok().as_deref()
+                })
+            }));
+
+        for (case, edit) in [
+            (
+                "different root",
+                r#"response["inputs"][1]="/different/root/DSC00002.ARW""#,
+            ),
+            (
+                "different file",
+                r#"response["inputs"][0]=response["inputs"][1]"#,
+            ),
+            ("wrong order", r#"response["inputs"].reverse()"#),
+            ("non-string input", r#"response["inputs"][1]=7"#),
+            (
+                "frame input mismatch",
+                r#"response["frames"][1]["input"]="/different/root/DSC00002.ARW""#,
+            ),
+            (
+                "output mismatch",
+                r#"response["output"]="/different/root/output.jpg""#,
+            ),
+        ] {
+            let (app, _source, bin, _cli, adjustments) = fixture();
+            let cli = mock_cli_with_response_edit(bin.path(), edit);
+            let error = merge_blocking(
+                app.path(),
+                &cli,
+                vec!["DSC00001".into(), "DSC00002".into()],
+                "neutral_recovery".into(),
+                adjustments,
+                true,
+                false,
+                &DevelopSlot::new(2),
+                Duration::from_secs(10),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code, "SIDECAR_BAD_RESPONSE",
+                "{case} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_cache_requires_matching_complete_recipe() {
+        let (app, _source, _bin, cli, adjustments) = fixture();
+        let slot = DevelopSlot::new(1);
+        let ids = vec!["DSC00001".to_owned(), "DSC00002".to_owned()];
+        let merge = || {
+            merge_blocking(
+                app.path(),
+                &cli,
+                ids.clone(),
+                "neutral_recovery".into(),
+                adjustments.clone(),
+                true,
+                false,
+                &slot,
+                Duration::from_secs(10),
+            )
+            .unwrap()
+        };
+        let calls_path = cli.parent().unwrap().join("calls");
+        let first = merge();
+        assert!(!first.cached);
+        let recipe_path = app
+            .path()
+            .join("coreimage/merged_preview")
+            .join(&first.recipe_filename);
+        let output_path = app
+            .path()
+            .join("coreimage/merged_preview")
+            .join(&first.filename);
+        assert!(merge().cached, "matching cache entry should be reused");
+        assert_eq!(fs::read_to_string(&calls_path).unwrap().lines().count(), 1);
+
+        for corruption in [
+            "hash",
+            "request",
+            "preview",
+            "capture_ids",
+            "preset",
+            "adjustments",
+            "source_root",
+            "lens_summary",
+            "incomplete_json",
+        ] {
+            match corruption {
+                "incomplete_json" => fs::write(&recipe_path, b"{}").unwrap(),
+                _ => {
+                    let mut recipe: Value =
+                        serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
+                    match corruption {
+                        "hash" => recipe["params_hash"] = json!("wrong-hash"),
+                        "request" => recipe["request"]["merge"]["align"] = json!(false),
+                        "preview" => recipe["preview"] = json!(false),
+                        "capture_ids" => recipe["capture_ids"] = json!(["DSC00003", "DSC00004"]),
+                        "preset" => recipe["preset"]["name"] = json!("landscape_clear"),
+                        "adjustments" => recipe["adjustments"]["corrupt"] = json!(true),
+                        "source_root" => recipe["source_root"] = json!("/wrong/source"),
+                        "lens_summary" => {
+                            for frame in recipe["frames"].as_array_mut().unwrap() {
+                                frame["applied"]["lens_correction_enabled"] = json!(false);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
+                }
+            }
+
+            let regenerated = merge();
+            assert!(
+                !regenerated.cached,
+                "{corruption} cache must be regenerated"
+            );
+            assert_eq!(regenerated.capture_ids, ids);
+            assert!(output_path.is_file());
+            assert_eq!(
+                fs::read_to_string(&calls_path).unwrap().lines().count(),
+                2 + [
+                    "hash",
+                    "request",
+                    "preview",
+                    "capture_ids",
+                    "preset",
+                    "adjustments",
+                    "source_root",
+                    "lens_summary",
+                    "incomplete_json",
+                ]
+                .iter()
+                .position(|candidate| candidate == &corruption)
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GEOFRAME_MERGE_SMOKE_CLI and GEOFRAME_MERGE_SMOKE_ARW"]
+    fn real_cli_merge_export_smoke() {
+        use crate::export::{export_batch, ExportItem};
+
+        let required_path = |name: &str| -> Option<PathBuf> {
+            let Some(raw) = std::env::var_os(name) else {
+                eprintln!("SKIP: {name} is required to run the real Core Image merge smoke test");
+                return None;
+            };
+            let path = PathBuf::from(raw);
+            if !path.is_absolute() || !path.is_file() {
+                eprintln!("SKIP: {name} must be an absolute path to an existing file");
+                return None;
+            }
+            Some(path)
+        };
+        let Some(cli) = required_path("GEOFRAME_MERGE_SMOKE_CLI") else {
+            return;
+        };
+        let Some(arw) = required_path("GEOFRAME_MERGE_SMOKE_ARW") else {
+            return;
+        };
+
+        let app = TestDir::new("real-cli-app");
+        let source = TestDir::new("real-cli-source");
+        for id in ["DSC00001", "DSC00002"] {
+            fs::copy(&arw, source.path().join(format!("{id}.ARW")))
+                .expect("copy source RAW into isolated smoke directory");
+        }
+        let original = fs::read(&arw).expect("read-only source RAW");
+        assert_eq!(
+            fs::read(source.path().join("DSC00001.ARW")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(source.path().join("DSC00002.ARW")).unwrap(),
+            original
+        );
+        fs::write(
+            app.path().join("config.json"),
+            json!({"source_root":source.path()}).to_string(),
+        )
+        .unwrap();
+
+        // The paired JPEG is synthetic and contains no real location metadata.
+        let pair_jpeg = crate::exif_inherit::tests::synthetic_gps_jpeg();
+        fs::write(source.path().join("DSC00001.JPG"), &pair_jpeg).unwrap();
+        let slot = DevelopSlot::new(1);
+        let adjustments = crate::presets::resolve_adjustments("neutral_recovery", None).unwrap();
+        let ids = vec!["DSC00001".to_owned(), "DSC00002".to_owned()];
+        let preview = merge_blocking(
+            app.path(),
+            &cli,
+            ids.clone(),
+            "neutral_recovery".into(),
+            adjustments.clone(),
+            true,
+            false,
+            &slot,
+            MERGE_TIMEOUT_PREVIEW,
+        )
+        .expect("real CLI preview merge");
+        assert!(preview.preview);
+        assert!(preview.width > 0);
+        let preview_recipe: Value = serde_json::from_slice(
+            &fs::read(
+                app.path()
+                    .join("coreimage")
+                    .join(PREVIEW_DIR)
+                    .join(&preview.recipe_filename),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview_recipe["request"]["max_edge"], json!(2400));
+
+        let full = merge_blocking(
+            app.path(),
+            &cli,
+            ids.clone(),
+            "neutral_recovery".into(),
+            adjustments.clone(),
+            false,
+            false,
+            &slot,
+            MERGE_TIMEOUT_FULL,
+        )
+        .expect("real CLI full merge");
+        assert!(!full.preview);
+        let full_recipe: Value = serde_json::from_slice(
+            &fs::read(
+                app.path()
+                    .join("coreimage")
+                    .join(FULL_DIR)
+                    .join(&full.recipe_filename),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(full_recipe["request"].get("max_edge").is_none());
+        let full_path = app
+            .path()
+            .join("coreimage")
+            .join(FULL_DIR)
+            .join(&full.filename);
+        let full_bytes = fs::read(&full_path).unwrap();
+        crate::exif_inherit::tests::assert_synthetic_gps_metadata(
+            &full_bytes,
+            full.width,
+            full.height,
+        );
+
+        let cached = merge_blocking(
+            app.path(),
+            &cli,
+            ids,
+            "neutral_recovery".into(),
+            adjustments,
+            false,
+            false,
+            &slot,
+            MERGE_TIMEOUT_FULL,
+        )
+        .expect("full cache hit");
+        assert!(cached.cached);
+        assert_eq!(cached.filename, full.filename);
+        assert_eq!(fs::read(&full_path).unwrap(), full_bytes);
+
+        let item = |variant: &str, filename: &str| ExportItem {
+            capture_id: "DSC00001".into(),
+            variant: variant.into(),
+            developed_filename: None,
+            merged_filename: Some(filename.into()),
+        };
+        let exported = export_batch(
+            app.path(),
+            "real-cli-smoke",
+            vec![item("merged", &full.filename)],
+        )
+        .expect("export verified full merged result");
+        let export_path = PathBuf::from(exported["files"][0].as_str().unwrap());
+        assert_eq!(fs::read(export_path).unwrap(), full_bytes);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(exported["manifest_path"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(manifest["items"][0]["variant"], "merged");
+        assert_eq!(manifest["items"][0]["recipe"], full_recipe);
+        assert_eq!(
+            manifest["items"][0]["exported_sha256"],
+            json!(hash_hex(&full_bytes))
+        );
+        assert!(export_batch(
+            app.path(),
+            "real-cli-preview-rejected",
+            vec![item("merged", &preview.filename)],
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(&arw).expect("source RAW remains readable"),
+            original,
+            "real CLI smoke must leave the source RAW unchanged"
+        );
     }
 }
