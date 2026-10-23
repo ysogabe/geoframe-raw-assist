@@ -283,7 +283,9 @@ public enum MergeCore {
         for y in 0..<crop.height { for x in 0..<crop.width {
             let sx = x + crop.x - shift.0, sy = y + crop.y - shift.1
             guard sx >= 0, sy >= 0, sx < image.width, sy < image.height else { continue }
-            for c in 0..<3 { p[x, y, c] = pixels[(sy * image.width + sx) * 3 + c] }
+            // The reference MergeMertens caller passes normalized RGB multiplied by 255.
+            // Keep this scale through weight and pyramid construction; normalize after fusion.
+            for c in 0..<3 { p[x, y, c] = pixels[(sy * image.width + sx) * 3 + c] * 255 }
         } }
         return p
     }
@@ -322,7 +324,8 @@ public enum MergeCore {
             result = pyrUp(result, width: accum[level + 1].width, height: accum[level + 1].height, toWidth: accum[level].width, toHeight: accum[level].height, channels: 3)
             for i in result.indices { result[i] += accum[level].values[i] }
         } }
-        for i in result.indices { result[i] = min(1, max(0, result[i].isFinite ? result[i] : 0)) }
+        // The merge input scale above is part of the reference contract; expose normalized RGB.
+        for i in result.indices { result[i] = min(1, max(0, result[i].isFinite ? result[i] / 255 : 0)) }
         return result
     }
 
@@ -345,7 +348,11 @@ public enum MergeCore {
             var weight: Float = 1
             if weights.contrast > 0 { weight *= pow(contrast[i], weights.contrast) }
             if weights.saturation > 0 { weight *= pow(saturation[i], weights.saturation) }
-            if weights.exposure > 0 { let e = exp(-((image.values[i * 3] - 0.5) * (image.values[i * 3] - 0.5) + (image.values[i * 3 + 1] - 0.5) * (image.values[i * 3 + 1] - 0.5) + (image.values[i * 3 + 2] - 0.5) * (image.values[i * 3 + 2] - 0.5)) / 0.08); weight *= pow(e, weights.exposure) }
+            if weights.exposure > 0 {
+                let r = image.values[i * 3] / 255, g = image.values[i * 3 + 1] / 255, b = image.values[i * 3 + 2] / 255
+                let e = exp(-((r - 0.5) * (r - 0.5) + (g - 0.5) * (g - 0.5) + (b - 0.5) * (b - 0.5)) / 0.08)
+                weight *= pow(e, weights.exposure)
+            }
             return weight + 1e-12
         }
     }
