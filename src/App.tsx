@@ -10,7 +10,12 @@ import {
   heroCaptureOf,
   initialState,
   isPhotoAccepted,
+  isMergedAccepted,
   isValidBatchName,
+  groupMergeResultOf,
+  isBracketGroup,
+  mergeBlockReason,
+  mergeFramesOf,
   mergedResultFor,
   photoOf,
   reducer,
@@ -51,6 +56,7 @@ import {
   coreImageErrorMessage,
   developPreviewCoreImage,
   developFullCoreImage,
+  mergeBracketCoreImage,
   engineInfoLabel,
   getEngineInfo,
   resolveAdjustments,
@@ -165,18 +171,32 @@ export default function Home() {
 
   // ---- 現像の経過秒表示（tick を進めるだけ。経過秒はレンダー時に導出する） ----
   useEffect(() => {
-    if (!developMode) return;
+    if (!developMode && !state.mergeMode) return;
     const timer = window.setInterval(() => setTick(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, [developMode]);
+  }, [developMode, state.mergeMode]);
 
   // ---- 派生値 --------------------------------------------------------------
   const group = selectedGroup(state);
   // 表示カーソルは 1 本。合成を見ている間は「今の写真」も合成の先頭フレームになる。
   const viewing = group ? viewingOf(state, group) : null;
   const captureId = group ? viewingCaptureOf(state, group) : "";
-  const photo = photoOf(analysis, captureId);
   const adjustments = effectiveAdjustments(state);
+  const mergeFrames = group ? mergeFramesOf(state, group) : [];
+  const sameMergeInputs = (result: ReturnType<typeof groupMergeResultOf>) => Boolean(
+    result && adjustments &&
+    result.capture_ids.length === mergeFrames.length &&
+    mergeFrames.every((id) => result.capture_ids.includes(id)) &&
+    result.preset === state.presetName &&
+    (Object.keys(adjustments) as (keyof Adjustments)[]).every((key) => result.adjustments[key] === adjustments[key]),
+  );
+  const selectedMergePreview = group ? groupMergeResultOf(state.mergePreviewResults, group) : undefined;
+  const selectedMergeFull = group ? groupMergeResultOf(state.mergeFullResults, group) : undefined;
+  const mergePreviewResult = sameMergeInputs(selectedMergePreview) ? selectedMergePreview : undefined;
+  const mergeFullResult = sameMergeInputs(selectedMergeFull) ? selectedMergeFull : undefined;
+  const groupMergeMode = group?.id === state.mergingGroupId ? state.mergeMode : null;
+  const globalBusy = Boolean(state.developMode || state.mergeMode || state.developmentCandidatesBusy);
+  const photo = photoOf(analysis, captureId);
   const changedKeys = changedAdjustmentKeys(state);
   const groupsToShow = useMemo(() => visibleGroups(state), [state]);
   const developedIds = useMemo(() => developedGroupIds(state), [state]);
@@ -468,7 +488,34 @@ export default function Home() {
     }
   }
 
-  // ブラケット合成は M2 で戻す。
+  async function runMerge(mode: DevelopMode) {
+    if (!group || !isBracketGroup(group) || state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: ENGINE_STOPPED_MESSAGE, tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) {
+      dispatch({ type: "notice/set", message: "プリセットを取得できていません。", tone: "error" });
+      return;
+    }
+    const frames = mergeFrames.slice();
+    const blocked = mergeBlockReason(frames);
+    if (blocked) {
+      dispatch({ type: "notice/set", message: blocked, tone: "error" });
+      return;
+    }
+    const generation = state.sourceFolderGeneration;
+    const groupId = group.id;
+    dispatch({ type: "merge/start", mode, groupId });
+    try {
+      const result = await mergeBracketCoreImage(frames, resolveAdjustments(preset, state.overrides), preset, mode);
+      dispatch({ type: "merge/ok", mode, groupId, result, generation });
+      window.setTimeout(() => comparisonRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 120);
+    } catch (error) {
+      dispatch({ type: "merge/fail", groupId, generation, message: coreImageErrorMessage(error) });
+    }
+  }
 
   async function runExport() {
     if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
@@ -544,7 +591,7 @@ export default function Home() {
         // 新しいフォルダの写真に化ける（runMerge の多重起動ガードと同じ考え方）。
         // なお取りこぼしの窓は残るため、reducer 側の sourceFolderGeneration が最終防衛線。
         sourceFolderLocked={
-          state.analysisState === "running" || Boolean(state.developMode)
+          state.analysisState === "running" || globalBusy
         }
         onApplySourceFolder={(path) => void applySourceFolder(path)}
         onSourceFolderError={(message) => dispatch({ type: "source/failed", message })}
@@ -641,6 +688,23 @@ export default function Home() {
               candidatesError={state.developmentCandidatesError}
               onGenerateCandidates={() => void runDevelopmentCandidates()}
               onApplyCandidate={(candidate) => dispatch({ type: "candidates/apply", candidate, captureId })}
+              isBracket={isBracketGroup(group)}
+              mergeFrames={mergeFrames}
+              onToggleMergeFrame={(id) => dispatch({ type: "merge/toggleFrame", groupId: group.id, captureId: id })}
+              onResetMergeFrames={() => dispatch({ type: "merge/resetFrames", groupId: group.id })}
+              onMerge={(mode) => void runMerge(mode)}
+              mergeMode={groupMergeMode}
+              mergeElapsedLabel={`${Math.max(0, (tick - state.mergeStartedAt) / 1000).toFixed(1)}秒`}
+              mergeBlockReason={mergeBlockReason(mergeFrames)}
+              mergePreviewResult={mergePreviewResult}
+              mergeFullResult={mergeFullResult}
+              mergedAccepted={selectedMergeFull ? isMergedAccepted(state, group.id, selectedMergeFull.capture_ids[0]) : false}
+              onAcceptMerged={() => {
+                const merged = groupMergeResultOf(state.mergeFullResults, group);
+                if (merged) dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
+              }}
+              onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
+              globalBusy={globalBusy}
               onDevelop={(mode) => void runDevelop(mode)}
               developMode={developMode}
               elapsedLabel={elapsedLabel}

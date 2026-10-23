@@ -141,7 +141,7 @@ export function BracketMerge({
           type="button"
           className={`accept-toggle${accepted ? " on" : ""}`}
           aria-pressed={accepted}
-          disabled={!hasFull}
+          disabled={!hasFull && !accepted}
           onClick={onAcceptMerged}
         >
           {accepted ? "採用を外す" : "合成した1枚を採用する"}
