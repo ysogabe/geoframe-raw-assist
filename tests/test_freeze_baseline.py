@@ -10,6 +10,14 @@ import numpy as np
 from PIL import Image, TiffImagePlugin
 
 from scripts import freeze_baseline as freeze
+from evaluation import candidate_metrics as cm  # freeze_baseline が scripts/ を sys.path に足す
+
+try:  # 旧 rawpy / local_raw 経路（アーカイブ）。Python 本体の削除後は該当テストだけ skip する。
+    import importlib.util as _ilu
+
+    LEGACY_AVAILABLE = _ilu.find_spec('local_raw') is not None and _ilu.find_spec('rawpy') is not None
+except (ImportError, ValueError):
+    LEGACY_AVAILABLE = False
 
 
 class BaselineTest(unittest.TestCase):
@@ -18,10 +26,10 @@ class BaselineTest(unittest.TestCase):
         for record in fixture['images']:
             with self.subTest(input=record['input']):
                 with Image.open(freeze.FIXTURES / record['input']) as image:
-                    baseline = freeze.dc._normalise_rgb(image)
+                    baseline = cm._normalise_rgb(image)
                 transformed = np.clip(baseline * np.float32(1.2), 0, 1)
                 for gate in (False, True):
-                    actual = freeze.dc._image_metrics(baseline, transformed, record['exif'], gate)
+                    actual = cm._image_metrics(baseline, transformed, record['exif'], gate)
                     expected = record['metrics'][str(gate)]
                     self.assertEqual(actual.keys(), expected.keys())
                     for key in actual:
@@ -29,11 +37,15 @@ class BaselineTest(unittest.TestCase):
                             self.assertAlmostEqual(actual[key], expected[key], delta=1e-6, msg=key)
                         else:
                             self.assertEqual(actual[key], expected[key])
-                self.assertEqual(freeze.dc._star_measurements(baseline, record['exif']), record['star_measurements'])
+                self.assertEqual(cm._star_measurements(baseline, record['exif']), record['star_measurements'])
+                self.assertEqual(cm._star_measurements(baseline, record['exif'], evaluate_gate=False),
+                                 record['star_ungated'])
         for record in fixture['pareto']:
-            self.assertEqual(freeze.dc.pareto_front(record['points']), record['indices'])
+            self.assertEqual(cm.pareto_front(record['points']), record['indices'])
 
+    @unittest.skipUnless(LEGACY_AVAILABLE, '旧 rawpy / local_raw 経路（アーカイブ）が無い環境（Rust の candidates テストが再生する）')
     def test_objective_series_can_replay_without_raw_or_rng(self):
+        freeze.load_legacy()
         fixture = json.loads((freeze.FIXTURES / 'candidate_series.json').read_text())
         for item in fixture['objective_inputs']:
             actual = freeze.dc._metric_objectives(
@@ -63,7 +75,22 @@ class BaselineTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, '^GPS inheritance changed$'):
             freeze.verify_gps_inheritance(source, inherited)
 
+    def test_bracket_reference_pngs_match_summary(self):
+        path = freeze.FIXTURES / 'bracket.json'
+        self.assertLess(path.stat().st_size, 200 * 1024)
+        for group in json.loads(path.read_text())['groups']:
+            self.assertNotIn('merged_float32', group)
+            output = freeze.FIXTURES / group['output']
+            self.assertEqual(freeze.sha(output), group['reference']['sha256'])
+            with Image.open(output) as image:
+                self.assertEqual(list(image.size), group['reference']['dimensions'])
+                self.assertEqual(image.mode, group['reference']['channels'])
+            for name in group['inputs']:
+                self.assertTrue((freeze.FIXTURES / name).is_file(), name)
+
+    @unittest.skipUnless(LEGACY_AVAILABLE, '旧 rawpy / local_raw 経路（アーカイブ）が無い環境（Rust の bracket テストが再生する）')
     def test_bracket_summary_matches_png_reference(self):
+        freeze.load_legacy()
         path = freeze.FIXTURES / 'bracket.json'
         self.assertLess(path.stat().st_size, 200 * 1024)
         for group in json.loads(path.read_text())['groups']:

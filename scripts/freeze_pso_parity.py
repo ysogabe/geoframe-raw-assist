@@ -1,10 +1,16 @@
 """#86: Python 純関数の追加参照値。凍結済み #107 baseline は変更しない。
 
-既存の RAW 用 Python 環境で実行:
-  python scripts/freeze_pso_parity.py
+選定の参照値（tests/fixtures/pso-selection.json）は凍結 JSON（candidate_series.json）と
+評価用の純関数の写し（scripts/evaluation/candidate_metrics.py）だけで作る。アプリ本体
+（local_raw）・rawpy・lensfunpy は使わない:
+  python scripts/freeze_pso_parity.py --check   # 再計算して一致を確かめる（書かない。ずれたら終了コード 1）
+  python scripts/freeze_pso_parity.py           # 書き出す（意図して更新するときだけ）
+
+旧経路（アーカイブ、明示 opt-in）:
   python scripts/freeze_pso_parity.py --real-images
-後者は既定の読み取り専用入力から work/pso-parity/ にメタデータなしの
+旧 Python の half デコードで既定の読み取り専用入力から work/pso-parity/ にメタデータなしの
 float32 RGB と EXIF の露光・F値・ISO だけを保存する。GPS は取得・保存しない。
+local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/evaluation-paths.md）。
 """
 import argparse
 import json
@@ -14,22 +20,27 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from local_raw import development_candidates as dc
-from local_raw import engine
-from local_raw.exif import read_capture_exif
-from local_raw.presets import resolve_adjustments
+sys.path.insert(0, str(ROOT / 'scripts'))
+from evaluation import candidate_metrics as cm  # noqa: E402
+from evaluation import legacy  # noqa: E402
 
 FIXTURES = ROOT / 'tests/fixtures/baseline'
 STYLES = ('natural', 'stars', 'foreground', 'low_noise', 'social')
 
 
+SELECTION = ROOT / 'tests/fixtures/pso-selection.json'
+
+
+def render(value):
+    return json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+
+
 def dump(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    path.write_text(render(value))
 
 
-def freeze_selection():
+def selection_payload():
     series = json.loads((FIXTURES / 'candidate_series.json').read_text())
     base = series['expected']['candidates'][0]['metrics']
     rows = []
@@ -37,9 +48,9 @@ def freeze_selection():
         m = row['metrics']
         for style in STYLES:
             rows.append({'evaluation': index, 'style': style,
-                         'guard': dc._guard_failure(style, m, base),
-                         'score': dc._score(m, style, base),
-                         'reasons': dc._reasons(style, m, base, True)})
+                         'guard': cm._guard_failure(style, m, base),
+                         'score': cm._score(m, style, base),
+                         'reasons': cm._reasons(style, m, base, True)})
     # 全ての guard 分岐、境界の前後、理由の切り詰め・フォールバック。
     edges = []
     for style, changes in [
@@ -62,13 +73,31 @@ def freeze_selection():
         b = {key: 0 for key in base}
         m = {**b, **changes}
         edges.append({'style': style, 'metrics': m, 'base': b,
-                      'guard': dc._guard_failure(style, m, b),
-                      'score': dc._score(m, style, b),
-                      'reasons': dc._reasons(style, m, b, True)})
-    dump(ROOT / 'tests/fixtures/pso-selection.json', {'series': rows, 'edges': edges})
+                      'guard': cm._guard_failure(style, m, b),
+                      'score': cm._score(m, style, b),
+                      'reasons': cm._reasons(style, m, b, True)})
+    return {'series': rows, 'edges': edges}
+
+
+def freeze_selection():
+    dump(SELECTION, selection_payload())
+
+
+def check_selection():
+    """書かずに再計算して比べる。一致すれば 0、ずれていれば 1。"""
+    if SELECTION.read_text() != render(selection_payload()):
+        print(f'{SELECTION.relative_to(ROOT)} が再計算と一致しません', file=sys.stderr)
+        return 1
+    print('pso-selection: ok')
+    return 0
 
 
 def freeze_real():
+    feature = '--real-images（旧 rawpy half デコード）'
+    dc = legacy.import_module('local_raw.development_candidates', feature)
+    engine = legacy.import_module('local_raw.engine', feature)
+    read_capture_exif = legacy.import_module('local_raw.exif', feature).read_capture_exif
+    resolve_adjustments = legacy.import_module('local_raw.presets', feature).resolve_adjustments
     source = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
     output = ROOT / 'work/pso-parity'
     output.mkdir(parents=True, exist_ok=True)
@@ -103,9 +132,16 @@ def freeze_real():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--real-images', action='store_true')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--check', action='store_true', help='再計算して一致を確かめる（書かない）')
+    group.add_argument('--real-images', action='store_true', help='旧経路（アーカイブ）: 旧 Python の half デコード参照値')
     args = parser.parse_args()
+    if args.check:
+        raise SystemExit(check_selection())
     if args.real_images:
-        freeze_real()
+        try:
+            freeze_real()
+        except legacy.LegacyUnavailable as error:
+            raise SystemExit(str(error)) from None
     else:
         freeze_selection()

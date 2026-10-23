@@ -5,8 +5,22 @@
 クリップ・暗部持ち上げ・色の暴れ・細部/ノイズの変化を同じ入力で比較するための
 ガードレールである。出力は ``work/raw-evaluation/`` 配下（gitignore 対象）に置く。
 
+既定経路（アプリ本体・rawpy・lensfunpy に依存しない）:
+
+- ``--developed LABEL=DIR``（繰り返し可）… 現像済み画像（Core Image の出力等。ファイル名が
+  ``DSC#####`` で始まるもの）を同名のカメラ JPEG と比べる。LABEL ごとに集計する。
+- ``--frozen-manifest`` + ``--frozen-root`` … 凍結画像をハッシュ・寸法で照合し（欠落・改変は失敗）、
+  カメラ JPEG と比べる。ラベルは ``frozen:<mode>``。
+
+旧経路（アーカイブ）: ``--legacy-rawpy`` で旧 rawpy エンジンを各プリセットで現像して評価する
+（``local_raw/`` が残る checkout と requirements-raw.txt の環境が前提。docs/evaluation-paths.md）。
+
 例:
-    .venv/bin/python scripts/evaluate_raw.py \
+    python scripts/evaluate_raw.py --source-root work/raw \
+      --developed ci=work/engine-comparison/<run>/coreimage/preview \
+      --frozen-manifest tests/fixtures/baseline/rawpy_images.json --frozen-root ../wt-107-baseline
+
+    .venv/bin/python scripts/evaluate_raw.py --legacy-rawpy \
       --source-root /Volumes/KIOXIA/image_work --limit 12 --preview
 """
 
@@ -24,16 +38,17 @@ from unittest import mock
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
-# Running ``python scripts/evaluate_raw.py`` puts ``scripts/`` (not the
-# repository root) first on sys.path. Keep the documented invocation working
-# without requiring callers to set PYTHONPATH manually.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# 評価用の独立サポート（scripts/evaluation/）。アプリ本体・rawpy・lensfunpy に依存しない。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from local_raw import config, engine
-from local_raw.presets import PRESETS
+from evaluation import frozen, legacy, sources  # noqa: E402
+from evaluation.presets import PRESET_NAMES as PRESETS  # noqa: E402
+
+DEVELOPED_SUFFIXES = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
+DEVELOPED_NAME = re.compile(r"^(DSC\d{5})")
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 
@@ -155,26 +170,58 @@ def _summarize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return summary
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="同一RAW群でプリセットの機械評価を行います。")
-    parser.add_argument("--source-root", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, default=Path("work/raw-evaluation"))
-    parser.add_argument("--ids", nargs="*", help="評価する撮影ID。省略時は --limit で均等抽出")
-    parser.add_argument("--limit", type=int, default=8)
-    parser.add_argument("--presets", nargs="*", choices=sorted(PRESETS), default=sorted(PRESETS))
-    parser.add_argument("--preview", action="store_true", help="長辺1600pxのプレビューで評価")
-    args = parser.parse_args()
+def _read_camera_rgb(path: Path) -> np.ndarray:
+    """カメラ JPEG を EXIF の向きを反映して読む（現像出力は正立なので向きを揃える）。"""
+    with Image.open(path) as image:
+        return np.asarray(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.uint8)
 
-    source_root = args.source_root.expanduser().resolve()
-    if not source_root.is_dir():
-        raise SystemExit(f"現像元フォルダがありません: {source_root}")
+
+def parse_developed(specs: list[str]) -> list[tuple[str, Path]]:
+    """``LABEL=DIR`` の並び。LABEL は英数字・``_``・``-``・``:``・``.``。"""
+    result = []
+    for spec in specs:
+        label, sep, directory = spec.partition("=")
+        if not sep or not re.fullmatch(r"[A-Za-z0-9_.:-]+", label) or not directory:
+            raise SystemExit(f"--developed は LABEL=DIR で指定してください: {spec!r}")
+        path = Path(directory).expanduser().resolve()
+        if not path.is_dir():
+            raise SystemExit(f"--developed のフォルダがありません: {path}")
+        result.append((label, path))
+    return result
+
+
+def developed_images(directory: Path) -> list[tuple[str, Path]]:
+    """フォルダ直下の現像済み画像（``DSC#####`` で始まる名前）を (capture_id, path) で返す。"""
+    found = []
+    for path in sorted(directory.iterdir()):
+        match = DEVELOPED_NAME.match(path.name)
+        if match and path.is_file() and path.suffix.lower() in DEVELOPED_SUFFIXES:
+            found.append((match.group(1), path))
+    return found
+
+
+def evaluate_image(label: str, capture_id: str, path: Path, source_root: Path, extra: dict[str, object] | None = None) -> dict[str, object]:
+    """1 枚の現像済み画像をカメラ JPEG と比べた行（失敗は error 列）。"""
+    row: dict[str, object] = {"capture_id": capture_id, "preset": label, "output": str(path), **(extra or {})}
+    camera = sources.find_capture_file(source_root, capture_id, "JPG")
+    try:
+        if camera is None:
+            raise FileNotFoundError(f"カメラ JPEG がありません: {capture_id}")
+        row.update(_metrics(_read_rgb(path), _read_camera_rgb(camera)))
+    except Exception as error:  # 1 枚の失敗で他を隠さない
+        row["error"] = f"{type(error).__name__}: {error}"
+    return row
+
+
+def run_legacy(args: argparse.Namespace, source_root: Path, run_root: Path) -> tuple[list[dict[str, object]], list[str], dict[str, object]]:
+    """旧経路（アーカイブ）: 旧 rawpy エンジンで各プリセットを現像して評価する。"""
+    feature = "evaluate_raw の旧 rawpy 現像"
+    config = legacy.import_module("local_raw.config", feature)
+    engine = legacy.import_module("local_raw.engine", feature)
     available = _paired_ids(source_root)
     capture_ids = _select_ids(available, args.ids, args.limit)
     if not capture_ids:
         raise SystemExit("評価できるJPG/ARWペアがありません。")
-
-    run_name = time.strftime("%Y%m%d-%H%M%S")
-    run_root = args.output_root / run_name
     developed_root = run_root / "developed"
     preview_root = run_root / "preview"
     developed_root.mkdir(parents=True, exist_ok=True)
@@ -208,13 +255,70 @@ def main() -> None:
                 except Exception as error:  # keep one bad RAW from hiding the rest
                     row["error"] = f"{type(error).__name__}: {error}"
                 rows.append(row)
+    return rows, capture_ids, {"presets": args.presets, "preview": bool(args.preview), "engine_version": engine.ENGINE_VERSION}
 
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="現像結果（Core Image の出力・凍結画像、旧経路は opt-in）をカメラ JPEG と機械評価します。")
+    parser.add_argument("--source-root", type=Path, required=True, help="カメラ JPEG（と旧経路では ARW）のあるフォルダ")
+    parser.add_argument("--output-root", type=Path, default=Path("work/raw-evaluation"))
+    parser.add_argument("--developed", action="append", default=[], metavar="LABEL=DIR",
+                        help="現像済み画像のフォルダ（DSC##### で始まる名前）。LABEL ごとに集計（繰り返し可）")
+    parser.add_argument("--frozen-manifest", type=Path, help="凍結画像のマニフェスト（例 tests/fixtures/baseline/rawpy_images.json）")
+    parser.add_argument("--frozen-root", type=Path, help="凍結マニフェストの path の基準ディレクトリ")
+    parser.add_argument("--legacy-rawpy", action="store_true",
+                        help="旧 rawpy エンジンで各プリセットを現像して評価する（アーカイブ。local_raw/ と requirements-raw.txt が前提）")
+    parser.add_argument("--ids", nargs="*", help="（旧経路）評価する撮影ID。省略時は --limit で均等抽出")
+    parser.add_argument("--limit", type=int, default=8, help="（旧経路）均等抽出する枚数")
+    parser.add_argument("--presets", nargs="*", choices=sorted(PRESETS), default=sorted(PRESETS), help="（旧経路）プリセット")
+    parser.add_argument("--preview", action="store_true", help="（旧経路）長辺1600pxのプレビューで評価")
+    args = parser.parse_args(argv)
+
+    source_root = args.source_root.expanduser().resolve()
+    if not source_root.is_dir():
+        raise SystemExit(f"現像元フォルダがありません: {source_root}")
+    if not (args.developed or args.frozen_manifest or args.legacy_rawpy):
+        raise SystemExit("--developed LABEL=DIR か --frozen-manifest を指定してください（旧 rawpy 現像は --legacy-rawpy: "
+                         + legacy.PREREQUISITE + "）")
+    if args.frozen_manifest and not args.frozen_root:
+        raise SystemExit("--frozen-manifest には --frozen-root が必要です")
+    developed = parse_developed(args.developed)
+
+    frozen_images: list[frozen.FrozenImage] = []
+    if args.frozen_manifest:
+        try:
+            frozen_images = frozen.verify_manifest(args.frozen_manifest.resolve(), args.frozen_root.expanduser().resolve())
+        except frozen.FrozenArtifactError as error:
+            print(str(error), file=sys.stderr)
+            raise SystemExit(1) from None
+
+    run_name = time.strftime("%Y%m%d-%H%M%S")
+    run_root = args.output_root / run_name
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, object]] = []
+    meta: dict[str, object] = {}
+    if args.legacy_rawpy:
+        legacy_rows, capture_ids, meta = run_legacy(args, source_root, run_root)
+        rows.extend(legacy_rows)
+    for image in frozen_images:
+        rows.append(evaluate_image(f"frozen:{image.mode}", image.capture_id, image.path, source_root,
+                                   {"frozen_path": image.entry["path"]}))
+    for label, directory in developed:
+        images = developed_images(directory)
+        if not images:
+            raise SystemExit(f"--developed {label} に DSC##### で始まる画像がありません: {directory}")
+        rows.extend(evaluate_image(label, cid, path, source_root) for cid, path in images)
+
+    errors = sum(bool(row.get("error")) for row in rows)
     payload = {
         "source_root": str(source_root),
-        "capture_ids": capture_ids,
-        "presets": args.presets,
-        "preview": bool(args.preview),
-        "engine_version": engine.ENGINE_VERSION,
+        "capture_ids": sorted({str(row["capture_id"]) for row in rows}),
+        "labels": sorted({str(row["preset"]) for row in rows}),
+        "developed": {label: str(path) for label, path in developed},
+        "frozen_manifest": str(args.frozen_manifest) if args.frozen_manifest else None,
+        "legacy_rawpy": bool(args.legacy_rawpy),
+        **meta,
         "rows": rows,
         "summary": _summarize(rows),
     }
@@ -230,13 +334,17 @@ def main() -> None:
 
     print(json.dumps({
         "run_root": str(run_root),
-        "images": len(capture_ids),
-        "presets": len(args.presets),
+        "images": len(payload["capture_ids"]),
+        "labels": len(payload["labels"]),
         "rows": len(rows),
-        "errors": sum(bool(row.get("error")) for row in rows),
+        "errors": errors,
         "summary": payload["summary"],
     }, ensure_ascii=False, indent=2))
-
+    if errors:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except legacy.LegacyUnavailable as error:
+        raise SystemExit(str(error)) from None

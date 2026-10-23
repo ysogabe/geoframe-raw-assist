@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""rawpy（現行エンジン）と Core Image CLI を同じ ARW 群で比較するハーネス（Issue #65 PR3）。
+"""Core Image CLI の出力を同じ ARW 群で比較するハーネス（Issue #65 PR3 / #57 / #90）。
 
-各カットについて次の 4 つを並べ、指標・比較シートを ``work/engine-comparison/<timestamp>/``
+各カットについて次を並べ、指標・比較シートを ``work/engine-comparison/<timestamp>/``
 （gitignore 対象）へ出力する。
 
 - camera   : 同名のカメラ JPEG（向きを正立に直してリサイズのみ）
-- rawpy    : ``local_raw.engine.develop_raw``（既定プリセット・既定 Adjustments）
 - coreimage: ``geoframe-ci-develop``（profile neutral, decoder_version "9", lens_correction false）
 - coreimage_lens: 同上 + lens_correction true（レンズ補正差の把握用）
+- rawpy    : 旧エンジン ``local_raw.engine.develop_raw``。**``--legacy-rawpy`` の明示 opt-in だけ**
+  （アーカイブ経路。``local_raw/`` と requirements-raw.txt の環境が前提）
+
+既定経路はアプリ本体（``local_raw``）にも rawpy / lensfunpy にも依存しない（``scripts/evaluation/``）。
+旧エンジンの比較列は、凍結済みの基準画像と ``--frozen-manifest`` で比べる（docs/evaluation-paths.md）。
+``--frozen-manifest`` は凍結画像のハッシュ・寸法を照合し（欠落・改変は失敗）、現在の CI で描画して同寸で比べる。
 
 これは「どちらが良いか」の自動判定ではない。判断材料（処理時間・メモリ・明るさ分布・
 クリップ・カメラ JPEG との距離・簡易シャープネス/ノイズ）を同じ入力で揃えるための道具である。
@@ -45,7 +50,8 @@ CLI 0.3.0 の ``adjustments`` を ``ADJ_SWEEP_VARIANTS`` で 1 パラメータ�
 tiff16 sRGB 同士で Python の後段をオラクルにして ΔE76 を測り（``ADJ_ORACLE_VARIANTS``）、白点の ``impulse_vs_full``・
 既定リクエスト（adjustments 無し）の ``applied`` 回帰も確かめる。CLI が 0.3.0 未満なら開始前に止まる。
 ``--dry-run`` ではリクエストを組んで §4.1 の契約を検査し ``adjustments_plan.json`` に書くだけ（CLI は呼ばない）。
-ARW / JPG の拡張子は大文字小文字を問わない（``local_raw.source_files`` で解決）。
+ARW / JPG の拡張子は大文字小文字を問わない（``evaluation.sources`` で解決）。
+``--bracket`` と ``--adjustments`` の実行、``--diagnosis`` の CFA 計測は rawpy を使う旧経路で ``--legacy-rawpy`` が必要。
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import json
 import math
 import os
@@ -71,7 +78,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# 評価用の独立サポート（scripts/evaluation/）。アプリ本体（local_raw）・rawpy・lensfunpy に依存しない。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from evaluation import candidate_metrics, frozen, legacy, sources  # noqa: E402
+from evaluation import presets as frozen_presets  # noqa: E402
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 DEFAULT_CLI = PROJECT_ROOT / "native" / "coreimage-cli" / ".build" / "release" / "geoframe-ci-develop"
@@ -783,10 +794,8 @@ def summarize_sharpness(
 
 def read_features(source_root: Path, capture_id: str) -> dict[str, Any]:
     """選定用の特徴量（EXIF 要約 + カメラ JPEG 縮小版の明暗比率）。GPS は読まない。"""
-    from local_raw.exif import read_capture_exif
-
     jpg = source_file(source_root, capture_id, "JPG")
-    exif = read_capture_exif(jpg)
+    exif = sources.read_capture_exif(jpg)
     feats: dict[str, Any] = {
         "capture_id": capture_id,
         "iso": exif.get("iso"),
@@ -813,19 +822,13 @@ def read_features(source_root: Path, capture_id: str) -> dict[str, Any]:
 
 
 def paired_ids(source_root: Path) -> list[str]:
-    """ARW と JPG が揃う撮影 ID（拡張子の大文字小文字は問わない。``local_raw.source_files`` と同じ規則）。"""
-    from local_raw import source_files
-
-    jpg = set(source_files.list_capture_files(source_root, "JPG"))
-    arw = set(source_files.list_capture_files(source_root, "ARW"))
-    return sorted(cid for cid in jpg & arw if CAPTURE_ID_PATTERN.fullmatch(cid))
+    """ARW と JPG が揃う撮影 ID（拡張子の大文字小文字は問わない。``evaluation.sources`` の規則）。"""
+    return [cid for cid in sources.paired_ids(source_root) if CAPTURE_ID_PATTERN.fullmatch(cid)]
 
 
 def source_file(source_root: Path, capture_id: str, kind: str) -> Path:
     """撮影 ID の ARW / JPG を実エントリ名で返す（無ければ正規表記のパス。存在確認は呼び出し側）。"""
-    from local_raw import source_files
-
-    return source_files.find_capture_file(source_root, capture_id, kind) or source_root / f"{capture_id}.{kind}"
+    return sources.find_capture_file(source_root, capture_id, kind) or source_root / f"{capture_id}.{kind}"
 
 
 def read_rgb_upright(path: Path) -> np.ndarray:
@@ -926,9 +929,11 @@ def detail_box(gray: np.ndarray, size: int) -> tuple[int, int, int, int]:
 
 
 def worker_rawpy(args: argparse.Namespace) -> None:
+    """旧 rawpy 経路（アーカイブ）のワーカー。親が ``--legacy-rawpy`` のときだけ起動する。"""
     from unittest import mock
 
-    from local_raw import config, engine
+    config = legacy.import_module("local_raw.config", "rawpy ワーカー")
+    engine = legacy.import_module("local_raw.engine", "rawpy ワーカー")
 
     source_root = Path(args.source_root).resolve()
     out_dir = Path(args.worker_out).resolve()
@@ -989,8 +994,8 @@ def parse_worker_adjustments(text: str | None) -> dict[str, Any] | None:
 
 
 def worker_noop(_: argparse.Namespace) -> None:
-    """rawpy ワーカーの常駐コスト（インタプリタ + numpy/cv2/rawpy import）の基準値。"""
-    from local_raw import engine  # noqa: F401
+    """rawpy ワーカーの常駐コスト（インタプリタ + numpy/cv2/rawpy import）の基準値（旧経路のみ）。"""
+    legacy.import_module("local_raw.engine", "rawpy ワーカー基準値")
 
     print(json.dumps({"ok": True}))
 
@@ -1007,6 +1012,8 @@ class RunContext:
     cli: Path
     max_edge: int
     log: list[str] = field(default_factory=list)
+    #: 旧 rawpy / local_raw 経路（アーカイブ）を使うか。``--legacy-rawpy`` の明示 opt-in だけで True。
+    legacy_rawpy: bool = False
 
     def say(self, message: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {message}"
@@ -1027,7 +1034,9 @@ def run_rawpy(
     """rawpy ワーカーを 1 回呼ぶ。``adjustments`` は既定プリセットへの上書き（``--worker-adjustments``）。
 
     ``preset`` は rawpy（Python ``local_raw/presets.py``）のプリセット名（既定 DEFAULT_PRESET。--presets の legacy 参考）。
+    旧経路（アーカイブ）なので ``ctx.legacy_rawpy``（``--legacy-rawpy``）が無ければ ``LegacyUnavailable``。
     """
+    legacy.require("rawpy 現像列", ctx.legacy_rawpy)
     # nosharp は params_hash が変わらず同名ファイルになるので、出力ディレクトリを分ける。
     # adjustments 指定時もバリアントごとに分ける（レシピ JSON を取り違えないため）。
     if preset is not None:
@@ -1241,10 +1250,10 @@ def compare_capture(
     with_lens: bool,
 ) -> list[dict[str, Any]]:
     """1 カット × 1 モードを 3〜4 エンジンで回し、指標とシートを作る。"""
-    engine_rows: dict[str, dict[str, Any]] = {
-        "rawpy": run_rawpy(ctx, capture_id, mode),
-        "coreimage": run_coreimage(ctx, capture_id, mode, lens=False),
-    }
+    engine_rows: dict[str, dict[str, Any]] = {}
+    if ctx.legacy_rawpy:
+        engine_rows["rawpy"] = run_rawpy(ctx, capture_id, mode)
+    engine_rows["coreimage"] = run_coreimage(ctx, capture_id, mode, lens=False)
     if with_lens:
         engine_rows["coreimage_lens"] = run_coreimage(ctx, capture_id, mode, lens=True)
 
@@ -1402,8 +1411,9 @@ def apply_rawpy_finish(rgb: np.ndarray, iso: Any) -> np.ndarray:
 
     ロジックは複製せず ``engine._apply_tone_array`` をそのまま呼ぶ（brightness / contrast /
     saturation / sharpness は DEFAULT_PRESET の値。shadow_lift はリサイズ前段の処理なので含めない）。
+    旧経路（アーカイブ）。呼び出し側が ``--legacy-rawpy`` のときだけ使う。
     """
-    from local_raw import engine
+    engine = legacy.import_module("local_raw.engine", "rawpy 後段仕上げ（*_usm）")
 
     adjustments = engine.resolve_adjustments(engine.DEFAULT_PRESET, None)
     iso_value = float(iso) if isinstance(iso, (int, float)) else None
@@ -1423,8 +1433,9 @@ def sharpness_capture(
 
     jobs: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
-        jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
-        jobs["rawpy_nosharp"] = pool.submit(run_rawpy, ctx, capture_id, mode, nosharp=True)
+        if ctx.legacy_rawpy:
+            jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
+            jobs["rawpy_nosharp"] = pool.submit(run_rawpy, ctx, capture_id, mode, nosharp=True)
         for variant, (decoder, profile, lens) in CI_SHARPNESS_REQUESTS.items():
             jobs[variant] = pool.submit(
                 run_coreimage, ctx, capture_id, mode, lens,
@@ -1445,7 +1456,13 @@ def sharpness_capture(
             images[name], row["fit"] = fit_to_target(src, target)
         rows_by_variant[name] = row
     iso = features.get("iso")
+    if not ctx.legacy_rawpy:
+        # rawpy 列と rawpy 後段仕上げの派生（*_usm）は旧経路だけ。既定では欠測ではなく「省略」と記録する。
+        for name in ("rawpy", "rawpy_nosharp", *CI_USM_DERIVED):
+            rows_by_variant[name] = {"skipped": "legacy_rawpy"}
     for derived, base_name in CI_USM_DERIVED.items():
+        if not ctx.legacy_rawpy:
+            continue
         if base_name in images:
             images[derived] = apply_rawpy_finish(images[base_name], iso)
             rows_by_variant[derived] = {"fit": rows_by_variant[base_name].get("fit"), "derived_from": base_name}
@@ -1489,7 +1506,8 @@ def sharpness_capture(
     for variant, _label in SHARPNESS_VARIANTS:
         row: dict[str, Any] = {**base, "variant": variant, **rows_by_variant.get(variant, {})}
         if variant not in grays:
-            row.setdefault("error", "no image")
+            if not row.get("skipped"):
+                row.setdefault("error", "no image")
             rows.append(row)
             continue
         gray = grays[variant]
@@ -1679,10 +1697,8 @@ def srgb_to_linear(rgb01: np.ndarray) -> np.ndarray:
 
 
 def _dc():
-    """``local_raw.development_candidates``（星判定の本体）。遅延 import（engine → rawpy を引く）。"""
-    from local_raw import development_candidates
-
-    return development_candidates
+    """候補評価の純関数（旧 ``development_candidates`` の星判定・指標の写し。``evaluation.candidate_metrics``）。"""
+    return candidate_metrics
 
 
 #: 「強い星」の最大局所コントラスト（STAR_PEAK_HIGH 0.08 の 2 倍）。高 ISO の粒状ノイズを星と数えないための補助基準。
@@ -2209,7 +2225,7 @@ def develop_variants(
 
     jobs: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        if with_rawpy:
+        if with_rawpy and ctx.legacy_rawpy:
             jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
         for variant, (decoder, profile, lens, overrides) in ci_requests.items():
             jobs[variant] = pool.submit(
@@ -2217,7 +2233,11 @@ def develop_variants(
                 decoder_version=decoder, profile=profile, variant=variant,
                 overrides=overrides or None, max_edge=max_edge,
             )
-        return {name: future.result() for name, future in jobs.items()}
+        rows = {name: future.result() for name, future in jobs.items()}
+    if with_rawpy and not ctx.legacy_rawpy:
+        # rawpy 列は旧経路（--legacy-rawpy）だけ。既定では欠測ではなく「省略」と記録する。
+        rows["rawpy"] = {"skipped": "legacy_rawpy"}
+    return rows
 
 
 def load_variant_images(engine_rows: dict[str, dict[str, Any]], target: tuple[int, int]) -> tuple[dict[str, np.ndarray], dict[str, dict[str, Any]]]:
@@ -2226,7 +2246,7 @@ def load_variant_images(engine_rows: dict[str, dict[str, Any]], target: tuple[in
     rows: dict[str, dict[str, Any]] = {}
     for name, row in engine_rows.items():
         row = dict(row)
-        if not row.get("error"):
+        if not row.get("error") and not row.get("skipped"):
             src = read_rgb_upright(Path(row["output"]))
             row["native_width"], row["native_height"] = src.shape[1], src.shape[0]
             images[name], row["fit"] = fit_to_target(src, target)
@@ -2387,7 +2407,7 @@ def night_capture(
         row: dict[str, Any] = {**base, "variant": variant, **rows_by_variant.get(variant, {})}
         if variant in metrics:
             row.update(metrics[variant])
-        else:
+        elif not row.get("skipped"):
             row.setdefault("error", "no image")
         rows.append(row)
     caption = f"{capture_id}  {mode} {target[0]}x{target[1]}  ISO {features.get('iso')}  {features.get('exposure_time')}s  {features.get('lens_model')}"
@@ -2537,8 +2557,12 @@ def read_tiff16_rgb(path: Path) -> np.ndarray:
 
 
 def rawpy_bracket_frame(source_root: Path, capture_id: str, max_edge: int) -> np.ndarray:
-    """``bracket._decode_frame``（no_auto_bright、露出差を保つ）で 1 フレームを 0..1 float32 に。長辺 max_edge へ縮小。"""
-    from local_raw import bracket, engine
+    """``bracket._decode_frame``（no_auto_bright、露出差を保つ）で 1 フレームを 0..1 float32 に。長辺 max_edge へ縮小。
+
+    旧経路（アーカイブ）。``--bracket`` は ``--legacy-rawpy`` のときだけ実行できる。
+    """
+    bracket = legacy.import_module("local_raw.bracket", "--bracket")
+    engine = legacy.import_module("local_raw.engine", "--bracket")
 
     adjustments = engine.resolve_adjustments(engine.DEFAULT_PRESET, None)
     frame = bracket._decode_frame(source_file(source_root, capture_id, "ARW"), adjustments, preview=True)
@@ -2550,8 +2574,8 @@ def rawpy_bracket_frame(source_root: Path, capture_id: str, max_edge: int) -> np
 
 
 def mertens_merge(frames: list[np.ndarray]) -> tuple[np.ndarray, bool]:
-    """``bracket._align_frames`` + ``_merge_frames``（アプリと同じ OpenCV AlignMTB / MergeMertens）。"""
-    from local_raw import bracket
+    """``bracket._align_frames`` + ``_merge_frames``（旧アプリと同じ OpenCV AlignMTB / MergeMertens。旧経路のみ）。"""
+    bracket = legacy.import_module("local_raw.bracket", "--bracket")
 
     aligned, ok = bracket._align_frames(frames)
     return bracket._merge_frames(aligned), ok
@@ -2724,7 +2748,7 @@ def highlight_capture(ctx: RunContext, capture_id: str, mode: str, features: dic
         row: dict[str, Any] = {**base, "variant": variant, **rows_by_variant.get(variant, {})}
         if variant in metrics:
             row.update(metrics[variant])
-        else:
+        elif not row.get("skipped"):
             row.setdefault("error", "no image")
         rows.append(row)
     # シート: カメラ JPEG のクリップ領域が最も多い 200px 箱（境界を含む）を 2 倍で並べる
@@ -2966,7 +2990,9 @@ def adjustments_cli_problem(version: Any, capabilities: Any) -> str | None:
 
 def validate_adjustments_request(request: dict[str, Any]) -> list[str]:
     """ハーネスが組んだ CLI リクエストが設計書 §4.1 の凍結契約に沿うかを確かめる（純粋。問題の一覧を返す）。"""
-    from local_raw.presets import ADJUSTMENT_KEYS, ADJUSTMENT_RANGES, NOISE_REDUCTION_CHOICES
+    ADJUSTMENT_KEYS = frozen_presets.ADJUSTMENT_KEYS
+    ADJUSTMENT_RANGES = frozen_presets.ADJUSTMENT_RANGES
+    NOISE_REDUCTION_CHOICES = frozen_presets.NOISE_REDUCTION_CHOICES
 
     adj = request.get("adjustments")
     if adj is None:
@@ -3160,7 +3186,7 @@ def post_chain_oracle(base01: np.ndarray, adjustments: dict[str, Any], usm: dict
     """
     from unittest import mock
 
-    from local_raw import engine
+    engine = legacy.import_module("local_raw.engine", "--adjustments の後段オラクル")
 
     sigma = float((usm or {}).get("sigma") or 0.6)
     gain = float((usm or {}).get("gain") or 0.0)
@@ -3337,9 +3363,7 @@ def adjustment_checks(
 
 def adjustments_plan(ctx: "RunContext", capture_ids: list[str]) -> list[dict[str, Any]]:
     """--adjustments で投げるリクエスト / ワーカー呼び出しの一覧（純粋。CLI は呼ばない）。--dry-run で書き出す。"""
-    from local_raw import presets
-
-    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
+    preset = ci_preset_adjustments(frozen_presets.DEFAULT_PRESET)
     plan: list[dict[str, Any]] = []
     for cid in capture_ids:
         arw = source_file(ctx.source_root, cid, "ARW")
@@ -3370,10 +3394,8 @@ def develop_adjustment_variants(ctx: RunContext, capture_id: str, workers: int =
     """1 カット分の現像（rawpy 掃引・CI 掃引・白点・既定・オラクル）。キーは "rawpy:<v>" / "ci:<v>" / "ci_full:<v>" / "or:<v>"。"""
     from concurrent.futures import ThreadPoolExecutor
 
-    from local_raw import presets
-
     # オラクル or_preset は CI 値（presets.json）の既定プリセット（#81 設計書 §6）。
-    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
+    preset = ci_preset_adjustments(frozen_presets.DEFAULT_PRESET)
     ci_kw = {"decoder_version": "9", "profile": "apple_default"}
     jobs: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -3493,9 +3515,7 @@ def adjustments_capture(
     or_base = runs.get("or:base", {})
     base01 = read_tiff16_rgb(Path(or_base["output"])) if not or_base.get("error") else None
     worst: tuple[float, str, np.ndarray, np.ndarray] | None = None
-    from local_raw import presets
-
-    preset = ci_preset_adjustments(presets.DEFAULT_PRESET)
+    preset = ci_preset_adjustments(frozen_presets.DEFAULT_PRESET)
     for variant, post, kind in ADJ_ORACLE_VARIANTS:
         run = runs.get(f"or:{variant}", {})
         orow: dict[str, Any] = {**base, "variant": variant, "kind": kind, "gates": kind == "tone",
@@ -3667,14 +3687,12 @@ def run_adjustments(ctx: RunContext, selection: list[dict[str, Any]], features_b
     by_oracle = summarize_sharpness(oracle_rows, oracle_keys, ("kind", "variant"))
     checks = check_summary(check_rows)
     errors = [r for r in metric_rows + oracle_rows if r.get("error")]
-    from local_raw import presets
-
     summary = {
         "out": str(ctx.out),
         "identity": ADJ_IDENTITY,
         "sweep_variants": [{"variant": v, "param": p, "value": val, "adjustments": adjustments_for(v)} for v, p, val, _ in ADJ_SWEEP_VARIANTS],
         "white_dot_variants": ADJ_WHITE_DOT_VARIANTS,
-        "oracle_variants": [{"variant": v, "kind": k, "adjustments": oracle_adjustments(p, ci_preset_adjustments(presets.DEFAULT_PRESET))}
+        "oracle_variants": [{"variant": v, "kind": k, "adjustments": oracle_adjustments(p, ci_preset_adjustments(frozen_presets.DEFAULT_PRESET))}
                             for v, p, k in ADJ_ORACLE_VARIANTS],
         "ci_settings": {"decoder_version": "9", "profile": "apple_default", "lens_correction": True, "max_edge": ctx.max_edge},
         "thresholds": {
@@ -3756,8 +3774,6 @@ def adjustments_dry_run(ctx: RunContext, capture_ids: list[str]) -> None:
 
 
 def environment_info(ctx: RunContext, probe: Path | None) -> dict[str, Any]:
-    from local_raw import engine
-
     def cli_json(*args: str) -> Any:
         try:
             proc = subprocess.run([str(ctx.cli), *args], capture_output=True, text=True, timeout=60)
@@ -3768,24 +3784,28 @@ def environment_info(ctx: RunContext, probe: Path | None) -> dict[str, Any]:
     cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
     mem = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip()
     import PIL
-    import rawpy
 
-    return {
+    info: dict[str, Any] = {
         "machine": {"cpu": cpu, "memory_bytes": int(mem) if mem.isdigit() else mem, "platform": platform.platform()},
         "macos": platform.mac_ver()[0],
         "python": platform.python_version(),
-        "rawpy": rawpy.__version__,
-        "libraw": getattr(rawpy, "libraw_version", None),
         "pillow": PIL.__version__,
         "opencv": cv2.__version__,
-        "engine_version": engine.ENGINE_VERSION,
-        "rawpy_preset": engine.DEFAULT_PRESET,
+        "numpy": np.__version__,
+        "legacy_rawpy": ctx.legacy_rawpy,
         "coreimage_cli": str(ctx.cli),
         "coreimage_version": cli_json("--version"),
         "coreimage_capabilities": cli_json("--capabilities", *( [str(probe)] if probe else [] )),
         "coreimage_decoder_version": CI_DECODER_VERSION,
         "max_edge": ctx.max_edge,
     }
+    if ctx.legacy_rawpy:
+        # 旧経路（アーカイブ）を opt-in したときだけ rawpy / 旧エンジンの来歴を残す。
+        rawpy = legacy.import_module("rawpy", "環境情報（rawpy）")
+        engine = legacy.import_module("local_raw.engine", "環境情報（旧エンジン）")
+        info.update({"rawpy": rawpy.__version__, "libraw": getattr(rawpy, "libraw_version", None),
+                     "engine_version": engine.ENGINE_VERSION, "rawpy_preset": engine.DEFAULT_PRESET})
+    return info
 
 
 # =============================================================================
@@ -4283,8 +4303,8 @@ def resize_cell_map(bits: np.ndarray, size: tuple[int, int]) -> np.ndarray:
 
 
 def cfa_from_file(path: Path, orientation: Any = 1) -> dict[str, Any]:
-    """ARW を rawpy で読み（読むだけ）、正立のセルマップ・サムネイルと指標を返す。"""
-    import rawpy
+    """ARW を rawpy で読み（読むだけ）、正立のセルマップ・サムネイルと指標を返す。旧経路（``--legacy-rawpy``）のみ。"""
+    rawpy = legacy.import_module("rawpy", "--diagnosis の CFA 飽和計測")
 
     started = time.monotonic()
     with rawpy.imread(str(path)) as raw:
@@ -5168,7 +5188,7 @@ def develop_diagnosis_variants(
     serial = [v for v in specs if specs[v].get("dump")] if mode == "full" else []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         jobs = {v: pool.submit(one, v) for v in specs if v not in serial}
-        if with_rawpy:
+        if with_rawpy and ctx.legacy_rawpy:
             jobs["rawpy"] = pool.submit(run_rawpy, ctx, capture_id, mode)
         results.update({v: f.result() for v, f in jobs.items()})
     for variant in serial:
@@ -5488,7 +5508,13 @@ def run_diagnosis(
     """--diagnosis 本体: preview を全カット回してから full（c_best は preview の結果で決める）。"""
     import shutil
 
-    loader = cfa_loader or (lambda cid, orientation: cfa_from_file(source_file(ctx.source_root, cid, "ARW"), orientation))
+    if cfa_loader is not None:
+        loader = cfa_loader
+    elif ctx.legacy_rawpy:
+        loader = lambda cid, orientation: cfa_from_file(source_file(ctx.source_root, cid, "ARW"), orientation)  # noqa: E731
+    else:
+        # CFA 飽和（センサー段の帰属）は rawpy でしか読めない旧経路。既定では計測せず unverifiable に寄せる。
+        loader = lambda cid, orientation: None  # noqa: E731
     started = time.monotonic()
     free = shutil.disk_usage(ctx.out).free
     if free < 5 * 1024**3:
@@ -5990,7 +6016,7 @@ def presets_capture(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         jobs = {v: pool.submit(run_coreimage, ctx, capture_id, mode, True, variant=f"ps_{v}", adjustments=s["adjustments"], **ci_kw)
                 for v, s in specs.items()}
-        if with_rawpy and mode == "preview":
+        if with_rawpy and ctx.legacy_rawpy and mode == "preview":
             for preset in presets:
                 jobs[f"rawpy_{preset['name']}"] = pool.submit(run_rawpy, ctx, capture_id, mode, preset=preset["name"])
         engine_rows = {v: f.result() for v, f in jobs.items()}
@@ -6181,9 +6207,125 @@ def run_presets(
 
 
 
+# =============================================================================
+# 凍結基準との比較 --frozen-manifest（#57 / #90 / #117。OS 更新時の回帰確認）
+# =============================================================================
+#
+# 凍結画像（#107 の rawpy 基準 4 枚や、前回の Core Image 出力を ``--frozen-capture`` で凍結したもの）を
+# ハッシュ・寸法で照合してから、同じ撮影 ID を現在の Core Image CLI で描画し、凍結画像と同寸で比べる。
+# 照合に失敗した凍結物（欠落・改変・寸法違い）は成功扱いにしない（終了コード 1）。差の合否閾値は持たない
+# （旧 rawpy の値を CI の受け入れ基準にしない。判断材料として数値とシートを残す）。
+
+#: 凍結マニフェストに request が無い行（#107 の rawpy 基準）で使う CI のリクエスト。
+FROZEN_DEFAULT_REQUEST: dict[str, Any] = {"profile": "apple_default", "lens": True, "decoder_version": CI_DECODER_VERSION}
+
+
+def reference_diff(rgb: np.ndarray, reference: np.ndarray, prefix: str) -> dict[str, float]:
+    """同寸 8bit RGB 2 枚の差（ΔE76 平均・RGB MAE・平均輝度差・完全一致画素率）。"""
+    if reference.shape != rgb.shape:
+        raise ValueError("reference は同寸である必要があります")
+    a01, b01 = rgb.astype(np.float32) / 255.0, reference.astype(np.float32) / 255.0
+    return {
+        f"{prefix}_delta_e76": delta_e76(rgb, reference),
+        f"{prefix}_rgb_mae": float(np.abs(a01 - b01).mean()),
+        f"{prefix}_luma_diff": float(luma_of(a01).mean() - luma_of(b01).mean()),
+        f"{prefix}_identical_fraction": float(np.all(rgb == reference, axis=2).mean()),
+    }
+
+
+def frozen_request(entry: dict[str, Any], preset: str) -> dict[str, Any]:
+    """凍結行から CI リクエストの要素を決める（行の ``request`` を優先、無ければ既定 + CI プリセット値）。"""
+    request = dict(FROZEN_DEFAULT_REQUEST)
+    recorded = entry.get("request")
+    if isinstance(recorded, dict):
+        request.update({k: recorded[k] for k in ("profile", "lens", "decoder_version", "adjustments") if k in recorded})
+    if "adjustments" not in request:
+        request["adjustments"] = ci_preset_adjustments(str(entry.get("preset") or preset))
+    return request
+
+
+def verify_frozen(manifest: Path, root: Path, out: Path) -> list[frozen.FrozenImage]:
+    """凍結物を照合し ``frozen_verification.json`` を書く。失敗なら書いてから SystemExit(1)。"""
+    out.mkdir(parents=True, exist_ok=True)
+    report: dict[str, Any] = {"manifest": str(manifest), "root": str(root)}
+    try:
+        images = frozen.verify_manifest(manifest, root)
+    except frozen.FrozenArtifactError as error:
+        report.update({"ok": False, "error": str(error)})
+        (out / "frozen_verification.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from None
+    report.update({"ok": True, "verified": [
+        {"capture_id": i.capture_id, "mode": i.mode, "path": i.entry["path"], "dimensions": list(i.dimensions)}
+        for i in images]})
+    (out / "frozen_verification.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return images
+
+
+def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str, capture: Path | None) -> int:
+    """照合済みの凍結画像ごとに現在の CI で描画し、凍結画像と同寸で比べる。描画失敗が 1 件でもあれば 1 を返す。"""
+    rows: list[dict[str, Any]] = []
+    captured: list[dict[str, Any]] = []
+    for index, image in enumerate(images, 1):
+        cid, mode = validate_capture_id(image.capture_id), image.mode
+        if mode not in ("preview", "full"):
+            raise SystemExit(f"凍結行の mode は preview / full のどちらかです: {cid} {mode}")
+        ctx.say(f"[frozen] ({index}/{len(images)}) {cid} {mode} {image.dimensions[0]}x{image.dimensions[1]}")
+        request = frozen_request(image.entry, preset)
+        base = {"capture_id": cid, "mode": mode, "frozen_path": image.entry["path"],
+                "frozen_width": image.dimensions[0], "frozen_height": image.dimensions[1],
+                "ci_profile": request["profile"], "ci_lens": request["lens"], "ci_decoder_version": request["decoder_version"]}
+        if not source_file(ctx.source_root, cid, "ARW").is_file():
+            rows.append({**base, "error": "source ARW がありません"})
+            continue
+        row = run_coreimage(ctx, cid, mode, bool(request["lens"]), decoder_version=str(request["decoder_version"]),
+                            profile=str(request["profile"]), variant="frozen_cmp", adjustments=request["adjustments"],
+                            max_edge=max(image.dimensions) if mode == "preview" else None)
+        if row.get("error"):
+            rows.append({**base, **row})
+            continue
+        current = read_rgb_upright(Path(row["output"]))
+        with Image.open(image.path) as handle:
+            reference = np.asarray(ImageOps.exif_transpose(handle).convert("RGB"), dtype=np.uint8)
+        fitted, fit = fit_to_target(current, (reference.shape[1], reference.shape[0]))
+        out_row = {**base, **row, "ci_width": current.shape[1], "ci_height": current.shape[0], "fit": fit,
+                   **reference_diff(fitted, reference, "frozen"), **{f"ci_{k}": v for k, v in image_metrics(fitted).items()},
+                   **{f"frozen_{k}": v for k, v in image_metrics(reference).items()}}
+        rows.append(out_row)
+        sheet_size = fit_size(reference.shape[1], reference.shape[0], 900)
+        save_plain_jpeg(labeled_row([("frozen", resize_to(reference, sheet_size)), ("current Core Image", resize_to(fitted, sheet_size))],
+                                    f"{cid} {mode}  ΔE76 {out_row['frozen_delta_e76']:.2f}  fit {fit}"),
+                        ctx.out / "sheets" / f"{cid}_{mode}_frozen.jpg")
+        if capture is not None:
+            output = Path(row["output"])
+            with Image.open(output) as handle:
+                rgb8 = np.asarray(handle.convert("RGB"))
+                size = list(handle.size)
+            captured.append({"capture_id": cid, "mode": mode, "path": output.relative_to(ctx.out).as_posix(),
+                             "sha256": frozen.file_sha256(output),
+                             "rgb8_sha256": hashlib.sha256(rgb8.tobytes()).hexdigest(), "dimensions": size,
+                             "request": {k: request[k] for k in ("profile", "lens", "decoder_version", "adjustments")},
+                             "coreimage_applied": {k: row.get(k) for k in ("ci_baseline_exposure", "ci_sharpness", "ci_lum_nr")}})
+    write_rows_csv(ctx.out / "frozen_comparison.csv", rows, ("capture_id", "mode"))
+    errors = [r for r in rows if r.get("error")]
+    payload = {"out": str(ctx.out), "rows": rows, "errors": errors,
+               "note": "差の合否閾値は持たない。凍結物の照合失敗と描画失敗だけを失敗として扱う。"}
+    (ctx.out / "frozen_comparison.json").write_text(json.dumps(_jsonable(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if capture is not None and (errors or len(captured) != len(images)):
+        # 部分結果で完全な凍結基準を置き換えない（既存の capture ファイルには触れない）。
+        ctx.say(f"[frozen] 描画エラーがあるため凍結マニフェストを書きません: {capture}")
+    elif capture is not None:
+        capture.parent.mkdir(parents=True, exist_ok=True)
+        capture.write_text(json.dumps(captured, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        ctx.say(f"[frozen] 現在の CI 出力を凍結マニフェストに書きました: {capture}（凍結ルートは {ctx.out}）")
+    (ctx.out / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    ctx.say(f"[frozen] 完了: {ctx.out}（描画エラー {len(errors)} 件）")
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="rawpy と Core Image CLI を同じ ARW 群で比較します。")
-    parser.add_argument("--source-root", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Core Image CLI の出力をカメラ JPEG・凍結基準（旧 rawpy は明示 opt-in）と比較します。")
+    parser.add_argument("--source-root", type=Path, help="ARW / JPG の現像元フォルダ（--frozen-verify-only 以外では必須）")
     parser.add_argument("--captures", nargs="*", help="比較する撮影ID（例 DSC04430）")
     parser.add_argument("--select", choices=["auto"], help="EXIF からカットを自動選定する")
     parser.add_argument("--out", type=Path, help="出力先（既定 work/engine-comparison/<timestamp>/）")
@@ -6234,6 +6376,19 @@ def main(argv: list[str] | None = None) -> None:
         help="選定用特徴量の JSON キャッシュ（あれば読み、無ければ書く。work/ 配下を推奨）",
     )
     parser.add_argument("--cli", type=Path, default=DEFAULT_CLI)
+    parser.add_argument(
+        "--legacy-rawpy", action="store_true",
+        help="旧 rawpy / local_raw 経路（アーカイブ）を明示的に使う: rawpy 列・--bracket・--adjustments の実行・CFA 計測。"
+             "local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/evaluation-paths.md）",
+    )
+    parser.add_argument("--frozen-manifest", type=Path,
+                        help="凍結基準のマニフェスト（例 tests/fixtures/baseline/rawpy_images.json）。照合してから現在の CI と比べる")
+    parser.add_argument("--frozen-root", type=Path, help="凍結マニフェストの path の基準ディレクトリ（例 wt-107-baseline の checkout）")
+    parser.add_argument("--frozen-verify-only", action="store_true", help="凍結物のハッシュ・寸法の照合だけ行う（CLI・現像元は不要）")
+    parser.add_argument("--frozen-preset", default=frozen_presets.DEFAULT_PRESET,
+                        help="request の無い凍結行で使う CI プリセット（presets.json。既定 neutral_recovery）")
+    parser.add_argument("--frozen-capture", type=Path,
+                        help="今回の CI 出力を凍結マニフェストとして書く（次の OS 更新で --frozen-manifest に渡す。--frozen-root は --out）")
     # 内部用（別プロセスのワーカー）
     parser.add_argument("--worker-rawpy", help=argparse.SUPPRESS)
     parser.add_argument("--worker-noop", action="store_true", help=argparse.SUPPRESS)
@@ -6251,6 +6406,35 @@ def main(argv: list[str] | None = None) -> None:
         worker_rawpy(args)
         return
 
+    if args.frozen_manifest:
+        if not args.frozen_root:
+            raise SystemExit("--frozen-manifest には --frozen-root が必要です")
+        out = (args.out or DEFAULT_OUT_ROOT / time.strftime("frozen-%Y%m%d-%H%M%S")).resolve()
+        images = verify_frozen(args.frozen_manifest.resolve(), args.frozen_root.expanduser().resolve(), out)
+        print(f"凍結物の照合: PASS（{len(images)} 件）", flush=True)
+        if args.frozen_verify_only:
+            return
+        inside = [str(i.path) for i in images if i.path.resolve().is_relative_to(out)]
+        if inside:
+            # 現在の CI 出力で凍結画像を上書きしないよう、凍結ルートとは別の --out を求める。
+            raise SystemExit("--out が凍結画像を含みます（上書きを避けるため別の出力先を指定してください）: " + ", ".join(inside))
+        if not args.source_root or not args.source_root.expanduser().is_dir():
+            raise SystemExit("--frozen-manifest の比較には --source-root（ARW のあるフォルダ）が必要です")
+        if not args.cli.is_file():
+            raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {args.cli}")
+        ctx = RunContext(source_root=args.source_root.expanduser().resolve(), out=out, cli=args.cli.resolve(),
+                         max_edge=args.max_edge, legacy_rawpy=False)
+        capture = args.frozen_capture.resolve() if args.frozen_capture else None
+        raise SystemExit(run_frozen(ctx, images, preset=args.frozen_preset, capture=capture))
+    if args.frozen_verify_only:
+        raise SystemExit("--frozen-verify-only には --frozen-manifest が必要です")
+    if args.source_root is None:
+        raise SystemExit("--source-root を指定してください")
+    if args.bracket and not args.legacy_rawpy:
+        raise SystemExit(f"--bracket は {legacy.PREREQUISITE}")
+    if args.adjustments and not args.dry_run and not args.legacy_rawpy:
+        raise SystemExit(f"--adjustments の実行（rawpy 掃引・後段オラクル）は {legacy.PREREQUISITE}。--dry-run は不要")
+
     source_root = args.source_root.expanduser().resolve()
     if not source_root.is_dir():
         raise SystemExit(f"現像元フォルダがありません: {source_root}")
@@ -6262,7 +6446,8 @@ def main(argv: list[str] | None = None) -> None:
     available = paired_ids(source_root)
     out = (args.out or DEFAULT_OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    ctx = RunContext(source_root=source_root, out=out, cli=args.cli.resolve(), max_edge=args.max_edge)
+    ctx = RunContext(source_root=source_root, out=out, cli=args.cli.resolve(), max_edge=args.max_edge,
+                     legacy_rawpy=args.legacy_rawpy)
 
     if args.select == "auto":
         cache = args.features_cache
@@ -6412,9 +6597,10 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     env = environment_info(ctx, source_file(source_root, selection[0]["capture_id"], "ARW"))
-    # 基準値: rawpy ワーカーの常駐コスト、Core Image の初回起動（計測から除外するウォームアップ）
-    noop = run_timed([sys.executable, str(Path(__file__).resolve()), "--source-root", str(source_root), "--worker-noop"])
-    env["rawpy_worker_baseline"] = {k: noop.get(k) for k in ("wall_s", "maxrss_bytes", "peak_footprint_bytes")}
+    # 基準値: rawpy ワーカーの常駐コスト（旧経路のみ）、Core Image の初回起動（計測から除外するウォームアップ）
+    if ctx.legacy_rawpy:
+        noop = run_timed([sys.executable, str(Path(__file__).resolve()), "--source-root", str(source_root), "--worker-noop"])
+        env["rawpy_worker_baseline"] = {k: noop.get(k) for k in ("wall_s", "maxrss_bytes", "peak_footprint_bytes")}
     warm = run_coreimage(ctx, selection[0]["capture_id"], "preview", lens=False)
     env["coreimage_warmup"] = {k: warm.get(k) for k in ("wall_s", "engine_elapsed_s", "maxrss_bytes", "error")}
 
@@ -6465,4 +6651,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except legacy.LegacyUnavailable as error:
+        raise SystemExit(str(error)) from None

@@ -17,6 +17,13 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import compare_engines as ce  # noqa: E402
 
+try:  # 旧 rawpy / local_raw 経路（アーカイブ）。Python 本体の削除後は該当テストだけ skip する。
+    import importlib.util as _ilu
+
+    LEGACY_AVAILABLE = _ilu.find_spec("local_raw") is not None and _ilu.find_spec("rawpy") is not None
+except (ImportError, ValueError):
+    LEGACY_AVAILABLE = False
+
 
 def _feat(cid, **kw):
     base = {
@@ -428,6 +435,7 @@ class SharpnessMetricTests(unittest.TestCase):
         self.assertEqual(by[("preview", "a")]["x_n"], 2)
         self.assertIsNone(by[("full", "a")]["x"])
 
+    @unittest.skipUnless(LEGACY_AVAILABLE, "旧 rawpy / local_raw 経路（アーカイブ）が無い環境")
     def test_rawpy_finish_reuses_engine_tone(self):
         # 後段仕上げは engine._apply_tone_array を通る（平坦画像はシャープの影響を受けない）
         flat = np.full((64, 64, 3), 128, dtype=np.uint8)
@@ -990,6 +998,7 @@ class AdjustmentMetricTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ce.delta_e76_map(img, img[:16])
 
+    @unittest.skipUnless(LEGACY_AVAILABLE, "旧 rawpy / local_raw 経路（アーカイブ）が無い環境")
     def test_post_chain_oracle_matches_rawpy_formula(self):
         x = np.tile(np.linspace(0, 1, 256, dtype=np.float32)[None, :, None], (4, 1, 3))
         x[..., 0] *= 0.8  # 色を少し付ける（彩度の式を通す）

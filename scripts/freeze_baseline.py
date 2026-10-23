@@ -3,6 +3,17 @@
 
 Real photographs and their derivatives are only written below work/baseline.
 The repository fixtures contain numeric JSON and generated, metadata-free PNGs.
+
+Retained after the Python app removal (#90 / #117), with no local_raw / rawpy / lensfunpy:
+
+- ``--audit-only``: privacy audit of the committed fixtures.
+- ``--verify-frozen-root DIR``: verify the frozen rawpy images listed in
+  ``rawpy_images.json`` below DIR (sha256, RGB sha256, dimensions; missing or
+  modified images fail).
+
+Regeneration (full run or ``--sections``) re-runs the old Python engine and is an
+explicit archival opt-in: ``--legacy-generate`` on a checkout that still has
+``local_raw/`` and the requirements-raw.txt environment (docs/evaluation-paths.md).
 """
 from __future__ import annotations
 
@@ -25,9 +36,11 @@ import cv2
 import numpy as np
 from PIL import Image, TiffImagePlugin
 
-from local_raw import analysis, bracket, config, development_candidates as dc, export
-from local_raw.exif import build_inherited_exif
-from scripts import compare_engines as compare, evaluate_candidates as evaluate
+sys.path.insert(0, str(ROOT / 'scripts'))
+from evaluation import frozen, legacy  # noqa: E402
+
+# Old-engine modules, loaded only by load_legacy() for --legacy-generate.
+analysis = bracket = config = dc = export = build_inherited_exif = compare = evaluate = None
 
 DEFAULT_SOURCE = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
 FIXTURES = ROOT / 'tests/fixtures/baseline'
@@ -42,6 +55,20 @@ PUBLIC_TAGS = {256, 257, 258, 259, 262, 271, 272, 274, 277, 282, 283, 296,
                41989, 41990, 41991, 41992, 41993, 41994, 42034, 42035, 42036}
 IFDS = {34665: 'Exif', 34853: 'GPS', 40965: 'Interop'}
 FIXED_TIME = '2000-01-01T00:00:00+00:00'
+
+
+def load_legacy():
+    """Import the old Python engine for regeneration (archival, explicit opt-in only)."""
+    global analysis, bracket, config, dc, export, build_inherited_exif, compare, evaluate
+    feature = 'freeze_baseline regeneration'
+    analysis = legacy.import_module('local_raw.analysis', feature)
+    bracket = legacy.import_module('local_raw.bracket', feature)
+    config = legacy.import_module('local_raw.config', feature)
+    dc = legacy.import_module('local_raw.development_candidates', feature)
+    export = legacy.import_module('local_raw.export', feature)
+    build_inherited_exif = legacy.import_module('local_raw.exif', feature).build_inherited_exif
+    from scripts import compare_engines as compare_module, evaluate_candidates as evaluate_module
+    compare, evaluate = compare_module, evaluate_module
 
 
 def jsonable(value):
@@ -174,7 +201,7 @@ def freeze_metrics():
 
 
 def freeze_rawpy(source):
-    ctx = compare.RunContext(source, WORK, ROOT / 'unused-cli', 1600)
+    ctx = compare.RunContext(source, WORK, ROOT / 'unused-cli', 1600, legacy_rawpy=True)
     rows = []
     for capture in ('DSC07402', 'DSC07423'):
         for mode in ('preview', 'full'):
@@ -337,16 +364,34 @@ def audit_privacy():
     print(f'privacy audit: PASS ({count} JSON, {gps_count} GPS tags type/count-only, {len(pngs)} metadata-free synthetic PNG)', flush=True)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root', type=Path, default=DEFAULT_SOURCE)
     parser.add_argument('--audit-only', action='store_true')
+    parser.add_argument('--verify-frozen-root', type=Path,
+                        help='Verify the frozen rawpy images of rawpy_images.json below this root (no app needed).')
+    parser.add_argument('--legacy-generate', action='store_true',
+                        help='Archival: re-run the old Python engine to regenerate fixtures (overwrites baseline JSON).')
     parser.add_argument('--sections', nargs='+', choices=('exif', 'bracket'),
                         help='Regenerate only the selected independent sections; keep full-run provenance.')
-    args = parser.parse_args()
-    if args.audit_only:
+    args = parser.parse_args(argv)
+    if args.audit_only or args.verify_frozen_root:
         audit_privacy()
+        if args.verify_frozen_root:
+            try:
+                images = frozen.verify_manifest(FIXTURES / 'rawpy_images.json', args.verify_frozen_root.resolve())
+            except frozen.FrozenArtifactError as error:
+                print(str(error), file=sys.stderr)
+                raise SystemExit(1) from None
+            print(f'frozen rawpy images: PASS ({len(images)} verified)', flush=True)
         return
+    if not args.legacy_generate:
+        parser.error('regeneration re-runs the old Python engine: ' + legacy.PREREQUISITE
+                     + ' (pass --legacy-generate; use --audit-only / --verify-frozen-root otherwise)')
+    try:
+        load_legacy()
+    except legacy.LegacyUnavailable as error:
+        parser.error(str(error))
     source = args.source_root.resolve()
     if (not args.sections or 'exif' in args.sections) and not source.is_dir():
         parser.error(f'missing read-only source: {source}')
