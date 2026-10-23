@@ -347,7 +347,9 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04705.ARW","output":"'$PWD'/work/dia
 
 応答には `merge` の検出・適用シフト、共通crop、重み、フレーム別 `applied` / `source`、`elapsed_ms` を含める。CLIはRAWのEXIF/GPSを出力へ継承しない。Rust側の後続処理が担う。
 
-デコード前にRAWの寸法からworking-memoryを推定し、4 GBまたは物理メモリから1.5 GBを引いた予算（小さい方）を超えるリクエストを拒否する。見積もりは入力1画素あたり17 bytes（保持UInt16 RGBと融合中間面を含む）。24 MP×9枚は約3.67 GB。
+デコード前にRAWの寸法からworking-memoryを推定し、4 GBまたは物理メモリから1.5 GBを引いた予算（小さい方）を超えるリクエストを拒否する。見積もりは `pixel数 × (6 bytes × frame数 + 112 bytes)`。6 bytes/frame は保持するUInt16 RGB、固定112 bytes/pixelは `MergeCore.mertens` の単一融合ワークスペース（作業中RGB/重み/ピラミッド/累積面/再構成と一時領域）に割り当てる。固定領域はフレーム数倍しない。24 MP×9枚は3.984 GBで4 GB上限内。デコーダの丸めを考慮してプレビュー寸法は切り上げ、RAW metadata見積もりに加えてデコード後の実extentでも配列確保前に再検査する。
+
+`settings.exposure_ev` は非nullで指定すると値が0でも拒否する。これは既存のadjustments排他契約（キーを指定しないこと）に合わせたもの。0固定なのは `adjustments.exposure` と `adjustments.highlight_recovery` で、`settings.exposure_ev` の0指定を受け付ける意味ではない。
 
 9個のハードリンクを使った同一画像9枚の24 MP原寸smokeでは、57.63秒、maximum RSS 3.28 GiB、peak footprint 3.41 GiBを計測した。これは資源検証であり、ブラケット画質の検証ではない。実AEB / 三脚長秒RAWが無いため実写画質確認は未完了で、Issue #83を閉じる確認に残す。測定条件・CLIとの差分は [`docs/coreimage-merge-mode-report.md`](../../docs/coreimage-merge-mode-report.md) を参照。
 

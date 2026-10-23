@@ -21,7 +21,12 @@ public struct MergeRequest: Equatable {
 }
 
 public enum MergeMemoryBudget {
-    public static let bytesPerPixelPerFrame: UInt64 = 17
+    /// Retained RGB UInt16 inputs plus one conservative fusion workspace allowance.
+    /// The workspace is derived from MergeCore's current peak live buffers: current shifted
+    /// RGB plane, weight planes, image/weight pyramids, Laplacian expansion scratch, accumulators,
+    /// reconstruction/output, and per-frame decode/encode scratch. It is independent of N.
+    public static let retainedBytesPerPixelPerFrame: UInt64 = 6
+    public static let fixedWorkspaceBytesPerPixel: UInt64 = 112
     public static let fixedCeiling: UInt64 = 4_000_000_000
     public static func safeBytes(physicalMemory: UInt64) -> UInt64 {
         min(fixedCeiling, physicalMemory > 1_500_000_000 ? physicalMemory - 1_500_000_000 : 0)
@@ -31,12 +36,20 @@ public enum MergeMemoryBudget {
         var w = width, h = height
         if let edge = maxEdge {
             let scale = min(1.0, Double(edge) / Double(max(width, height)))
-            w = UInt64((Double(width) * scale).rounded(.down)); h = UInt64((Double(height) * scale).rounded(.down))
+            // CIRAWFilter's scaled dimensions can round up; use ceiling to avoid under-budgeting.
+            let scaledWidth = (Double(width) * scale).rounded(.up)
+            let scaledHeight = (Double(height) * scale).rounded(.up)
+            guard scaledWidth.isFinite, scaledHeight.isFinite,
+                  scaledWidth > 0, scaledHeight > 0,
+                  scaledWidth < Double(UInt64.max), scaledHeight < Double(UInt64.max) else { return nil }
+            w = UInt64(scaledWidth); h = UInt64(scaledHeight)
         }
         let (pixels, pixelOverflow) = w.multipliedReportingOverflow(by: h)
-        let (perFrame, bytesOverflow) = pixels.multipliedReportingOverflow(by: bytesPerPixelPerFrame)
-        let (total, totalOverflow) = perFrame.multipliedReportingOverflow(by: UInt64(frames))
-        return pixelOverflow || bytesOverflow || totalOverflow ? nil : total
+        let (retainedPerFrame, retainedBytesOverflow) = pixels.multipliedReportingOverflow(by: retainedBytesPerPixelPerFrame)
+        let (retained, retainedOverflow) = retainedPerFrame.multipliedReportingOverflow(by: UInt64(frames))
+        let (workspace, workspaceOverflow) = pixels.multipliedReportingOverflow(by: fixedWorkspaceBytesPerPixel)
+        let (total, totalOverflow) = retained.addingReportingOverflow(workspace)
+        return pixelOverflow || retainedBytesOverflow || retainedOverflow || workspaceOverflow || totalOverflow ? nil : total
     }
 }
 
@@ -126,21 +139,21 @@ public func merge(_ request: MergeRequest, context sharedContext: CIContext? = n
     // Bound retained frames + Mertens working buffers before decoding any RAW. Leave at least 1 GiB for Core Image/system.
     let available = ProcessInfo.processInfo.physicalMemory
     let safeBudget = MergeMemoryBudget.safeBytes(physicalMemory: available)
-    var estimated: UInt64 = 0
+    var metadataDimensions: [(UInt64, UInt64)] = []
     for url in request.inputs {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.uint64Value, let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.uint64Value else {
             throw DevelopError(.inputNotReadable, "cannot read RAW dimensions: \(url.path)")
         }
-        // 6 B retained UInt16 RGB + approximately 11 B/px across simultaneous fusion pyramids/temporaries.
-        guard let bytes = MergeMemoryBudget.estimate(width: w, height: h, frames: 1, maxEdge: request.maxEdge) else {
-            throw DevelopError(.invalidRequest, "estimated merge memory overflows")
-        }
-        let (next, overflow) = estimated.addingReportingOverflow(bytes)
-        guard !overflow else { throw DevelopError(.invalidRequest, "estimated merge memory overflows") }
-        estimated = next
-        if estimated > safeBudget { throw DevelopError(.invalidRequest, "estimated merge working memory \(estimated) bytes exceeds safe budget \(safeBudget) bytes") }
+        metadataDimensions.append((w, h))
     }
+    // Frames must decode to a common extent. Until that is known, budget the largest metadata
+    // extent as N retained RGB16 frames plus one fixed (N-independent) MergeCore workspace.
+    let maxWidth = metadataDimensions.map(\.0).max()!, maxHeight = metadataDimensions.map(\.1).max()!
+    guard let estimated = MergeMemoryBudget.estimate(width: maxWidth, height: maxHeight, frames: request.inputs.count, maxEdge: request.maxEdge) else {
+        throw DevelopError(.invalidRequest, "estimated merge memory overflows")
+    }
+    if estimated > safeBudget { throw DevelopError(.invalidRequest, "estimated merge working memory \(estimated) bytes exceeds safe budget \(safeBudget) bytes") }
     let context = sharedContext ?? makeRenderContext()
     let decodeStart = DispatchTime.now()
     var retained: [MergeRGBImage] = []; var frames: [MergeFrame] = []; var firstSize: (Int, Int)?
@@ -155,10 +168,19 @@ public func merge(_ request: MergeRequest, context sharedContext: CIContext? = n
             if let size = firstSize, size != (width, height) { throw DevelopError(.invalidRequest, "frames differ in size or orientation") }
             firstSize = (width, height)
             let (px, overflow) = width.multipliedReportingOverflow(by: height); guard !overflow else { throw DevelopError(.invalidRequest, "decoded image dimensions overflow") }
-            var samples = Array(repeating: UInt16(0), count: px * 4)
+            guard width > 0, height > 0,
+                  let decodedEstimate = MergeMemoryBudget.estimate(width: UInt64(width), height: UInt64(height), frames: request.inputs.count, maxEdge: nil),
+                  decodedEstimate <= safeBudget else {
+                throw DevelopError(.invalidRequest, "decoded merge extent exceeds safe memory budget")
+            }
+            let (rgbaCount, rgbaOverflow) = px.multipliedReportingOverflow(by: 4)
+            let (rgbCount, rgbOverflow) = px.multipliedReportingOverflow(by: 3)
+            let (rowBytes, rowOverflow) = width.multipliedReportingOverflow(by: 8)
+            guard !rgbaOverflow, !rgbOverflow, !rowOverflow else { throw DevelopError(.invalidRequest, "decoded image buffer dimensions overflow") }
+            var samples = Array(repeating: UInt16(0), count: rgbaCount)
             let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-            samples.withUnsafeMutableBytes { buffer in context.render(decoded, toBitmap: buffer.baseAddress!, rowBytes: width * 8, bounds: extent, format: .RGBA16, colorSpace: colorSpace) }
-            var rgb = Array(repeating: UInt16(0), count: px * 3)
+            samples.withUnsafeMutableBytes { buffer in context.render(decoded, toBitmap: buffer.baseAddress!, rowBytes: rowBytes, bounds: extent, format: .RGBA16, colorSpace: colorSpace) }
+            var rgb = Array(repeating: UInt16(0), count: rgbCount)
             for p in 0..<px { rgb[p*3] = samples[p*4]; rgb[p*3+1] = samples[p*4+1]; rgb[p*3+2] = samples[p*4+2] }
             retained.append(MergeRGBImage(width: width, height: height, uint16RGB: rgb))
             let applied = makeApplied(configured.filter, profile: request.settings.profile, format: .jpeg, colorSpaceName: "sRGB IEC61966-2.1")
@@ -170,13 +192,7 @@ public func merge(_ request: MergeRequest, context sharedContext: CIContext? = n
     let decodeEnd = DispatchTime.now()
     let result = try MergeCore.merge(retained, weights: request.options.weights, edge: request.options.edge, maxShiftRatio: Float(request.options.maxShiftRatio), align: request.options.align)
     let postStart = DispatchTime.now()
-    // Fused samples are already sRGB gamma. Convert once to linear before the shared post chain.
-    let raw = result.image.pixels
-    let rgba = raw.enumerated().reduce(into: [Float]()) { acc, item in if item.offset % 3 == 0 { acc.append(item.element); acc.append(raw[item.offset+1]); acc.append(raw[item.offset+2]); acc.append(1) } }
-    let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
-    let extent = CGRect(x: 0, y: 0, width: result.image.width, height: result.image.height)
-    let gamma = CIImage(bitmapData: data, bytesPerRow: result.image.width * 16, size: extent.size, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
-    let linear = gamma.applyingFilter("CISRGBToneCurveToLinear")
+    let linear = mergePostChainInput(result.image)
     let postSettings = request.adjustments
     let base = captureSharpenBase(longEdge: max(result.image.width, result.image.height), iso: frames.first?.source.iso.map(Double.init))
     let post = try PostChain.apply(linear, PostChainParameters(lift: postSettings.shadowLift / 100, brightness: postSettings.brightness, contrast: postSettings.contrast, saturation: postSettings.saturation, usmSigma: base.sigma, usmGain: usmGainForCoreImage(sharpness: postSettings.sharpness, base: base), usmCoring: base.coring))
@@ -202,4 +218,17 @@ public func merge(_ request: MergeRequest, context sharedContext: CIContext? = n
     )
     let meta = MergeMetadata(aligned: request.options.align && result.aligned, reason: result.reason, reference_index: result.referenceIndex, shifts_xy: result.shiftsXY.map { [$0.0, $0.1] }, applied_shifts_xy: result.appliedShiftsXY.map { [$0.0, $0.1] }, crop: result.crop, max_bits: result.maxBits, max_shift_px: result.maxShiftPx, pyramid_levels: result.pyramidLevels, weights: request.options.weights, edge: request.options.edge)
     return MergeSuccess(cli_version: cliVersion, macos_version: macOSVersionString, decoder_version: frames.first?.applied.decoder_version ?? "9", inputs: request.inputs.map(\.path), output: request.output.path, width: image.width, height: image.height, elapsed_ms: MergeElapsed(decode: ms(decodeStart, decodeEnd), align: result.alignmentDurationMS, fuse: result.fusionDurationMS, post_encode: ms(postStart, end), total: ms(start, end)), merge: meta, frames: frames, adjustments_applied: appliedAdjustments)
+}
+
+/// Build the exact sRGB-tagged CIImage input used by merge's shared PostChain path.
+/// Core Image color management converts the tagged source into the context working space.
+func mergePostChainInput(_ image: MergeRGBImage) -> CIImage {
+    let raw = image.pixels
+    let rgba = raw.enumerated().reduce(into: [Float]()) { acc, item in
+        if item.offset % 3 == 0 { acc.append(item.element); acc.append(raw[item.offset + 1]); acc.append(raw[item.offset + 2]); acc.append(1) }
+    }
+    let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+    return CIImage(bitmapData: data, bytesPerRow: image.width * 16,
+                   size: CGSize(width: image.width, height: image.height), format: .RGBAf,
+                   colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
 }

@@ -4,7 +4,7 @@
 
 PR-B adds Swift CLI `mode: "merge"` on top of the PR-A `MergeCore` at base `8c861cd`. CLI version is bumped from 0.7.0 to 0.8.0. The request contract follows `docs/design/bracket-merge-coreimage.md` §§2, 5 and 6.1, with the adopted defaults: Mertens weights (1,1,0), central pivot, common crop, shift-limit fallback, 2400-edge preview when requested, and UInt16 RGB retained frames.
 
-The CLI emits JPEG only and does not copy EXIF/GPS. `exposure` and `highlight_recovery` are forced to zero in every decoder stage and reported in `adjustments_applied.ignored`. `settings.exposure_ev` is required to be zero because the current adjustment contract rejects a non-null exposure setting alongside `adjustments`; accepting a non-zero value and silently overriding it would be misleading. White balance, NR, and decoder sharpness are applied while decoding all frames. The remaining post adjustments run once on the fused image.
+The CLI emits JPEG only and does not copy EXIF/GPS. `exposure` and `highlight_recovery` are forced to zero in every decoder stage and reported in `adjustments_applied.ignored`. `settings.exposure_ev` must be omitted or null; the existing adjustment contract rejects any non-null explicit setting, including zero, alongside `adjustments`. White balance, NR, and decoder sharpness are applied while decoding all frames. The remaining post adjustments run once on the fused image.
 
 ## Resource smoke
 
@@ -22,7 +22,7 @@ Machine: Apple M3, macOS 27.0.1, release CLI, decoder 9. Source: existing `work/
 | Peak memory footprint | 3,656,552,432 bytes (3.41 GiB) |
 | Output | 5999×3999 JPEG, common-cropped after detected −1/−1 shifts |
 
-The input-size estimate for 9×24 MP is 3.67 GB at 17 bytes per pixel across all frames, within the implementation's 4 GB working-set ceiling. The measured peak footprint was close to that estimate. The 4 GB ceiling is also capped by `physicalMemory - 1.5 GB`; larger requests fail before RAW decoding with an `INVALID_REQUEST` containing estimated and safe-budget byte counts. Actual AEB and tripod long-exposure RAWs were not available, so the photographic comparison remains open and Issue #83 must not be closed on this report.
+This first-round smoke used the initial 17 bytes/pixel/frame estimate (3.67 GB for 9×24 MP). The final estimate below includes a fixed workspace and is 3.984 GB for the same inputs, within the 4 GB ceiling. The measured peak footprint was close to that estimate. The 4 GB ceiling is also capped by `physicalMemory - 1.5 GB`; larger requests fail before RAW decoding with an `INVALID_REQUEST` containing estimated and safe-budget byte counts. Actual AEB and tripod long-exposure RAWs were not available, so the photographic comparison remains open and Issue #83 must not be closed on this report.
 
 ## Verification
 
@@ -36,3 +36,25 @@ The input-size estimate for 9×24 MP is 3.67 GB at 17 bytes per pixel across all
 ## API difference from the frozen proposal
 
 The response adds `sequence` only for batch, consistent with current CLI convention; timing fields vary by invocation, so byte-for-byte JSON equality between single and batch responses is not a contract. Both paths call `RequestParser.parseMerge` and the same `merge()` implementation. `elapsed_ms.align` and `elapsed_ms.fuse` report separate MergeCore stages; `post_encode` includes the post chain, render, and atomic JPEG write.
+
+## 2回目レビューでの追加検証と修正（2026-10-23）
+
+### 色変換の往復
+
+合成後段で本番と同じ `mergePostChainInput` → `PostChain.apply` → sRGB `CIContext.render` を通すテストを追加した。sRGBグレーランプ（0、0.01、0.05、0.18、0.5、0.75、1）とRGBパッチを、lift 0 / brightness・contrast・saturation 1 / USM gain 0 で入力値へ戻す。旧グラフを同じテスト内で再現すると、sRGBタグ付き0.5を明示的に `CISRGBToneCurveToLinear` へ通した後段出力は約0.214となり、二重decodeで暗くなることを数値で確認する。原因はタグ付きsRGB CIImageが色管理でlinear working spaceへ変換されているところへ、明示decodeをもう一度掛けていたこと。merge入力生成を共通関数へ切り出し、余分なtone curve filterを外した。単発 `develop()` と `PostChain` の実装は変更していない。
+
+### メモリ見積もり
+
+旧17 bytes/px/frame式は、保持フレームに依存しないMertensの作業領域もframe数倍していた。新式は `pixels × (6 × frame数 + 112)` bytes。6 bytes/frameは保持UInt16 RGB配列。固定112 bytes/pxはソース上のfusion peakにあるshifted RGB（12）、重み計算3面（12）と出力（4）、正規化重みと重みpyramid（約8）、画像pyramid（約16）、Laplacian upscale scratch（12）、累積pyramid（約16）、再構成出力（12）、RGBAデコード/書き出し時の追加領域を足して余裕を持たせた予約枠で、frame数に依存させない。2/3/9枚・巨大入力・overflow・preview切り上げの境界テストを加えた。24 MP×9枚の見積もりは3.984 GBとなり、4 GB ceiling内に残る。RAW metadataからの事前判定に加え、CIRAWFilterの実extentで寸法積/配列要素数/row bytesのoverflowと予算を配列確保前に確認する。
+
+### 契約と再現方法
+
+merge requestでは `settings.exposure_ev` は値が0でも、非nullで明示された時点で拒否される。既存のsettings/adjustments排他検証のキー指定契約に従い、validationを緩めずREADMEの「0以外拒否」を明確化して0指定拒否テストを加えた。`exposure` と `highlight_recovery` は引き続きadjustments内の0固定で無視される。
+
+実画像で単発と `--batch` を再現するスクリプトは `native/coreimage-cli/scripts/smoke-merge-single-batch.sh`。GPSを含む実ファイルはリポジトリへ置かず、`GEOFRAME_TEST_MERGE_ARWS` に2〜9件の絶対ARWパスをコロン区切りで渡す。previewの単発/バッチ出力JPEGをbyte比較し、応答の寸法とignoredキーを検証する。既存9枚同一画像の資源測定は画素一致の資源スモークであり、実AEB/三脚長秒ブラケットの画質試験は未実施のまま。実写画質を確認するまでIssue #83は閉じない。
+
+今回のrelease resource smokeは、`DSC07415.ARW` のハードリンク2件、decoder 9、max_edge 2400、M3/macOS 27.0.1で実施した。単発/バッチJPEGはbyte一致し、両応答に ignored exposure / highlight_recovery が記録された。単一実行の壁時計は7.30秒、最大RSSは647,233,536 bytes。metadata 6000×4000からのpreview見積もりは2400×1600×(6×2+112) = 952,320,000 bytes（約0.89 GiB）で、実測RSSはこの予算内だった。元画像は同一露出の複製なので、これもブラケット画質評価ではない。
+
+## 親側の最終再検証
+
+2026-10-23、修正後に親側でSwift全144件（9件skip、失敗0件）を確認した。release同梱用CLI 0.8.0のビルドとgit diff --checkも成功。手動境界レビューでは信頼度7以上の新規リスクは0件だった。
