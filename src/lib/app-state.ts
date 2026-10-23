@@ -326,7 +326,7 @@ export type Action =
   | { type: "merge/start"; mode: DevelopMode; groupId: number }
   /** `generation` はリクエストを出した時点の sourceFolderGeneration（古い結果を捨てるため）。 */
   | { type: "merge/ok"; mode: DevelopMode; groupId: number; result: MergedResult; generation: number }
-  | { type: "merge/fail"; message: string }
+  | { type: "merge/fail"; groupId: number; generation: number; message: string }
   | { type: "export/batchName"; value: string }
   | { type: "export/start" }
   /**
@@ -647,6 +647,10 @@ export function reducer(state: State, action: Action): State {
           ),
         };
       }
+      const group = state.analysis?.groups.find((item) => item.id === action.groupId);
+      // 新規採用は、現在のグループに属する本合成だけ許可する。プレビュー結果や
+      // 別グループ/古いcapture IDを action から直接渡しても書き出し対象にしない。
+      if (!group || !mergedResultFor(state.mergeFullResults, group, action.leadCaptureId)) return state;
       // 新規採用は **同じグループの古い合成採用を置き換える**（増やさない）。
       //
       // 置き換えないと孤児が残る: グループGでリード=Xの合成を採用したあと、フレームを
@@ -876,6 +880,11 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "merge/fail":
+      // 古いフォルダ/別グループから遅れて届いた失敗で、現在のbusyや通知を壊さない。
+      if (
+        action.generation !== state.sourceFolderGeneration ||
+        action.groupId !== state.mergingGroupId
+      ) return state;
       return { ...state, mergeMode: null, mergingGroupId: null, notice: action.message, noticeTone: "error" };
 
     case "export/batchName":

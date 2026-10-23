@@ -479,6 +479,37 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    pub(crate) fn synthetic_gps_jpeg() -> Vec<u8> {
+        fixture(true, false, Some(64))
+    }
+
+    pub(crate) fn assert_synthetic_gps_metadata(jpeg: &[u8], width: u64, height: u64) {
+        let metadata = parsed(jpeg);
+        for (tag, expected) in [
+            (exif::Tag::Orientation, 1),
+            (exif::Tag::PixelXDimension, width as u32),
+            (exif::Tag::PixelYDimension, height as u32),
+        ] {
+            assert_eq!(
+                metadata
+                    .get_field(tag, exif::In::PRIMARY)
+                    .unwrap()
+                    .value
+                    .get_uint(0),
+                Some(expected)
+            );
+        }
+        assert!(metadata
+            .get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY)
+            .is_some());
+        assert!(metadata
+            .get_field(exif::Tag::Software, exif::In::PRIMARY)
+            .is_some());
+        assert!(metadata
+            .get_field(exif::Tag::MakerNote, exif::In::PRIMARY)
+            .is_none());
+    }
+
     #[test]
     fn preserves_both_byte_orders_and_dimension_types() {
         for little in [true, false] {

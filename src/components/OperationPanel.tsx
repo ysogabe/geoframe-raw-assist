@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useRef, type RefObject } from "react";
 import type { DevelopMode, EngineStatus, ViewerGallery, ViewerSource, ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
@@ -11,6 +11,7 @@ import {
   formatScore,
   formatShutter,
   groupKindLabel,
+  isMergedResult,
   isPortrait,
   rawPillClass,
 } from "../lib/format";
@@ -22,6 +23,7 @@ import type {
   DevelopedResult,
   DevelopmentCandidate,
   DevelopmentCandidatesResponse,
+  MergedResult,
   GroupInfo,
   PhotoInfo,
   PresetInfo,
@@ -29,6 +31,7 @@ import type {
 } from "../lib/types";
 import { DevelopControls } from "./DevelopControls";
 import { BeforeAfter } from "./BeforeAfter";
+import { BracketMerge } from "./BracketMerge";
 import { ProgressiveImage } from "./ProgressiveImage";
 
 type OperationPanelProps = {
@@ -60,6 +63,20 @@ type OperationPanelProps = {
   candidatesError: string;
   onGenerateCandidates: () => void;
   onApplyCandidate: (candidate: DevelopmentCandidate) => void;
+  isBracket: boolean;
+  mergeFrames: CaptureId[];
+  onToggleMergeFrame: (captureId: CaptureId) => void;
+  onResetMergeFrames: () => void;
+  onMerge: (mode: DevelopMode) => void;
+  mergeMode: DevelopMode | null;
+  mergeElapsedLabel: string;
+  mergeBlockReason: string | null;
+  mergePreviewResult: MergedResult | undefined;
+  mergeFullResult: MergedResult | undefined;
+  mergedAccepted: boolean;
+  onAcceptMerged: () => void;
+  onViewMerged: () => void;
+  globalBusy: boolean;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -111,6 +128,20 @@ export function OperationPanel({
   candidatesError,
   onGenerateCandidates,
   onApplyCandidate,
+  isBracket,
+  mergeFrames,
+  onToggleMergeFrame,
+  onResetMergeFrames,
+  onMerge,
+  mergeMode,
+  mergeElapsedLabel,
+  mergeBlockReason,
+  mergePreviewResult,
+  mergeFullResult,
+  mergedAccepted,
+  onAcceptMerged,
+  onViewMerged,
+  globalBusy,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -122,8 +153,19 @@ export function OperationPanel({
   viewing,
   onOpenViewer,
 }: OperationPanelProps) {
+  const mergePanelRef = useRef<HTMLElement>(null);
   const unscored = analysis.scored === false;
-  const result = fullResult ?? previewResult;
+  const developResult = fullResult ?? previewResult;
+  const mergeFullMatchesSelection = mergeFullResult !== undefined &&
+    mergeFrames.length === mergeFullResult.capture_ids.length &&
+    mergeFrames.every((id) => mergeFullResult.capture_ids.includes(id));
+  const mergedResult = isBracket
+    ? mergeFullMatchesSelection ? mergeFullResult : (mergePreviewResult ?? mergeFullResult)
+    : undefined;
+  const canToggleComparison = Boolean(developResult && mergedResult);
+  const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
+  const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
+  const result = showMerged ? mergedResult : developResult;
 
   /**
    * 原寸ビューアの送り輪を組み立てる。**グループを跨いだ全写真**を一覧と同じ並び順で並べ、
@@ -158,6 +200,22 @@ export function OperationPanel({
     return { items, index: index < 0 ? 0 : index };
   }
 
+  function viewerGalleryFor(initial: "before" | "after"): ViewerGallery {
+    const merged = result && isMergedResult(result) ? result : null;
+    if (!merged) return photoGalleryFor(initial);
+    return { items: [{
+      captureId,
+      beforeUrl: sourceJpgUrl(captureId),
+      afterUrl: merged.output_url,
+      beforeLabel: "現像前",
+      afterLabel: "合成後",
+      initial,
+      preview: Boolean(merged.preview),
+      previewEdge: merged.preview ? Math.max(merged.width, merged.height) : undefined,
+      title: `${captureId}（ブラケット合成 ${merged.frames}枚）`,
+    }], index: 0 };
+  }
+
   return (
     <section className="operation-screen screen-enter" aria-label="写真の操作パネル">
       <div className="operation-progress">
@@ -186,7 +244,20 @@ export function OperationPanel({
             大きい写真を固定帯の直下に合わせたときも選択肢が画面外へ押し出されないようにする。
           */}
           <ul className="shot-picker operation-shot-picker" aria-label="このグループの写真">
-            {/* ブラケット合成の先頭タイルは M2 まで隠す。戻すときはここに合成タイル（isBracket 時のみ）を差し込む。 */}
+            {isBracket && (
+              <li className={`shot-tile shot-merged${mergedAccepted ? " accepted" : ""}`}>
+                <button type="button" className="shot-open" aria-current={viewing.kind === "merged" ? "true" : undefined}
+                  aria-label="ブラケット合成の結果を表示する" disabled={!mergedResult} onClick={onViewMerged}>
+                  {mergedResult ? <img src={mergedResult.output_url} alt="ブラケット合成の結果" decoding="async" /> :
+                    <span className="shot-well"><b aria-hidden="true">▤</b><em>本合成すると採用できます</em></span>}
+                </button>
+                <span className="merged-tag">合成 {mergedFrameCount}枚</span>
+                <button type="button" className="shot-accept" aria-pressed={mergedAccepted}
+                  aria-label={mergedAccepted ? "合成の採用を外す" : "合成した1枚を採用する"}
+                  disabled={!mergeFullResult && !mergedAccepted} title={mergeFullResult || mergedAccepted ? undefined : "本合成すると採用できます"}
+                  onClick={onAcceptMerged}><span aria-hidden="true">{mergedAccepted ? "✓" : "○"}</span></button>
+              </li>
+            )}
 
             {group.capture_ids.map((id) => {
               const candidate = analysis.photos[id];
@@ -298,6 +369,17 @@ export function OperationPanel({
             </div>
           </div>
 
+          {isBracket && (
+            <div className="bracket-hint">
+              <span className="bracket-icon">▤</span>
+              <div>
+                <strong>露出ブラケットとして検出されています</strong>
+                <p>下の「ブラケット合成」でフレームを選ぶと、白飛びと黒つぶれを同時に抑えた1枚に合成できます。</p>
+                <button type="button" className="bracket-jump" onClick={() => mergePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>合成パネルへ移動 ↓</button>
+              </div>
+            </div>
+          )}
+
           <DevelopControls
             engineStatus={engineStatus}
             engineVersion={engineVersion}
@@ -320,18 +402,30 @@ export function OperationPanel({
             elapsedLabel={elapsedLabel}
             hasPreview={Boolean(previewResult)}
             hasFull={Boolean(fullResult)}
+            mergeBusy={globalBusy}
           />
           <p className="safety-note">元のJPG / ARWは変更されません（{groupKindLabel(group.kind)}）</p>
         </aside>
       </div>
 
-      {/* ブラケット合成パネル（BracketMerge）は M2 まで隠す。戻すときはここに差し込む。 */}
+      {isBracket && (
+        <BracketMerge
+          analysis={analysis} group={group} frames={mergeFrames}
+          onToggleFrame={onToggleMergeFrame} onResetFrames={onResetMergeFrames} onMerge={onMerge}
+          mergeMode={mergeMode} elapsedLabel={mergeElapsedLabel} blockReason={mergeBlockReason}
+          busy={globalBusy} engineStatus={engineStatus} presetLabel={presets.find((item) => item.name === presetName)?.label ?? presetName}
+          hasPreview={Boolean(mergePreviewResult)} hasFull={Boolean(mergeFullResult)}
+          accepted={mergedAccepted} onAcceptMerged={onAcceptMerged} panelRef={mergePanelRef}
+        />
+      )}
 
       <BeforeAfter
         captureId={captureId}
         result={result}
         comparisonRef={comparisonRef}
-        onOpenFullSize={() => onOpenViewer(photoGalleryFor("after"))}
+        view={canToggleComparison ? (showMerged ? "merged" : "develop") : undefined}
+        onChangeView={canToggleComparison ? (next) => next === "merged" ? onViewMerged() : onViewCapture(group.id, captureId) : undefined}
+        onOpenFullSize={() => onOpenViewer(viewerGalleryFor("after"))}
       />
     </section>
   );

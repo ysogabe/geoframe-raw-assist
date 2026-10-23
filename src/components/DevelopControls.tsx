@@ -30,6 +30,7 @@ type DevelopControlsProps = {
   elapsedLabel: string;
   hasPreview: boolean;
   hasFull: boolean;
+  mergeBusy: boolean;
 };
 
 export function DevelopControls({
@@ -54,9 +55,10 @@ export function DevelopControls({
   elapsedLabel,
   hasPreview,
   hasFull,
+  mergeBusy,
 }: DevelopControlsProps) {
   const activePreset = presets.find((preset) => preset.name === presetName) ?? null;
-  const busy = developMode !== null || candidatesBusy;
+  const busy = developMode !== null || candidatesBusy || mergeBusy;
   const disabled = engineStatus !== "ready" || !adjustments;
 
   return (
@@ -145,7 +147,7 @@ export function DevelopControls({
           starScene={candidatesResponse?.star_scene ?? null}
           busy={candidatesBusy}
           error={candidatesError}
-          disabled={disabled || developMode !== null}
+          disabled={disabled || developMode !== null || mergeBusy}
           onGenerate={onGenerateCandidates}
           onApply={onApplyCandidate}
         />

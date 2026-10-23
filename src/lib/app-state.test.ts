@@ -548,6 +548,22 @@ describe("merge 系", () => {
     expect(next.mergePreviewResults).toEqual({});
   });
 
+  it("プレビュー合成は採用できず、本合成は採用できる", () => {
+    const previewOnly: State = {
+      ...withEngine,
+      mergePreviewResults: { 2: merged(["B1", "B2"]) },
+    };
+    const rejected = reducer(previewOnly, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+    expect(rejected).toBe(previewOnly);
+
+    const fullReady: State = {
+      ...previewOnly,
+      mergeFullResults: { 2: merged(["B1", "B2"]) },
+    };
+    const accepted = reducer(fullReady, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+    expect(accepted.accepted).toContainEqual({ kind: "merged", groupId: 2, leadCaptureId: "B1" });
+  });
+
   it("古い世代の merge/ok は捨てる", () => {
     const started = reducer(withEngine, { type: "merge/start", mode: "full", groupId: 2 });
     const switched = reducer(started, { type: "source/changed", info: folder("/n"), message: "切替" });
@@ -565,10 +581,22 @@ describe("merge 系", () => {
 
   it("merge/fail は実行中を解除してエラー通知", () => {
     const started = reducer(withEngine, { type: "merge/start", mode: "full", groupId: 2 });
-    const next = reducer(started, { type: "merge/fail", message: "err" });
+    const next = reducer(started, { type: "merge/fail", groupId: 2, generation: 0, message: "err" });
     expect(next.mergeMode).toBeNull();
     expect(next.mergingGroupId).toBeNull();
     expect(next.noticeTone).toBe("error");
+  });
+
+  it("古い世代/別groupのmerge/failは現在のbusyとnoticeを変えない", () => {
+    const started = reducer(withEngine, { type: "merge/start", mode: "full", groupId: 2 });
+    const switched = reducer(started, { type: "source/changed", info: folder("/n"), message: "切替" });
+    const newStarted = reducer(switched, { type: "merge/start", mode: "preview", groupId: 2 });
+    const stale = reducer(newStarted, { type: "merge/fail", groupId: 2, generation: 0, message: "old" });
+    expect(stale).toBe(newStarted);
+    expect(stale.mergeMode).toBe("preview");
+    expect(stale.notice).toBe(newStarted.notice);
+    const wrongGroup = reducer(newStarted, { type: "merge/fail", groupId: 99, generation: 1, message: "old group" });
+    expect(wrongGroup).toBe(newStarted);
   });
 
   it("merge/toggleFrame は撮影順を保って選択を作り直す（既定は全フレーム）", () => {

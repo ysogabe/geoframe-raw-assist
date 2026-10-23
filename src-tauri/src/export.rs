@@ -19,9 +19,10 @@ static NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 pub struct ExportItem {
-    capture_id: String,
-    variant: String,
-    developed_filename: Option<String>,
+    pub(crate) capture_id: String,
+    pub(crate) variant: String,
+    pub(crate) developed_filename: Option<String>,
+    pub(crate) merged_filename: Option<String>,
 }
 
 pub(crate) fn normalize_batch_name(raw: &str) -> Result<String, String> {
@@ -184,6 +185,183 @@ fn developed(
     Ok(Some((image, recipe)))
 }
 
+/// 本合成だけを読み込む。プレビュー側のディレクトリとレシピ両方を確認し、
+/// レシピ内の全 RAW が現在の現像元ルート直下にあることを再検証する。
+fn merged(
+    data: &Path,
+    root: &Path,
+    id: &str,
+    filename: &str,
+) -> Result<Option<(PathBuf, Value)>, String> {
+    if filename.contains(['/', '\\', '\0'])
+        || filename.contains("..")
+        || !filename.ends_with(".jpg")
+    {
+        return Err("合成済みファイル名が不正です。".into());
+    }
+    let core = data.join("coreimage");
+    let full = core.join("merged");
+    let preview = core.join("merged_preview");
+    for (dir, expected) in [(&core, data), (&full, &core), (&preview, &core)] {
+        if let Ok(metadata) = fs::symlink_metadata(dir) {
+            if !metadata.file_type().is_dir()
+                || dir.canonicalize().map_err(io_error)?.parent() != Some(expected)
+            {
+                return Err("Core Image 合成フォルダが不正です。".into());
+            }
+        }
+    }
+    let Some(image) = source_file(&full, filename)? else {
+        if source_file(&preview, filename)?.is_some() {
+            return Err("プレビュー品質の画像は書き出せません。".into());
+        }
+        return Ok(None);
+    };
+    let recipe_name = Path::new(filename).with_extension("json");
+    let recipe_path = source_file(&full, recipe_name.to_str().ok_or("レシピ名が不正です。")?)?
+        .ok_or("合成レシピがありません。")?;
+    let recipe: Value = serde_json::from_slice(&fs::read(recipe_path).map_err(io_error)?)
+        .map_err(|error| format!("合成レシピを読めません: {error}"))?;
+    if recipe["ok"] != true
+        || recipe["kind"] != "exposure_fusion"
+        || recipe["preview"] != false
+        || recipe["request"]["mode"] != "merge"
+        || recipe["request"].get("max_edge").is_some()
+    {
+        return Err("本合成のレシピではありません。".into());
+    }
+    let image_size = fs::metadata(&image).map_err(io_error)?.len();
+    let expected_size = recipe["output_size"].as_u64();
+    let expected_hash = recipe["output_sha256"].as_str();
+    if image_size == 0
+        || expected_size != Some(image_size)
+        || expected_hash.is_none_or(|hash| {
+            hash.len() != 64
+                || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || sha256(&image).ok().as_deref() != Some(hash)
+        })
+    {
+        return Err("合成JPEGがレシピに記録された出力と一致しません。".into());
+    }
+    let ids = recipe["capture_ids"]
+        .as_array()
+        .ok_or("合成レシピに capture_ids がありません。")?;
+    if !(2..=9).contains(&ids.len())
+        || ids.iter().any(|value| {
+            value.as_str().map_or(true, |capture| {
+                !crate::coreimage::is_valid_capture_id(capture)
+            })
+        })
+    {
+        return Err("合成レシピの capture_ids が不正です。".into());
+    }
+    let id_values: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+    let mut sorted = id_values.clone();
+    sorted.sort_unstable();
+    if id_values != sorted
+        || id_values.windows(2).any(|pair| pair[0] == pair[1])
+        || id_values.first().copied() != Some(id)
+    {
+        return Err("合成レシピの先頭IDまたは順序が一致しません。".into());
+    }
+    let prefix = format!("{id}-merged{}-", ids.len());
+    let hash_suffix = filename
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(".jpg"))
+        .ok_or("合成済みファイル名のIDまたは枚数が一致しません。")?;
+    let mut segments = hash_suffix.rsplitn(2, '-');
+    let hash = segments.next().unwrap_or_default();
+    let filename_preset = segments.next().unwrap_or_default();
+    if hash.len() != 10
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || filename_preset.is_empty()
+        || recipe["params_hash"].as_str() != Some(hash)
+        || recipe["preset"]["name"].as_str() != Some(filename_preset)
+    {
+        return Err("合成済みファイル名のプリセットまたはハッシュが不正です。".into());
+    }
+    let source_root = recipe["source_root"]
+        .as_str()
+        .ok_or("合成レシピに現像元フォルダがありません。")?;
+    if Path::new(source_root).canonicalize().map_err(io_error)? != root {
+        return Err("現像元フォルダが一致しません。".into());
+    }
+    let inputs = recipe["request"]["inputs"]
+        .as_array()
+        .ok_or("合成レシピに入力RAWがありません。")?;
+    if inputs.len() != id_values.len() {
+        return Err("合成レシピの入力数が一致しません。".into());
+    }
+    for (input_value, capture_id) in inputs.iter().zip(id_values) {
+        let input = input_value
+            .as_str()
+            .ok_or("合成レシピの入力RAWが不正です。")?;
+        let current = crate::coreimage::resolve_arw(root, capture_id)
+            .map_err(|_| "合成レシピのRAWが現像元フォルダにありません。")?;
+        let input_path = Path::new(input).canonicalize().map_err(io_error)?;
+        if input_path.parent() != Some(root) || input_path != current {
+            return Err("合成レシピのRAWが現像元フォルダまたは撮影IDと一致しません。".into());
+        }
+    }
+    let requested_output = recipe["request"]["output"]
+        .as_str()
+        .ok_or("合成レシピに出力先がありません。")?;
+    if Path::new(requested_output)
+        .canonicalize()
+        .map_err(io_error)?
+        != image
+    {
+        return Err("合成レシピの出力先が一致しません。".into());
+    }
+    Ok(Some((image, recipe)))
+}
+
+fn copy_verified_merged(
+    source: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+    destination: &Path,
+) -> Result<String, String> {
+    let mut copied_hash = None;
+    atomic_write(destination, |out| {
+        let mut input = fs::File::open(source).map_err(io_error)?;
+        let metadata = input.metadata().map_err(io_error)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 65536];
+        let mut size = 0u64;
+        loop {
+            let count = input.read(&mut buffer).map_err(io_error)?;
+            if count == 0 {
+                break;
+            }
+            size = size
+                .checked_add(count as u64)
+                .ok_or("合成JPEGのサイズが不正です。")?;
+            hasher.update(&buffer[..count]);
+            out.write_all(&buffer[..count]).map_err(io_error)?;
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        if size != expected_size || hash != expected_hash {
+            return Err("合成JPEGがレシピに記録された出力と一致しません。".into());
+        }
+        out.set_permissions(metadata.permissions())
+            .map_err(io_error)?;
+        let mut times = fs::FileTimes::new();
+        if let Ok(t) = metadata.modified() {
+            times = times.set_modified(t);
+        }
+        if let Ok(t) = metadata.accessed() {
+            times = times.set_accessed(t);
+        }
+        out.set_times(times).map_err(io_error)?;
+        copied_hash = Some(hash);
+        Ok(())
+    })?;
+    copied_hash.ok_or_else(|| "合成JPEGを書き出せませんでした。".into())
+}
+
 fn relative(path: &Path, base: &Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)
@@ -191,7 +369,11 @@ fn relative(path: &Path, base: &Path) -> String {
         .into_owned()
 }
 
-fn export_batch(data: &Path, batch: &str, items: Vec<ExportItem>) -> Result<Value, String> {
+pub(crate) fn export_batch(
+    data: &Path,
+    batch: &str,
+    items: Vec<ExportItem>,
+) -> Result<Value, String> {
     let _guard = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let batch = normalize_batch_name(batch)?;
     if items.is_empty() || items.len() > 500 {
@@ -232,10 +414,23 @@ fn export_batch(data: &Path, batch: &str, items: Vec<ExportItem>) -> Result<Valu
                     None => (None, Value::Null, name),
                 }
             }
-            _ => return Err("variant は camera_jpg / developed を指定してください。".into()),
+            "merged" => {
+                let name = item
+                    .merged_filename
+                    .ok_or("合成済みファイル名を指定してください。")?;
+                match merged(&data, &root, &id, &name)? {
+                    Some((p, recipe)) => (Some(p), recipe, name),
+                    None => (None, Value::Null, name),
+                }
+            }
+            _ => {
+                return Err(
+                    "variant は camera_jpg / developed / merged を指定してください。".into(),
+                )
+            }
         };
         let Some(source) = source else {
-            skipped.push(json!({"capture_id":id,"reason":if item.variant == "camera_jpg" {"元のJPGが見つかりません。"} else {"現像済みJPEGが見つかりません。"}}));
+            skipped.push(json!({"capture_id":id,"reason":if item.variant == "camera_jpg" {"元のJPGが見つかりません。"} else if item.variant == "merged" {"合成済みJPEGが見つかりません。"} else {"現像済みJPEGが見つかりません。"}}));
             continue;
         };
         if !names.insert(name.clone()) {
@@ -250,30 +445,51 @@ fn export_batch(data: &Path, batch: &str, items: Vec<ExportItem>) -> Result<Valu
         });
         let photo = analysis["photos"].get(&id).or(fallback.as_ref());
         let exif = photo.map(|p| json!({"captured_at":p["captured_at"],"iso":p["iso"],"lens_model":p["lens_model"],"focal_length":p["focal_length"]}));
-        manifest_items.push(json!({"capture_id":id,"variant":item.variant,"exported_file":name,"exported_sha256":sha256(&source)?,"source":{"jpg":jpg.as_ref().map(|p|relative(p,&manifest_base)),"arw":arw.as_ref().map(|p|relative(p,&manifest_base)),"jpg_sha256":jpg.as_ref().map(|p|sha256(p)).transpose()?},"recipe":recipe,"group":group,"exif":exif}));
-        copies.push((source, name));
+        let merged_fingerprint = if item.variant == "merged" {
+            Some((
+                recipe["output_size"]
+                    .as_u64()
+                    .ok_or("合成レシピの出力サイズが不正です。")?,
+                recipe["output_sha256"]
+                    .as_str()
+                    .ok_or("合成レシピの出力指紋が不正です。")?
+                    .to_owned(),
+            ))
+        } else {
+            None
+        };
+        let exported_sha256 = match merged_fingerprint.as_ref() {
+            Some((_, hash)) => hash.clone(),
+            None => sha256(&source)?,
+        };
+        manifest_items.push(json!({"capture_id":id,"variant":item.variant,"exported_file":name,"exported_sha256":exported_sha256,"source":{"jpg":jpg.as_ref().map(|p|relative(p,&manifest_base)),"arw":arw.as_ref().map(|p|relative(p,&manifest_base)),"jpg_sha256":jpg.as_ref().map(|p|sha256(p)).transpose()?},"recipe":recipe,"group":group,"exif":exif}));
+        copies.push((source, name, merged_fingerprint));
     }
     let export_root = real_dir(&data, "export")?;
     let destination = real_dir(&export_root, &batch)?;
     let mut files = Vec::new();
-    for (source, name) in copies {
+    for (source, name, merged_fingerprint) in copies {
         let target = destination.join(name);
-        atomic_write(&target, |out| {
-            let mut input = fs::File::open(source).map_err(io_error)?;
-            let metadata = input.metadata().map_err(io_error)?;
-            std::io::copy(&mut input, out).map_err(io_error)?;
-            out.set_permissions(metadata.permissions())
-                .map_err(io_error)?;
-            let mut times = fs::FileTimes::new();
-            if let Ok(t) = metadata.modified() {
-                times = times.set_modified(t);
-            }
-            if let Ok(t) = metadata.accessed() {
-                times = times.set_accessed(t);
-            }
-            out.set_times(times).map_err(io_error)?;
-            Ok(())
-        })?;
+        if let Some((expected_size, expected_hash)) = merged_fingerprint {
+            copy_verified_merged(&source, expected_size, &expected_hash, &target)?;
+        } else {
+            atomic_write(&target, |out| {
+                let mut input = fs::File::open(source).map_err(io_error)?;
+                let metadata = input.metadata().map_err(io_error)?;
+                std::io::copy(&mut input, out).map_err(io_error)?;
+                out.set_permissions(metadata.permissions())
+                    .map_err(io_error)?;
+                let mut times = fs::FileTimes::new();
+                if let Ok(t) = metadata.modified() {
+                    times = times.set_modified(t);
+                }
+                if let Ok(t) = metadata.accessed() {
+                    times = times.set_accessed(t);
+                }
+                out.set_times(times).map_err(io_error)?;
+                Ok(())
+            })?;
+        }
         files.push(target.to_string_lossy().into_owned());
     }
     let manifest = json!({"manifest_version":1,"app":"geoframe-raw-assist","batch_name":batch,"created_at":chrono::Utc::now().to_rfc3339(),"source_root":relative(&root,&manifest_base),"items":manifest_items});
@@ -352,8 +568,11 @@ mod tests {
             .unwrap();
             fs::write(root.join("DSC00001.JPG"), b"original\0JPEG\xffEXIF GPS").unwrap();
             fs::write(root.join("DSC00001.ARW"), b"RAW").unwrap();
+            fs::write(root.join("DSC00002.ARW"), b"RAW2").unwrap();
             fs::create_dir_all(data.join("coreimage/full")).unwrap();
             fs::create_dir_all(data.join("coreimage/preview")).unwrap();
+            fs::create_dir_all(data.join("coreimage/merged")).unwrap();
+            fs::create_dir_all(data.join("coreimage/merged_preview")).unwrap();
             Self { data, root }
         }
         fn recipe(&self) -> Value {
@@ -371,11 +590,30 @@ mod tests {
             )
             .unwrap();
         }
+        fn merged_filename(&self) -> &'static str {
+            "DSC00001-merged2-neutral_recovery-0123456789.jpg"
+        }
+        fn merged_recipe(&self, inputs: Value) -> Value {
+            json!({
+                "ok":true,"kind":"exposure_fusion","preview":false,"params_hash":"0123456789",
+                "output_size":b"synthetic merged JPEG".len(),
+                "output_sha256":format!("{:x}", Sha256::digest(b"synthetic merged JPEG")),
+                "capture_ids":["DSC00001","DSC00002"],"source_root":self.root,
+                "preset":{"name":"neutral_recovery","label":"階調回復"},
+                "request":{"mode":"merge","inputs":inputs,"output":self.data.join("coreimage/merged").join(self.merged_filename())}
+            })
+        }
+        fn save_merged(&self, filename: &str, recipe: Value) {
+            let image = self.data.join("coreimage/merged").join(filename);
+            fs::write(&image, b"synthetic merged JPEG").unwrap();
+            fs::write(image.with_extension("json"), recipe.to_string()).unwrap();
+        }
         fn item(&self, variant: &str) -> ExportItem {
             ExportItem {
                 capture_id: " dsc00001 ".into(),
                 variant: variant.into(),
                 developed_filename: Some("DSC00001_hash.jpg".into()),
+                merged_filename: None,
             }
         }
         fn run(&self, variant: &str) -> Result<Value, String> {
@@ -441,6 +679,161 @@ mod tests {
             serde_json::from_slice(&fs::read(response["manifest_path"].as_str().unwrap()).unwrap())
                 .unwrap();
         assert_eq!(manifest["items"][0]["recipe"], recipe);
+    }
+
+    #[test]
+    fn exports_only_verified_full_merged_recipe() {
+        let f = Fixture::new();
+        let filename = f.merged_filename();
+        let recipe = f.merged_recipe(json!([
+            f.root.join("DSC00001.ARW"),
+            f.root.join("DSC00002.ARW")
+        ]));
+        f.save_merged(filename, recipe.clone());
+        let mut item = f.item("merged");
+        item.merged_filename = Some(filename.into());
+        let response = export_batch(&f.data, "merged", vec![item]).unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(response["manifest_path"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(manifest["items"][0]["variant"], "merged");
+        assert_eq!(manifest["items"][0]["recipe"], recipe);
+        let exported = Path::new(response["files"][0].as_str().unwrap());
+        assert_eq!(fs::read(exported).unwrap(), b"synthetic merged JPEG");
+        assert_eq!(
+            manifest["items"][0]["exported_sha256"],
+            recipe["output_sha256"]
+        );
+        assert_eq!(
+            manifest["items"][0]["exported_sha256"],
+            sha256(exported).unwrap()
+        );
+        assert_eq!(
+            manifest["items"][0]["source"]["arw"],
+            json!(f.root.join("DSC00001.ARW").to_string_lossy())
+        );
+        assert!(manifest["items"][0]["exif"].get("gps").is_none());
+
+        let image = f.data.join("coreimage/merged").join(filename);
+        let export_rejects_modified = || {
+            let mut item = f.item("merged");
+            item.merged_filename = Some(filename.into());
+            export_batch(&f.data, "merged-mutated", vec![item])
+        };
+        fs::write(&image, b"changed merged bytes").unwrap();
+        assert!(
+            export_rejects_modified().is_err(),
+            "changed JPEG must be rejected"
+        );
+        fs::write(&image, []).unwrap();
+        assert!(
+            export_rejects_modified().is_err(),
+            "empty JPEG must be rejected"
+        );
+    }
+
+    #[test]
+    fn merged_copy_rejects_source_replacement_after_resolution_atomically() {
+        let f = Fixture::new();
+        let filename = f.merged_filename();
+        let recipe = f.merged_recipe(json!([
+            f.root.join("DSC00001.ARW"),
+            f.root.join("DSC00002.ARW")
+        ]));
+        f.save_merged(filename, recipe.clone());
+        let source = merged(&f.data, &f.root, "DSC00001", filename)
+            .unwrap()
+            .unwrap()
+            .0;
+        let replacement = source.with_extension("replacement");
+        fs::write(&replacement, b"replacement bytes").unwrap();
+        fs::rename(&replacement, &source).unwrap();
+
+        fs::create_dir_all(f.data.join("export")).unwrap();
+        let destination = f.data.join("export/should-not-exist.jpg");
+        let error = copy_verified_merged(
+            &source,
+            recipe["output_size"].as_u64().unwrap(),
+            recipe["output_sha256"].as_str().unwrap(),
+            &destination,
+        )
+        .unwrap_err();
+        assert!(error.contains("合成JPEGがレシピに記録された出力と一致しません"));
+        assert!(
+            !destination.exists(),
+            "mismatched bytes must not be renamed"
+        );
+        assert!(!f.data.join("export/manifest.json").exists());
+        assert!(fs::read_dir(f.data.join("export"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+    }
+
+    #[test]
+    fn rejects_merged_preview_and_spoofed_recipe_identity() {
+        let f = Fixture::new();
+        let filename = f.merged_filename();
+        let valid_inputs = json!([f.root.join("DSC00001.ARW"), f.root.join("DSC00002.ARW")]);
+
+        let mut preview = f.merged_recipe(valid_inputs.clone());
+        preview["preview"] = json!(true);
+        f.save_merged(filename, preview);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut wrong_lead = f.merged_recipe(valid_inputs.clone());
+        wrong_lead["capture_ids"][0] = json!("DSC00002");
+        f.save_merged(filename, wrong_lead);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut wrong_count = f.merged_recipe(valid_inputs.clone());
+        wrong_count["capture_ids"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("DSC00003"));
+        f.save_merged(filename, wrong_count);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut outside = f.merged_recipe(json!([
+            f.root.join("DSC00001.ARW"),
+            f.data.join("outside.ARW")
+        ]));
+        fs::write(f.data.join("outside.ARW"), b"outside").unwrap();
+        outside["capture_ids"][1] = json!("DSC00002");
+        f.save_merged(filename, outside);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut unsorted = f.merged_recipe(valid_inputs.clone());
+        unsorted["capture_ids"] = json!(["DSC00002", "DSC00001"]);
+        f.save_merged(filename, unsorted);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut duplicate = f.merged_recipe(valid_inputs.clone());
+        duplicate["capture_ids"] = json!(["DSC00001", "DSC00001"]);
+        f.save_merged(filename, duplicate);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        let mut edge = f.merged_recipe(valid_inputs.clone());
+        edge["request"]["max_edge"] = json!(2400);
+        f.save_merged(filename, edge);
+        assert!(merged(&f.data, &f.root, "DSC00001", filename).is_err());
+
+        assert!(merged(&f.data, &f.root, "DSC00002", filename).is_err());
+        let wrong_count = "DSC00001-merged3-neutral_recovery-0123456789.jpg";
+        f.save_merged(wrong_count, f.merged_recipe(valid_inputs));
+        assert!(merged(&f.data, &f.root, "DSC00001", wrong_count).is_err());
+    }
+
+    #[test]
+    fn rejects_symlinked_merged_output_directory() {
+        let f = Fixture::new();
+        let moved = f.data.join("merged-real");
+        fs::rename(f.data.join("coreimage/merged"), &moved).unwrap();
+        symlink(&moved, f.data.join("coreimage/merged")).unwrap();
+        assert!(merged(&f.data, &f.root, "DSC00001", f.merged_filename()).is_err());
     }
 
     #[test]
