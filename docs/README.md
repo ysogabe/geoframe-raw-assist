@@ -25,6 +25,7 @@
 | [design/coreimage-preset-retune.md](design/coreimage-preset-retune.md) | 11 プリセットを Core Image 向けに再調整し、`highlight_recovery` を露出とシャドウ持ち上げへ写像する設計（Issue #81） |
 | [design/single-app-implementation-plan.md](design/single-app-implementation-plan.md) | Python 無しの単一アプリへ段階的に移行する実装プラン（マイルストーン M0〜M4 と各 Issue の範囲） |
 | [design/evaluation-before-python-removal.md](design/evaluation-before-python-removal.md) | Python 本体を削除する前に評価経路を独立させる実施順と検収条件 |
+| [design/coreimage-candidate-native-roi-plan.md](design/coreimage-candidate-native-roi-plan.md) | #57 の次の実装計画。回帰用CI基準の再確保、最終候補の原寸ROI診断、素材追加後の較正と採否への接続 |
 
 ## 開発者向け
 
