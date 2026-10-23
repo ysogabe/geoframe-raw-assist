@@ -13,7 +13,7 @@ Retained after the Python app removal (#90 / #117), with no local_raw / rawpy / 
 
 Regeneration (full run or ``--sections``) re-runs the old Python engine and is an
 explicit archival opt-in: ``--legacy-generate`` on a checkout that still has
-``local_raw/`` and the requirements-raw.txt environment (docs/evaluation-paths.md).
+``local_raw/`` and the requirements-raw.txt environment (docs/development/evaluation-paths.md).
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from evaluation import frozen, legacy  # noqa: E402
 # Old-engine modules, loaded only by load_legacy() for --legacy-generate.
 analysis = bracket = config = dc = export = build_inherited_exif = compare = evaluate = None
 
-DEFAULT_SOURCE = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
+DEFAULT_SOURCE = Path(__file__).resolve().parents[1] / 'work' / 'raw'
 FIXTURES = ROOT / 'tests/fixtures/baseline'
 WORK = ROOT / 'work/baseline'
 # EXIF values outside this camera/technical allowlist are hashed too: arbitrary
@@ -418,7 +418,8 @@ def main(argv=None):
     run('bracket', freeze_bracket)
     run('manifest', lambda: freeze_manifest(source, result, rows))
     dump(FIXTURES / 'provenance.json', {
-        'source_root': str(source), 'source_files': [
+        'source_root': (str(source.resolve().relative_to(ROOT)) if source.resolve().is_relative_to(ROOT)
+                        else f'<external>/{source.name}'), 'source_files': [
             {'name': path.name, 'sha256': sha(path)} for path in sorted(source.iterdir())
             if path.suffix.lower() in ('.arw', '.jpg')],
         'python': platform.python_version(), 'platform': platform.platform(),

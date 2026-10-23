@@ -221,7 +221,7 @@ Python 環境はこの時点では `npm run setup:raw` で作れる。凍結物�
 | 凍結するもの | 使う Issue |
 |---|---|
 | 代表フォルダ（星空 11 組を含む、#86 の記述）の Python `analysis.json` と `source_signature` | N-C1（EXIF・グループ）、N-C2（採点・推薦の数値一致） |
-| 実機 Sony JPEG（GPS IFD を持つもの。`docs/spikes-wave0.md:125` の根拠ファイル）の `build_inherited_exif` 出力のタグ一覧（タグ ID と値を JSON 化。画像はコミットしない） | N-A（EXIF 継承の受け入れ基準） |
+| 実機 Sony JPEG（GPS IFD を持つもの。`docs/reports/spikes-wave0.md:125` の根拠ファイル）の `build_inherited_exif` 出力のタグ一覧（タグ ID と値を JSON 化。画像はコミットしない） | N-A（EXIF 継承の受け入れ基準） |
 | `scripts/compare_engines.py` の rawpy 基準画像（preview と **full** の両方。ADR 0002 決定 4 の OS 更新回帰用。#90 に記載済み） | N-A（原寸較正）、#90 |
 | #86 のフィクスチャ（固定入力 PNG に対する `_image_metrics` / `_star_measurements` / `pareto_front` の JSON） | #86 |
 | `scripts/eval_cases/candidates_baseline.json` の Python 経路出力（候補の adjustments と指標） | #87 |

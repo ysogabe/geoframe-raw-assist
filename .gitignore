@@ -2,21 +2,9 @@
 
 # dependencies
 /node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
 
 # testing
 /coverage
-
-# next.js
-/.next/
-/.vinext/
-/out/
 
 # misc
 .DS_Store
@@ -31,13 +19,8 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
-# vercel
-.vercel
-
 # typescript
-next-env.d.ts
 /dist/
-/.wrangler/
 /outputs/
 /work/
 /sample/
@@ -47,9 +30,6 @@ __pycache__/
 *.py[cod]
 /.claude/
 /.serena/
-
-# Google Drive OAuth client secret (personal, not for source control)
-/local_raw/drive_client_secret.json
 
 # 旧Python版が作った設定・出力が残る場合の誤コミット防止。
 # 3 プラットフォーム分の行き先をすべて塞ぐ（macOS / Linux / Windows）。
@@ -62,3 +42,9 @@ __pycache__/
 
 # Core Image CLI の Tauri externalBin（scripts/build-coreimage-cli.sh が生成）
 /src-tauri/binaries/
+
+# エージェント・エディタの個人設定（手元にだけ置く）
+/CLAUDE.md
+/AGENTS.md
+/.omp/
+/.playwright-mcp/

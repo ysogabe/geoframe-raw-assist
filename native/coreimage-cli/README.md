@@ -3,7 +3,7 @@
 Sony α6400 の ARW を macOS 標準の `CIRAWFilter`（Core Image RAW）で現像し、JPEG / 16bit TIFF に書き出す
 単体 CLI。現行の rawpy エンジン（`local_raw/engine.py`）との比較材料を作るための PoC（Issue #65）。
 設計判断の根拠は [`docs/adr/0001-coreimage-raw-poc.md`](../../docs/adr/0001-coreimage-raw-poc.md)、
-現行 Adjustments との対応は [`docs/coreimage-parameter-mapping.md`](../../docs/coreimage-parameter-mapping.md)。
+現行 Adjustments との対応は [`docs/development/coreimage-parameter-mapping.md`](../../docs/development/coreimage-parameter-mapping.md)。
 
 ## 必要環境
 
@@ -28,7 +28,7 @@ toolchain が無い機で再生成が要るときは `xcodebuild -downloadCompon
 
 スモークテストは `/Volumes/Backup/100MSDCF/DSC04430.ARW`（横位置）/ `DSC04553.ARW`（縦位置, Orientation=8）が
 読めるときだけ走り、無ければ skip される。個別上書き（下記）のスモークは、上記か星空サンプル
-（`~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
+（リポジトリの `work/raw/DSC07415.arw`）か環境変数 `GEOFRAME_CI_SMOKE_ARW` の ARW のうち
 最初に読めるものを使う。診断モード（0.4.0）のスモークのうち線形読み出し・`baseline_exposure`・`linear_space_filter` の確認は
 明るい空のカット `/Volumes/Backup/100MSDCF/DSC04705.ARW`（または環境変数 `GEOFRAME_CI_DIAG_ARW`）が読めるときだけ走る。
 テストの出力は一時ディレクトリに書き、入力 ARW には書き込まない。
@@ -351,7 +351,7 @@ echo '{"input":"/Volumes/Backup/100MSDCF/DSC04705.ARW","output":"'$PWD'/work/dia
 
 `settings.exposure_ev` は非nullで指定すると値が0でも拒否する。これは既存のadjustments排他契約（キーを指定しないこと）に合わせたもの。0固定なのは `adjustments.exposure` と `adjustments.highlight_recovery` で、`settings.exposure_ev` の0指定を受け付ける意味ではない。
 
-9個のハードリンクを使った同一画像9枚の24 MP原寸smokeでは、57.63秒、maximum RSS 3.28 GiB、peak footprint 3.41 GiBを計測した。これは資源検証であり、ブラケット画質の検証ではない。実AEB / 三脚長秒RAWが無いため実写画質確認は未完了で、Issue #83を閉じる確認に残す。測定条件・CLIとの差分は [`docs/coreimage-merge-mode-report.md`](../../docs/coreimage-merge-mode-report.md) を参照。
+9個のハードリンクを使った同一画像9枚の24 MP原寸smokeでは、57.63秒、maximum RSS 3.28 GiB、peak footprint 3.41 GiBを計測した。これは資源検証であり、ブラケット画質の検証ではない。実AEB / 三脚長秒RAWが無いため実写画質確認は未完了で、Issue #83を閉じる確認に残す。測定条件・CLIとの差分は [`docs/reports/coreimage-merge-mode-report.md`](../../docs/reports/coreimage-merge-mode-report.md) を参照。
 
 ## レスポンス（stdout に JSON 1 行）
 
@@ -448,7 +448,7 @@ printf '%s\n' '{"input":"/abs/a.ARW","output":"/abs/work/a.jpg","mode":"preview"
 
 PSO（現像候補の自動生成）は、同じ RAW に対して後段の調整（lift・brightness・contrast・saturation・sharpness > 1）だけを変えた
 小さなレンダを数十〜数百回繰り返す。毎回 RAW をデコードする（約 0.5 秒）代わりに、1 回デコードした結果を `--batch` の
-プロセス内に保持して後段だけを繰り返す（設計: `docs/coreimage-small-render-performance.md` §5.2・§5.3）。
+プロセス内に保持して後段だけを繰り返す（設計: `docs/reports/coreimage-small-render-performance.md` §5.2・§5.3）。
 
 リクエストの行に `op` を足す。**`op` が無い行は従来どおり 1 件の現像**（動作は 0.6.0 と同じ。出力画素は 0.6.0 とバイト一致。
 `op` を持つ行が 0.6.0 では「未知のキー」だったので、これまでエラーだった行だけが意味を持つようになった）。
@@ -582,7 +582,7 @@ for i in {1..30}; do req ${inputs[$i]} b-$i; done >| $OUT/batch.jsonl
 
 - 追記（Issue #102）: 上の 640px の 1 件 1.4 秒の大半（約 0.9 秒）は、SMB 上（`/Volumes/Backup` は smbfs）の ARW を毎回パスから
   読んでいたことによる。同じファイルをローカルに置くかメモリから渡すと 1 件約 0.5 秒。段階別の内訳・draft mode・埋め込み
-  プレビュー・デコード結果の使い回しの比較は `docs/coreimage-small-render-performance.md`。
+  プレビュー・デコード結果の使い回しの比較は `docs/reports/coreimage-small-render-performance.md`。
 
 ### 計測フック（`GEOFRAME_CI_TIMING`、Issue #102）
 

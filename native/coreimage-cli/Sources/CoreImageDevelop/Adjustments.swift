@@ -66,7 +66,7 @@ public struct Adjustments: Equatable {
 // MARK: - 撮影時シャープ（rawpy の _capture_sharpen_params の移植）
 
 /// 旧 local_raw/engine.py（e838ecc。削除済み）の撮影時シャープ定数（値はそのまま移植。旧エンジンは
-/// もう無いので、変えるときは凍結基準との比較 docs/evaluation-paths.md で差を確かめること）。
+/// もう無いので、変えるときは凍結基準との比較 docs/development/evaluation-paths.md で差を確かめること）。
 public enum RawpySharpen {
     public static let smallEdge = 2000.0
     public static let largeEdge = 4000.0

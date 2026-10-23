@@ -1,10 +1,10 @@
 [package]
 name = "geoframe-raw-assist"
 version = "0.1.0"
-description = "GeoFrame RAW Assist desktop shell"
-authors = ["GeoFrame RAW Assist"]
-license = ""
-repository = ""
+description = "GeoFrame RAW Assist: macOS app that assists culling and RAW development of travel photos"
+authors = ["Yoshio Sogabe"]
+license = "MIT"
+repository = "https://github.com/ysogabe/geoframe-raw-assist"
 edition = "2021"
 rust-version = "1.77.2"
 

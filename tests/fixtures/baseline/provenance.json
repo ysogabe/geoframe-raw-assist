@@ -99,7 +99,7 @@
       "sha256": "e0ac61f1bd7cb8126d1c8cc135e429087e7a821b1c7869a9cc5edddd8d862742"
     }
   ],
-  "source_root": "/Users/yoshio/works/60-misc/40-raw-assistant/work/raw",
+  "source_root": "work/raw",
   "timings_seconds": {
     "analysis": 0.649,
     "bracket": 0.094,

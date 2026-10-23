@@ -19,7 +19,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work/exif-108/rust"
-SOURCE = Path("/Users/yoshio/works/60-misc/40-raw-assistant/work/raw")
+SOURCE = ROOT / "work/raw"
 IFDS = {34665, 34853, 40965}
 PUBLIC_TAGS = {256, 257, 258, 259, 262, 271, 272, 274, 277, 282, 283, 296,
                305, 306, 513, 514, 529, 530, 531, 33434, 33437, 34850, 34855,

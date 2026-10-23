@@ -229,7 +229,7 @@ func millis(_ start: DispatchTime, _ end: DispatchTime) -> Double {
 /// 段階別の計時（Issue #102）。環境変数 `GEOFRAME_CI_TIMING=1` のときだけ、1 件ごとに stderr へ 1 行書く。
 /// stdout の応答 JSON・出力画像には一切影響しない（時刻を取るだけ）。Core Image は遅延評価なので、
 /// RAW のデコード・デモザイク・レンズ補正・後段カーネルはすべて `render`（CIContext のレンダ）に入る。
-/// 段階をさらに分けた計測は docs/coreimage-small-render-performance.md と scripts/coreimage-small-decode/。
+/// 段階をさらに分けた計測は docs/reports/coreimage-small-render-performance.md と scripts/coreimage-small-decode/。
 public enum StageTiming {
     public static let environmentKey = "GEOFRAME_CI_TIMING"
     public static let enabled = ProcessInfo.processInfo.environment[environmentKey] == "1"

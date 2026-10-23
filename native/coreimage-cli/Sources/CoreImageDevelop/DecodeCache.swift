@@ -1,7 +1,7 @@
 import CoreImage
 import Foundation
 
-// `--batch` の decode キャッシュ op（CLI 0.7.0、Issue #116。設計 docs/coreimage-small-render-performance.md §5.3）。
+// `--batch` の decode キャッシュ op（CLI 0.7.0、Issue #116。設計 docs/reports/coreimage-small-render-performance.md §5.3）。
 //
 // - `op: decode`  デコード段（RAW フィルタ・レンズ補正・デコーダ設定）だけを実行し、結果の RGBAh ビットマップを
 //                  プロセス内に保持してハンドルを返す。

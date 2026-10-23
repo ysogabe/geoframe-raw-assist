@@ -8,7 +8,7 @@
 CI の受け入れ判定には使わない（summary の ``acceptance``）。
 
 **旧経路（アーカイブ、``--legacy-rawpy`` の明示 opt-in）**: 以下は ``local_raw`` と rawpy が残る
-checkout でだけ動く旧 rawpy 候補生成の評価（docs/evaluation-paths.md）。
+checkout でだけ動く旧 rawpy 候補生成の評価（docs/development/evaluation-paths.md）。
 
 候補生成は ARW を ``half_size`` デコードした代理画像で指標を計算する。このスクリプトは
 各候補の調整値で **本番相当の実RAW現像**（full-size デコード → レンズ補正 →

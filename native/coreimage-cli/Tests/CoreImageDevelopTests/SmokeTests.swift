@@ -7,6 +7,10 @@ import XCTest
 
 /// 実 ARW がある環境でだけ走るスモークテスト（無ければ skip）。入力は読むだけ。
 final class SmokeTests: XCTestCase {
+    /// リポジトリルート（このファイルから 5 階層上）。星空サンプルはここからの `work/raw` を指す。
+    private static let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
     static let landscape = "/Volumes/Backup/100MSDCF/DSC04430.ARW"
     static let portrait = "/Volumes/Backup/100MSDCF/DSC04553.ARW"
     /// 個別上書き（#79）のスモーク用。外付けボリュームが無い環境でも走るよう、星空サンプル
@@ -15,7 +19,7 @@ final class SmokeTests: XCTestCase {
     static let highISOCandidates = [
         ProcessInfo.processInfo.environment["GEOFRAME_CI_SMOKE_ARW"],
         "/Volumes/Backup/100MSDCF/DSC04430.ARW",
-        NSString(string: "~/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw").expandingTildeInPath,
+        repoRoot.appendingPathComponent("work/raw/DSC07415.arw").path,
     ].compactMap { $0 }
 
     private var directory: URL!

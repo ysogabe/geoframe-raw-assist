@@ -707,7 +707,7 @@ pub(crate) mod tests {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let work = project.join("work/exif-108/rust");
         let developed = fs::read(work.join("synthetic.jpg")).unwrap();
-        let source = Path::new("/Users/yoshio/works/60-misc/40-raw-assistant/work/raw");
+        let source = project.join("work/raw");
         let mut count = 0;
         for path in fs::read_dir(source)
             .unwrap()

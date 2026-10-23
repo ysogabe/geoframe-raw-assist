@@ -291,7 +291,7 @@ pub(crate) fn read_exif(path: &Path, capture_id: &str, width: u32, height: u32) 
 /// `(元の幅, 元の高さ, スケール後の RGB 画像)` を返す。libjpeg 系の DCT スケールなので
 /// 24MP でも全画素のデコードより数倍速い。PIL と出力寸法は同じだが、画素は一致しない。
 /// jpeg-decoder 0.3.2 は 1x1 IDCT を切り捨て、全成分に同じ DCT スケールを適用する。
-/// 比較結果と許容差からの逸脱は docs/analysis-scoring-validation.md を参照。
+/// 比較結果と許容差からの逸脱は docs/reports/analysis-scoring-validation.md を参照。
 fn decode_scaled(path: &Path) -> Result<(u32, u32, image::RgbImage), String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(file));

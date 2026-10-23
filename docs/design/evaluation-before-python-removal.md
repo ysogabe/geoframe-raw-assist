@@ -28,7 +28,7 @@
 - [x] 統合QAと実行コマンド・結果の保存。
 - [x] #90 / #117の本体削除。独立化を検収した `e838ecc` を復元点として残した。
 
-結果は[11枚の計測報告](../coreimage-proxy-full-measurement.md)と
-[削除後の検証記録](../python-removal-verification.md)に記載。
+結果は[11枚の計測報告](../reports/coreimage-proxy-full-measurement.md)と
+[削除後の検証記録](../reports/python-removal-verification.md)に記載。
 M2/M3の実装は統合済みで、比較用の凍結参照を保全した。
 実ブラケット・昼夜13ケース・他レンズの画質検収は素材待ちとして残り、本体削除によって検証済みになったとは扱わない。

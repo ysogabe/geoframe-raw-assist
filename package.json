@@ -1,6 +1,12 @@
 {
   "name": "geoframe-raw-assist",
   "version": "0.1.0",
+  "description": "旅行写真の JPEG+RAW ペアを解析し、選別と RAW 現像・ブラケット合成を支援する macOS アプリ",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ysogabe/geoframe-raw-assist.git"
+  },
   "private": true,
   "engines": {
     "node": ">=22.13.0"

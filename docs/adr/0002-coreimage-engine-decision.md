@@ -2,7 +2,7 @@
 
 - ステータス: 承認（2026-10-20、オーナーの目視判断による。当初の提案から決定を改訂。経緯は末尾の「決定の経緯」）
 - 関連: Issue #65、[ADR 0001](0001-coreimage-raw-poc.md)（CLI の設計）、
-  [比較レポート](../coreimage-engine-comparison.md)、[パラメータ対応表](../coreimage-parameter-mapping.md)
+  [比較レポート](../reports/coreimage-engine-comparison.md)、[パラメータ対応表](../development/coreimage-parameter-mapping.md)
 
 ## 背景
 
@@ -73,10 +73,10 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 |---|---|
 | 解像感が rawpy 現行以上（`apple_default` v9 lens ON） | **満たしている**（比較レポート §9：エッジ幅比 preview 0.95 / 原寸 0.84、rawpy 現行 1.05 / 1.16） |
 | 夜景・星空・長秒のサンプルで破綻（ノイズの塗りつぶし、星の消失、色かぶり）が無い。`apple_default` の NR が星を消さないことを特に確認する | **満たしている（サンプルの範囲で）**（比較レポート §10・§14。2022-11 の 1 セッション、ISO 3200 / 6400、明るめの空。暗い空・微光星の多い星野、周辺減光の大きいレンズは未確認。#70） |
-| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない | **満たしている（2026-10-21、#92 の判定 A。#81 の写像と救済系プリセットでの計測・目視を 2026-10-22 に完了）**（比較レポート §13・§17、[診断レポート](../coreimage-highlight-diagnosis-report.md)。偽色は rawpy 現行より明確に少ない。白飛びは**線形段で表示白を超えた画素**が主因で（CFA 飽和は中央値 1.8%、CI の白飛び 13.0%、カメラ JPEG 3.0%）、`exposure` −0.7 + `shadow_lift` 40（brightness 1.0）で白飛び率 3.6%・中間調 CI 既定 ±0.03 になる。合否の基準は CI 既定比に較正し、目視もオーナーが合格と判断した（2026-10-21）。#81 でこの構成を `highlight_recovery` の写像（hr 60 ≡ C1'、hr 90 ≡ 強め）として CLI 0.6.0 に実装し、等価性を確かめた（2026-10-22）。救済系プリセットでの計測（空 10 カットの白飛び率の中央値 45% → 0〜3%、中間調 CI 既定 ±0.03）と目視の合格は [再調整レポート](../coreimage-preset-retune-report.md)。太陽の直射は未確認。#71 / #92 / #81） |
+| ハイライト（逆光）の白飛び・偽色が rawpy 現行より悪くない | **満たしている（2026-10-21、#92 の判定 A。#81 の写像と救済系プリセットでの計測・目視を 2026-10-22 に完了）**（比較レポート §13・§17、[診断レポート](../reports/coreimage-highlight-diagnosis-report.md)。偽色は rawpy 現行より明確に少ない。白飛びは**線形段で表示白を超えた画素**が主因で（CFA 飽和は中央値 1.8%、CI の白飛び 13.0%、カメラ JPEG 3.0%）、`exposure` −0.7 + `shadow_lift` 40（brightness 1.0）で白飛び率 3.6%・中間調 CI 既定 ±0.03 になる。合否の基準は CI 既定比に較正し、目視もオーナーが合格と判断した（2026-10-21）。#81 でこの構成を `highlight_recovery` の写像（hr 60 ≡ C1'、hr 90 ≡ 強め）として CLI 0.6.0 に実装し、等価性を確かめた（2026-10-22）。救済系プリセットでの計測（空 10 カットの白飛び率の中央値 45% → 0〜3%、中間調 CI 既定 ±0.03）と目視の合格は [再調整レポート](../reports/coreimage-preset-retune-report.md)。太陽の直射は未確認。#71 / #92 / #81） |
 | 使う範囲の Adjustments（少なくとも exposure / wb_temp / shadow_lift / saturation / sharpness）について、後段処理を含めて現行と同等の結果になる対応が実装・検証されている（原寸・書き出しの置き換えの条件。プレビューには不要） | 未着手 |
 | 最新の macOS で decoder 9 と `apple_default` が使える（decoder 9 は必須の依存になった。古い macOS の個別検証は不要） | **満たしている**（2026-10-20、macOS 27.0.1。CLI 単体と `tauri:build` した .app の同梱 CLI。#74） |
-| OS 更新時の回帰比較の手順が文書化されている | **満たしている**（[回帰確認手順](../coreimage-regression-check.md)とベースライン。#75） |
+| OS 更新時の回帰比較の手順が文書化されている | **満たしている**（[回帰確認手順](../development/coreimage-regression-check.md)とベースライン。#75） |
 
 ### 評価で分かった注意点（2026-10-20、比較レポート §12・§13）
 
@@ -89,7 +89,7 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 
 - 決定 2・3 の段階 1 を実装した。Tauri のプレビューは既定で Core Image（`apple_default`・decoder 9・レンズ補正 ON）になり、
   Adjustments の 9 キーを CLI 0.3.0 に写像した（`highlight_recovery` だけは no-op で、代替は #81）。
-  設計は [設計書](../design/coreimage-preview-adjustments.md)、較正結果は [比較レポート §16](../coreimage-engine-comparison.md)、写像は [対応表](../coreimage-parameter-mapping.md) の「#73 での決定」。
+  設計は [設計書](../design/coreimage-preview-adjustments.md)、較正結果は [比較レポート §16](../reports/coreimage-engine-comparison.md)、写像は [対応表](../development/coreimage-parameter-mapping.md) の「#73 での決定」。
 - 上の「置き換えに進む条件」の Adjustments の行は**原寸・書き出し向け**の条件で、引き続き未達（プレビューの検証は §16 で完了）。
 - **プレビュー = Core Image、本現像・書き出し = rawpy の間は、見た目が一致しない場合がある**（明るさの基準、色、ノイズなど）。
   オーナーは、移行が完了するまでこの不一致を受容した（2026-10-20 判断）。UI には「Core Image プレビュー」のバッジと注記を出す。
@@ -100,7 +100,7 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 ## 追補（2026-10-21）: ハイライト白飛びの段階別診断（#92）
 
 - 比較レポート §13 の「白飛びはカメラ JPEG より多い。レバーは `exposure` だけ」を段階別に切り分けた（CLI 0.4.0 の診断モード、`scripts/compare_engines.py --diagnosis`、10 + 3 カット。
-  [診断レポート](../coreimage-highlight-diagnosis-report.md)、[比較レポート §17](../coreimage-engine-comparison.md)）。
+  [診断レポート](../reports/coreimage-highlight-diagnosis-report.md)、[比較レポート §17](../reports/coreimage-engine-comparison.md)）。
 - **結論（事実）**: 白飛びは線形段（WB ゲイン × baselineExposure 0.4EV）で表示白 1.0 を超えた画素が、boost のトーン（1.0 固定点の大域的な曲線）と色域マッピング（1.0 への clamp）で白になるもの。
   センサー（CFA）飽和は白飛びの一部（中央値 1.8% vs 13.0%）で、空が主役のカットでは ROI の 57〜99% が「デコーダ/トーン」帰属（計測 3 回目）＝`exposure` を下げれば階調が戻る。トーン・色域・16bit・8bit の各段に新しい損失はほぼ無い。
   公開 API には白の手前にニーを入れるレバーが無く、EDR は逆効果、boost は 13.0 → 10.9% まで。
@@ -116,19 +116,19 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
 ## 追補（2026-10-22）: `highlight_recovery` の写像とプリセットの再調整（#81）
 
 - CLI 0.6.0 で `highlight_recovery` を区分線形の写像 `0 → (0, 0)`・`60 → (−0.7EV, +40)`・`90 → (−1.0EV, +55)`・`100 → (−1.1EV, +60)` に置き換え、
-  `exposure` / `shadow_lift` に加算する（[設計書](../design/coreimage-preset-retune.md) §2・§3、[対応表「#81 での決定」](../coreimage-parameter-mapping.md)）。
+  `exposure` / `shadow_lift` に加算する（[設計書](../design/coreimage-preset-retune.md) §2・§3、[対応表「#81 での決定」](../development/coreimage-parameter-mapping.md)）。
   `{0, 0, hr 60}` と `{−0.7, 40, hr 0}` は同じ画（バイト一致）で、#92 で承認した C1' にそのまま結び付く。
 - プリセット（Rust = プレビュー）は CI 既定（`d_base`）を基準に再調整した。非救済 8 プリセットは hr 0、hr > 0 は救済系 3 プリセットだけ（オーナー判断 2026-10-22、案 B）。
   書き出し（rawpy）は旧値のまま。プレビューと書き出しの値の差は受容（#90 で解消）。
 - 「置き換えに進む条件」のハイライトの行の条件を「#81 の実装」から「救済系プリセットでの計測と目視」に改めた。計測（10 カット + シーン別 8 カット）と目視は
-  [再調整レポート](../coreimage-preset-retune-report.md) を参照。2026-10-22 に計測（条件 1〜9）と目視（条件 10）を終え、条件を外した。
+  [再調整レポート](../reports/coreimage-preset-retune-report.md) を参照。2026-10-22 に計測（条件 1〜9）と目視（条件 10）を終え、条件を外した。
   案 C（`neutral_recovery` / `landscape_clear` に hr 30）は採らない。
 
 ## 追補（2026-10-23）: 暗所判定（`dark_scene`）の廃止と移行状況（#88 → #117）
 
 - **暗所判定は N1（廃止）を採用し、N2（星空なら NR 0）は採らない。** #88 から #117 に引き継いだ要件で、Core Image 経路には
   rawpy 時代の暗所判定（`dark_scene`：固定倍率・周辺減光補正のスキップ）に相当する処理を設けない。
-- 根拠は [比較レポート §10.7](../coreimage-engine-comparison.md) の 6 項目（#70。α6400 夜間・長秒 11 カット、1 セッション）で、すべてが N1 を支持する:
+- 根拠は [比較レポート §10.7](../reports/coreimage-engine-comparison.md) の 6 項目（#70。α6400 夜間・長秒 11 カット、1 セッション）で、すべてが N1 を支持する:
   1. `apple_default` v9 lens ON の NR は星を消していない（強い星の残存率 11/11 カットで ≥ 0.991、NR 0 でも変わらない）。
   2. 空の明るさはカメラ比 −0.013〜+0.016 で、Issue #50（暗いシーンが浮く）の再発に当たらない。
   3. 空のノイズは rawpy 現行より少なく（sky_noise_ratio 1.05 vs 1.72）、塗りつぶしも無い。
@@ -148,10 +148,10 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
   （#108 / #83 / #84 / #87 ほか）。Python サーバ・rawpy・`GEOFRAME_PREVIEW_ENGINE` による切り戻しは無い（[ADR 0003](0003-python-removal-single-app.md)）。
   決定 3（移行が終わるまでは rawpy で行う）と、段階 1 の追補の切り戻し・フォールバックの記述は、この時点で役目を終えた。
 - 「置き換えに進む条件」の Adjustments の行（原寸・書き出し向け）は、この追補では状態を更新しない。代理（640px）と原寸の見え方の計測は
-  #57 で行い、[11枚の計測結果](../coreimage-proxy-full-measurement.md)にまとめた。本番の原寸ROI再評価は次の修正範囲とする。
+  #57 で行い、[11枚の計測結果](../reports/coreimage-proxy-full-measurement.md)にまとめた。本番の原寸ROI再評価は次の修正範囲とする。
 - rawpy 時代の閾値（候補生成の発動値・評価の目安など）は、Core Image 経路で採用したものではない。候補生成の評価で
   昼夜混在 13 ケース（`image_work`）は元 ARW が無く未比較のまま残っており、現行で比較済みの星空 11 ケースとは別に扱う
-  （[PSO 移植の報告](../coreimage-pso-loop-report.md)）。
+  （[PSO 移植の報告](../reports/coreimage-pso-loop-report.md)）。
 
 ## 理由
 

@@ -10,7 +10,7 @@
   python scripts/freeze_pso_parity.py --real-images
 旧 Python の half デコードで既定の読み取り専用入力から work/pso-parity/ にメタデータなしの
 float32 RGB と EXIF の露光・F値・ISO だけを保存する。GPS は取得・保存しない。
-local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/evaluation-paths.md）。
+local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/development/evaluation-paths.md）。
 """
 import argparse
 import json
@@ -98,7 +98,7 @@ def freeze_real():
     engine = legacy.import_module('local_raw.engine', feature)
     read_capture_exif = legacy.import_module('local_raw.exif', feature).read_capture_exif
     resolve_adjustments = legacy.import_module('local_raw.presets', feature).resolve_adjustments
-    source = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
+    source = Path(__file__).resolve().parents[1] / 'work' / 'raw'
     output = ROOT / 'work/pso-parity'
     output.mkdir(parents=True, exist_ok=True)
     cases = json.loads((FIXTURES / 'candidates.json').read_text())['records']
