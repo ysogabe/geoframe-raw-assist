@@ -33,3 +33,10 @@ let result = try MergeCore.merge(images, weights: .init(), edge: "crop")
 2026-10-23、通常のSwiftキャッシュとCoreImage/Metalを利用できる権限で全テストを再実行した。
 `swift test --package-path native/coreimage-cli`: 135件実行、9件skip、失敗0件。
 MergeCoreの基準3組も50 dBの閾値を維持して成功した。前述の45件の失敗は制限環境での結果であり、親側では再現しなかった。
+
+## MTB shift符号の画素回帰確認
+
+PRレビューround 1の「shiftedCropが符号逆」とする指摘は、座標を独立確認した結果成立しなかった。MTBは `src(x)` と `ref(x+s)` を対応づけるので、出力座標 `b=x+s` に置くsrc画素は `src(b-s)` となる。実装の `x-shift` はこの対応に合い、共通cropも各shift後に全フレームで有効な参照座標範囲を切り出す。
+たとえば画像内容を右へ1px動かすと検出shiftは+1で、出力座標bでは元画像の `b-1` を読む。`[base, shifted, base]` の中央pivotを使い、既知の左右上下1px移動4方向について、edge cropの座標・寸法と融合画素をpivot入力の共通領域と比較するテストを追加した。`swift test --package-path native/coreimage-cli --filter MergeCoreTests` は10件成功、失敗0件。
+別途、2px斜め移動 `(2,-1)` の試行ではこのpatternedImageに対し検出値が `(1,0)` となった。符号逆の根拠ではないが、1px回帰テストの範囲外にあるMTB検出精度の観察事項として親へ共有する。
+親側でも上記のMergeCoreTests 10件を再実行し、失敗0件を確認した。96px短辺・2%の設定では許容変位は1.92px、現在の探索maxBitsは1（±1px）となるため、2px移動の観察はこの探索範囲外であり、符号の誤りを示すものではない。
