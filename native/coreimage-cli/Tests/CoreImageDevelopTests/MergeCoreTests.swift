@@ -95,6 +95,43 @@ final class MergeCoreTests: XCTestCase {
         XCTAssertEqual(result.image.height, 95)
     }
 
+    func testCroppedMergePixelsMatchShiftedMiddlePivotInCommonRegion() throws {
+        let base = patternedImage(width: 96, height: 96)
+        let cases: [(dx: Int, dy: Int, shift: (Int, Int), crop: MergeCrop)] = [
+            (-1, 0, (-1, 0), MergeCrop(x: 0, y: 0, width: 95, height: 96)),
+            (1, 0, (1, 0), MergeCrop(x: 1, y: 0, width: 95, height: 96)),
+            (0, -1, (0, -1), MergeCrop(x: 0, y: 0, width: 96, height: 95)),
+            (0, 1, (0, 1), MergeCrop(x: 0, y: 1, width: 96, height: 95)),
+        ]
+
+        for item in cases {
+            let pivot = translating(base, dx: item.dx, dy: item.dy)
+            let result = try MergeCore.merge([base, pivot, base], edge: "crop")
+            XCTAssertTrue(result.aligned, "translation (\(item.dx), \(item.dy))")
+            XCTAssertEqual(result.referenceIndex, 1)
+            XCTAssertEqual(result.shiftsXY[0].0, item.shift.0)
+            XCTAssertEqual(result.shiftsXY[0].1, item.shift.1)
+            XCTAssertEqual(result.shiftsXY[1].0, 0)
+            XCTAssertEqual(result.shiftsXY[1].1, 0)
+            XCTAssertEqual(result.shiftsXY[2].0, item.shift.0)
+            XCTAssertEqual(result.shiftsXY[2].1, item.shift.1)
+            XCTAssertEqual(result.crop, item.crop)
+            XCTAssertEqual(result.image.width, item.crop.width)
+            XCTAssertEqual(result.image.height, item.crop.height)
+
+            // The crop is expressed in pivot-image coordinates. Compare against the known
+            // translated input pixels, independently of MergeCore's fusion implementation.
+            for y in 0..<item.crop.height { for x in 0..<item.crop.width {
+                let expectedIndex = ((y + item.crop.y) * pivot.width + x + item.crop.x) * 3
+                let actualIndex = (y * result.image.width + x) * 3
+                for channel in 0..<3 {
+                    XCTAssertEqual(result.image.pixels[actualIndex + channel], pivot.pixels[expectedIndex + channel], accuracy: 2e-5,
+                                   "translation (\(item.dx), \(item.dy)), pixel (\(x), \(y)), channel \(channel)")
+                }
+            } }
+        }
+    }
+
     func testThreeSyntheticBaselinesMeetPSNRTarget() throws {
         let baseURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
