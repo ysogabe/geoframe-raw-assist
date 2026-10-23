@@ -20,7 +20,7 @@
   - 環境に `CI=1` が設定されており、そのままだと tauri CLI が `--ci 1` エラーになるため `CI` を必ず外す。
 - ローカル実行: `env -u CI npm run tauri:dev`（Python サーバは使わない。単一アプリ化 ADR 0003）
 - Rust テスト: `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）／ Swift: `swift test --package-path native/coreimage-cli`
-- Python（`scripts/` の評価用と移行期間の参照実装のみ。#117 で削除予定）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`
+- Python（評価スクリプトのみ。`requirements-dev.txt`、アプリ本体・rawpy・lensfunpyは不要）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`。旧実装の最後の参照点は `e838ecc`、削除後の手順は `docs/evaluation-paths.md`。
 
 ## 環境の注意
 

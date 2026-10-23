@@ -155,7 +155,7 @@ python3 -m venv .venv
 - `scripts/evaluate_candidates.py` — 候補生成の評価・集計。
 - 旧エンジン（rawpy / `local_raw/`）で基準画像や候補を作り直す経路は**アーカイブ扱い**です。Python 本体（`local_raw/`）を削除する前のコミットを checkout し、その時点の `requirements-raw.txt` の環境で `--legacy-rawpy` を明示して実行します。
 
-経路と使い分けは `docs/evaluation-paths.md`（整備中）と各スクリプトの `--help` を参照してください。過去の実験の記録（比較レポートなどの表と数値）はそのまま残しています。
+経路と使い分けは [評価手順](docs/evaluation-paths.md)と各スクリプトの `--help` を参照してください。旧実装を含む最後の参照点は `e838ecc` です。過去の実験の記録（比較レポートなどの表と数値）はそのまま残しています。
 
 ## 既知の制限
 

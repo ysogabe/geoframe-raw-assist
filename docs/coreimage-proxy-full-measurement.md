@@ -17,7 +17,7 @@ CARGO_TARGET_DIR=<自前の target> env -u CI \
 
 # 2. 実測（stars 11 件。src-tauri/binaries/ に externalBin が必要）
 CARGO_TARGET_DIR=<自前の target> env -u CI \
-  GEOFRAME_PSO_RAW_ROOT=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw \
+  GEOFRAME_PSO_RAW_ROOT=<starsのRAWフォルダ> \
   GEOFRAME_PSO_SIDECAR=<repo>/src-tauri/binaries/geoframe-ci-develop-aarch64-apple-darwin \
   cargo test --release --manifest-path src-tauri/Cargo.toml \
   coreimage_proxy_full_measurement -- --ignored --nocapture

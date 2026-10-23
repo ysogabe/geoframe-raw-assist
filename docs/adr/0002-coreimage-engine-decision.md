@@ -148,7 +148,7 @@ rawpy 現行は 1.05 / 1.16、1.55 / 2.20）とも整合する。
   （#108 / #83 / #84 / #87 ほか）。Python サーバ・rawpy・`GEOFRAME_PREVIEW_ENGINE` による切り戻しは無い（[ADR 0003](0003-python-removal-single-app.md)）。
   決定 3（移行が終わるまでは rawpy で行う）と、段階 1 の追補の切り戻し・フォールバックの記述は、この時点で役目を終えた。
 - 「置き換えに進む条件」の Adjustments の行（原寸・書き出し向け）は、この追補では状態を更新しない。代理（640px）と原寸の見え方の計測は
-  #57 で行っており、結果は `docs/coreimage-proxy-full-measurement.md`（作成予定）にまとめる。
+  #57 で行い、[11枚の計測結果](../coreimage-proxy-full-measurement.md)にまとめた。本番の原寸ROI再評価は次の修正範囲とする。
 - rawpy 時代の閾値（候補生成の発動値・評価の目安など）は、Core Image 経路で採用したものではない。候補生成の評価で
   昼夜混在 13 ケース（`image_work`）は元 ARW が無く未比較のまま残っており、現行で比較済みの星空 11 ケースとは別に扱う
   （[PSO 移植の報告](../coreimage-pso-loop-report.md)）。

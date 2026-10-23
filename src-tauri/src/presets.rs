@@ -2,8 +2,8 @@
 //!
 //! 定義の正はこのモジュール（Core Image 向けの値）。数値は #81 で `apple_default`・decoder 9・
 //! レンズ補正 ON 向けに再調整した（設計書 `docs/design/coreimage-preset-retune.md` §4・§7.2）。
-//! `local_raw/presets.py` は rawpy（本現像・書き出し）向けの旧値のまま残す（移行完了 #90 まで。
-//! プレビューと書き出しの値の差はオーナー判断で受容、設計書 §11）。
+//! 旧rawpy値は `tests/fixtures/presets_legacy_rawpy.json` に凍結済み。
+//! #90/#117でPython本体を削除し、プレビュー・原寸・書き出しともこのCI値を使う。
 //!
 //! フィクスチャは 2 本（設計書 §6）:
 //! - `tests/fixtures/presets.json` … **この表の写し**（CI 値）。下のテストが `Value` で突き合わせ、

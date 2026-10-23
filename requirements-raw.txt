@@ -1,8 +1,0 @@
-numpy==2.5.1
-Pillow==12.3.0
-rawpy==0.27.0
-lensfunpy==1.18.0
-opencv-python-headless==5.0.0.93
-google-auth==2.56.3
-google-auth-oauthlib==1.4.0
-google-api-python-client==2.199.0

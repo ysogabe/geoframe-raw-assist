@@ -142,7 +142,7 @@ rawpy（旧エンジン）の画は、Python 本体の削除前に**凍結した
 - `--frozen-verify-only` は凍結物のハッシュ・寸法の照合だけを行う（CLI・現像元フォルダは不要。このとき `--source-root` は省略できる）。
 - `--frozen-capture` は今回の CI 出力を凍結マニフェストとして書き出す（次の OS 更新で `--frozen-manifest` に渡す CI 側の基準になる）。
 
-フラグの正確な意味・凍結物の置き場所・旧経路（`--legacy-rawpy`）との使い分けは、`docs/evaluation-paths.md`（整備中）と
+フラグの正確な意味・凍結物の置き場所・旧経路（`--legacy-rawpy`）との使い分けは、[評価手順](evaluation-paths.md)と
 `scripts/compare_engines.py --help` を正とする（この節はそれらの要約で、食い違うときはそちらに従う）。
 
 ## 4. 記録

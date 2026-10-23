@@ -1,5 +1,11 @@
 # GeoFrame RAW Assist — API 契約（凍結版）
 
+> **2026-10-23（#90/#117）**: 以下のHTTP/Python契約とrawpy値は旧版の記録。
+> Python本体・localhostサーバは削除し、現行はTauri invoke + Rust/Swiftで動く。
+> 現行契約への全文改訂は#118で扱う。現在の呼び出しは `src/lib/raw-api.ts`、
+> `src/lib/coreimage-api.ts`、`src-tauri/src/main.rs`、プリセット値は `src-tauri/src/presets.rs` を参照。
+> 評価・凍結基準の比較は [独立した評価手順](evaluation-paths.md)に従う。
+
 > **凍結済み。変更には全ウェーブ停止が必要。**
 > この文書は Wave 0 で凍結された、Python 側と TypeScript 側の**唯一の正**である。
 > Wave 1 以降のエージェントは参照のみ行うこと。変更が必要になった場合は、

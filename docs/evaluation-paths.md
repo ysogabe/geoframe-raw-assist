@@ -1,5 +1,9 @@
 # 評価経路（Python 本体の削除前後で使う評価スクリプト）
 
+旧Python本体と独立評価の両方を含む最後の参照点は `e838ecc`。
+旧基準の再生成が必要な場合だけ、そのコミットを別checkoutで使用する。
+今回の11枚のCore Image実測・決めた修正範囲は[計測報告](coreimage-proxy-full-measurement.md)を参照。
+
 #57 / #90 / #117。実施順と検収条件は `docs/design/evaluation-before-python-removal.md`。
 この文書は `scripts/` の評価スクリプトの**使い方**（CLI モード・前提・削除後の扱い）をまとめる。
 
