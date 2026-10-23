@@ -80,3 +80,12 @@ cargo test --manifest-path src-tauri/Cargo.toml real_cli_merge_export_smoke -- -
 - オーナーは現状素材で接続検証を進める方針を選択した。同一露出RAWのコピーとsynthetic GPSによる検証で、実AEB／三脚長秒ブラケットの画質QAは未実施。
 - 隔離QAアプリ（com.geoframe.rawassist.qa84）でCLI 0.8接続と2ペアの読み込み・解析開始を確認した。最初の試験JPGはRust EXIF readerが読めず2単写へ分離したため、最小EXIFへ作り直し、本番と同じkamadak-exif 0.6のread_from_containerで合成日時・EV・共通レンズを親側でも確認した。
 - その後、画面操作ツールのアプリ再選択が2508秒返らず、返ったAXはWeb documentのみで画面内容を取得できなかった。修正素材の再解析、GUIでのpreview/full合成・採用・export、および候補生成のIPC操作は未確認。CLI結合の成功をGUI成功とは扱わない。
+
+
+## 追補: merged export のコピー時指紋検証
+
+- merged export は recipe の事前検証に加え、出力へコピーする同じ file handle の stream から size と SHA-256 を計算し、期待値に一致した場合だけ atomic rename する。読み取りは固定長bufferで行い、batch全体のJPEGをメモリに保持しない。
+- recipe fingerprintを `manifest.items[].exported_sha256` に使い、検証したコピー内容とmanifest値を一致させる。検証エラー時はatomic temporary fileを削除し、そのJPEGを確定しない。camera JPGとdevelopedのコピー経路は従来どおり。
+- `merged_copy_rejects_source_replacement_after_resolution_atomically` はrecipe解決後のsource差替えをコピーhelperで検出し、destination未発行とtemporary file cleanupを確認する。正常merged exportではコピーbytesとmanifest hashを確認する。
+
+- コピー時照合の追加後、親側でRust全149 passed / 8 ignored / 0 failed、実CLI 0.8結合1 passed（22.43秒）、cargo build警告0、git diff --check成功を確認した。GUI確認の未完了状態は前節どおり。

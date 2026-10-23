@@ -318,6 +318,50 @@ fn merged(
     Ok(Some((image, recipe)))
 }
 
+fn copy_verified_merged(
+    source: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+    destination: &Path,
+) -> Result<String, String> {
+    let mut copied_hash = None;
+    atomic_write(destination, |out| {
+        let mut input = fs::File::open(source).map_err(io_error)?;
+        let metadata = input.metadata().map_err(io_error)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 65536];
+        let mut size = 0u64;
+        loop {
+            let count = input.read(&mut buffer).map_err(io_error)?;
+            if count == 0 {
+                break;
+            }
+            size = size
+                .checked_add(count as u64)
+                .ok_or("合成JPEGのサイズが不正です。")?;
+            hasher.update(&buffer[..count]);
+            out.write_all(&buffer[..count]).map_err(io_error)?;
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        if size != expected_size || hash != expected_hash {
+            return Err("合成JPEGがレシピに記録された出力と一致しません。".into());
+        }
+        out.set_permissions(metadata.permissions())
+            .map_err(io_error)?;
+        let mut times = fs::FileTimes::new();
+        if let Ok(t) = metadata.modified() {
+            times = times.set_modified(t);
+        }
+        if let Ok(t) = metadata.accessed() {
+            times = times.set_accessed(t);
+        }
+        out.set_times(times).map_err(io_error)?;
+        copied_hash = Some(hash);
+        Ok(())
+    })?;
+    copied_hash.ok_or_else(|| "合成JPEGを書き出せませんでした。".into())
+}
+
 fn relative(path: &Path, base: &Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)
@@ -401,30 +445,51 @@ pub(crate) fn export_batch(
         });
         let photo = analysis["photos"].get(&id).or(fallback.as_ref());
         let exif = photo.map(|p| json!({"captured_at":p["captured_at"],"iso":p["iso"],"lens_model":p["lens_model"],"focal_length":p["focal_length"]}));
-        manifest_items.push(json!({"capture_id":id,"variant":item.variant,"exported_file":name,"exported_sha256":sha256(&source)?,"source":{"jpg":jpg.as_ref().map(|p|relative(p,&manifest_base)),"arw":arw.as_ref().map(|p|relative(p,&manifest_base)),"jpg_sha256":jpg.as_ref().map(|p|sha256(p)).transpose()?},"recipe":recipe,"group":group,"exif":exif}));
-        copies.push((source, name));
+        let merged_fingerprint = if item.variant == "merged" {
+            Some((
+                recipe["output_size"]
+                    .as_u64()
+                    .ok_or("合成レシピの出力サイズが不正です。")?,
+                recipe["output_sha256"]
+                    .as_str()
+                    .ok_or("合成レシピの出力指紋が不正です。")?
+                    .to_owned(),
+            ))
+        } else {
+            None
+        };
+        let exported_sha256 = match merged_fingerprint.as_ref() {
+            Some((_, hash)) => hash.clone(),
+            None => sha256(&source)?,
+        };
+        manifest_items.push(json!({"capture_id":id,"variant":item.variant,"exported_file":name,"exported_sha256":exported_sha256,"source":{"jpg":jpg.as_ref().map(|p|relative(p,&manifest_base)),"arw":arw.as_ref().map(|p|relative(p,&manifest_base)),"jpg_sha256":jpg.as_ref().map(|p|sha256(p)).transpose()?},"recipe":recipe,"group":group,"exif":exif}));
+        copies.push((source, name, merged_fingerprint));
     }
     let export_root = real_dir(&data, "export")?;
     let destination = real_dir(&export_root, &batch)?;
     let mut files = Vec::new();
-    for (source, name) in copies {
+    for (source, name, merged_fingerprint) in copies {
         let target = destination.join(name);
-        atomic_write(&target, |out| {
-            let mut input = fs::File::open(source).map_err(io_error)?;
-            let metadata = input.metadata().map_err(io_error)?;
-            std::io::copy(&mut input, out).map_err(io_error)?;
-            out.set_permissions(metadata.permissions())
-                .map_err(io_error)?;
-            let mut times = fs::FileTimes::new();
-            if let Ok(t) = metadata.modified() {
-                times = times.set_modified(t);
-            }
-            if let Ok(t) = metadata.accessed() {
-                times = times.set_accessed(t);
-            }
-            out.set_times(times).map_err(io_error)?;
-            Ok(())
-        })?;
+        if let Some((expected_size, expected_hash)) = merged_fingerprint {
+            copy_verified_merged(&source, expected_size, &expected_hash, &target)?;
+        } else {
+            atomic_write(&target, |out| {
+                let mut input = fs::File::open(source).map_err(io_error)?;
+                let metadata = input.metadata().map_err(io_error)?;
+                std::io::copy(&mut input, out).map_err(io_error)?;
+                out.set_permissions(metadata.permissions())
+                    .map_err(io_error)?;
+                let mut times = fs::FileTimes::new();
+                if let Ok(t) = metadata.modified() {
+                    times = times.set_modified(t);
+                }
+                if let Ok(t) = metadata.accessed() {
+                    times = times.set_accessed(t);
+                }
+                out.set_times(times).map_err(io_error)?;
+                Ok(())
+            })?;
+        }
         files.push(target.to_string_lossy().into_owned());
     }
     let manifest = json!({"manifest_version":1,"app":"geoframe-raw-assist","batch_name":batch,"created_at":chrono::Utc::now().to_rfc3339(),"source_root":relative(&root,&manifest_base),"items":manifest_items});
@@ -633,6 +698,16 @@ mod tests {
                 .unwrap();
         assert_eq!(manifest["items"][0]["variant"], "merged");
         assert_eq!(manifest["items"][0]["recipe"], recipe);
+        let exported = Path::new(response["files"][0].as_str().unwrap());
+        assert_eq!(fs::read(exported).unwrap(), b"synthetic merged JPEG");
+        assert_eq!(
+            manifest["items"][0]["exported_sha256"],
+            recipe["output_sha256"]
+        );
+        assert_eq!(
+            manifest["items"][0]["exported_sha256"],
+            sha256(exported).unwrap()
+        );
         assert_eq!(
             manifest["items"][0]["source"]["arw"],
             json!(f.root.join("DSC00001.ARW").to_string_lossy())
@@ -655,6 +730,47 @@ mod tests {
             export_rejects_modified().is_err(),
             "empty JPEG must be rejected"
         );
+    }
+
+    #[test]
+    fn merged_copy_rejects_source_replacement_after_resolution_atomically() {
+        let f = Fixture::new();
+        let filename = f.merged_filename();
+        let recipe = f.merged_recipe(json!([
+            f.root.join("DSC00001.ARW"),
+            f.root.join("DSC00002.ARW")
+        ]));
+        f.save_merged(filename, recipe.clone());
+        let source = merged(&f.data, &f.root, "DSC00001", filename)
+            .unwrap()
+            .unwrap()
+            .0;
+        let replacement = source.with_extension("replacement");
+        fs::write(&replacement, b"replacement bytes").unwrap();
+        fs::rename(&replacement, &source).unwrap();
+
+        fs::create_dir_all(f.data.join("export")).unwrap();
+        let destination = f.data.join("export/should-not-exist.jpg");
+        let error = copy_verified_merged(
+            &source,
+            recipe["output_size"].as_u64().unwrap(),
+            recipe["output_sha256"].as_str().unwrap(),
+            &destination,
+        )
+        .unwrap_err();
+        assert!(error.contains("合成JPEGがレシピに記録された出力と一致しません"));
+        assert!(
+            !destination.exists(),
+            "mismatched bytes must not be renamed"
+        );
+        assert!(!f.data.join("export/manifest.json").exists());
+        assert!(fs::read_dir(f.data.join("export"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
     }
 
     #[test]
