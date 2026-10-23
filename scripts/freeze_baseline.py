@@ -418,7 +418,8 @@ def main(argv=None):
     run('bracket', freeze_bracket)
     run('manifest', lambda: freeze_manifest(source, result, rows))
     dump(FIXTURES / 'provenance.json', {
-        'source_root': str(source), 'source_files': [
+        'source_root': (str(source.resolve().relative_to(ROOT)) if source.resolve().is_relative_to(ROOT)
+                        else f'<external>/{source.name}'), 'source_files': [
             {'name': path.name, 'sha256': sha(path)} for path in sorted(source.iterdir())
             if path.suffix.lower() in ('.arw', '.jpg')],
         'python': platform.python_version(), 'platform': platform.platform(),
