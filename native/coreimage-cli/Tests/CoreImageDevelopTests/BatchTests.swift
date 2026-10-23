@@ -55,6 +55,15 @@ final class BatchTests: XCTestCase {
         XCTAssertTrue(responses.allSatisfy { !$0.contains("\n") })
     }
 
+    func testMergeDecoderVersionRejectionUsesSharedParserInBatch() throws {
+        let merge = #"{"mode":"merge","inputs":["/tmp/a.ARW","/tmp/b.ARW"],"output":"/tmp/out.jpg","decoder_version":"8","settings":{"profile":"apple_default","lens_correction":true},"adjustments":{"exposure":0,"wb_temp":0,"shadow_lift":0,"highlight_recovery":0,"brightness":1,"contrast":1,"saturation":1,"sharpness":1,"noise_reduction":"light"}}"#
+        let response = try object(XCTUnwrap(BatchProcessor().handle(line: merge)))
+        XCTAssertEqual(response["ok"] as? Bool, false)
+        XCTAssertEqual((response["error"] as? [String: Any])?["code"] as? String, "INVALID_REQUEST")
+        XCTAssertEqual(response["sequence"] as? Int, 1)
+        XCTAssertTrue(((response["error"] as? [String: Any])?["message"] as? String)?.contains("decoder_version must be \"9\"") == true)
+    }
+
     func testBlankLinesAreSkippedWithoutConsumingSequence() throws {
         let processor = BatchProcessor()
         XCTAssertNil(processor.handle(line: ""))

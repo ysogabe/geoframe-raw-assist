@@ -6,6 +6,41 @@ import XCTest
 @testable import CoreImageDevelop
 
 final class MergeCoreTests: XCTestCase {
+    func testMergePostChainIdentityPreservesSRGBGrayAndColorPatches() throws {
+        let ramp: [Float] = [0, 0.01, 0.05, 0.18, 0.5, 0.75, 1]
+        let patches: [[Float]] = ramp.map { [$0, $0, $0] } + [[0.8, 0.2, 0.1], [0.05, 0.4, 0.9], [0.3, 0.6, 0.2]]
+        let input = MergeRGBImage(width: patches.count, height: 1, pixels: patches.flatMap { $0 })
+        let params = PostChainParameters(lift: 0, brightness: 1, contrast: 1, saturation: 1, usmSigma: 0.7, usmGain: 0, usmCoring: 0)
+
+        // Exercise mergePostChainInput, PostChain.apply and the actual sRGB output render.
+        let post = try PostChain.apply(mergePostChainInput(input), params)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        let context = makeRenderContext()
+        var rendered = Array(repeating: Float.zero, count: patches.count * 4)
+        rendered.withUnsafeMutableBytes { bytes in
+            context.render(post, toBitmap: bytes.baseAddress!, rowBytes: patches.count * 16,
+                          bounds: CGRect(x: 0, y: 0, width: patches.count, height: 1), format: .RGBAf, colorSpace: colorSpace)
+        }
+        for (pixel, expected) in patches.enumerated() {
+            for channel in 0..<3 {
+                XCTAssertEqual(rendered[pixel * 4 + channel], expected[channel], accuracy: 0.0002,
+                               "pixel \(pixel) channel \(channel), sRGB patch \(expected)")
+            }
+        }
+
+        // Recreate the pre-fix graph to make the root cause observable: the tagged sRGB source
+        // is already converted by Core Image into the linear working space, so decoding it again
+        // with CISRGBToneCurveToLinear darkens sRGB 0.5 to roughly 0.214.
+        let doubleDecoded = try PostChain.apply(mergePostChainInput(input).applyingFilter("CISRGBToneCurveToLinear"), params)
+        var oldRendered = Array(repeating: Float.zero, count: patches.count * 4)
+        oldRendered.withUnsafeMutableBytes { bytes in
+            context.render(doubleDecoded, toBitmap: bytes.baseAddress!, rowBytes: patches.count * 16,
+                           bounds: CGRect(x: 0, y: 0, width: patches.count, height: 1), format: .RGBAf, colorSpace: colorSpace)
+        }
+        XCTAssertEqual(oldRendered[4 * 4], 0.214, accuracy: 0.003)
+        XCTAssertGreaterThan(abs(oldRendered[4 * 4] - patches[4][0]), 0.2)
+    }
+
     func testPyramidMatchesOpenCVOddSizeOracle() throws {
         let data = try Data(contentsOf: XCTUnwrap(Bundle.module.url(forResource: "merge-pyramid-oracle", withExtension: "json")))
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -65,6 +100,14 @@ final class MergeCoreTests: XCTestCase {
         XCTAssertTrue(result.appliedShiftsXY.elementsEqual(result.shiftsXY, by: ==))
         XCTAssertTrue(result.aligned)
         XCTAssertEqual(result.crop, MergeCrop(x: 0, y: 0, width: 96, height: 96))
+    }
+
+    func testAlignmentCanBeDisabledWithoutShiftFallback() throws {
+        let image = MergeRGBImage(width: 4, height: 4, pixels: Array(repeating: 0.5, count: 48))
+        let result = try MergeCore.merge([image, image], align: false)
+        XCTAssertFalse(result.aligned)
+        XCTAssertNil(result.reason)
+        XCTAssertEqual(result.appliedShiftsXY.map { [$0.0, $0.1] }, [[0, 0], [0, 0]])
     }
 
     func testFlatImagesDoNotProduceNaNsAndFallBackUnaligned() throws {

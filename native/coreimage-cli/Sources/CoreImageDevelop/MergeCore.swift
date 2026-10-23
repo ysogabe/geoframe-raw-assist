@@ -39,7 +39,7 @@ public struct MergeRGBImage: Equatable {
     }
 }
 
-public struct MergeWeights: Equatable {
+public struct MergeWeights: Equatable, Encodable {
     public var contrast: Float
     public var saturation: Float
     public var exposure: Float
@@ -50,7 +50,7 @@ public struct MergeWeights: Equatable {
     }
 }
 
-public struct MergeCrop: Equatable {
+public struct MergeCrop: Equatable, Encodable {
     public let x: Int
     public let y: Int
     public let width: Int
@@ -70,14 +70,19 @@ public struct MergeResult: Equatable {
     public let referenceIndex: Int
     public let crop: MergeCrop
     public let pyramidLevels: Int
+    public let maxBits: Int
+    public let maxShiftPx: Int
     public let aligned: Bool
     public let reason: String?
+    public let alignmentDurationMS: Double
+    public let fusionDurationMS: Double
 
     public static func == (lhs: MergeResult, rhs: MergeResult) -> Bool {
         lhs.image == rhs.image && lhs.shiftsXY.elementsEqual(rhs.shiftsXY, by: ==)
             && lhs.appliedShiftsXY.elementsEqual(rhs.appliedShiftsXY, by: ==)
             && lhs.referenceIndex == rhs.referenceIndex && lhs.crop == rhs.crop
-            && lhs.pyramidLevels == rhs.pyramidLevels && lhs.aligned == rhs.aligned && lhs.reason == rhs.reason
+            && lhs.pyramidLevels == rhs.pyramidLevels && lhs.maxBits == rhs.maxBits && lhs.maxShiftPx == rhs.maxShiftPx
+            && lhs.aligned == rhs.aligned && lhs.reason == rhs.reason
     }
 }
 
@@ -99,7 +104,7 @@ public enum MergeCore {
 
     private static let kernel: [Float] = [1 / 16, 4 / 16, 6 / 16, 4 / 16, 1 / 16]
 
-    public static func merge(_ images: [MergeRGBImage], weights: MergeWeights = .init(), edge: String = "crop", maxShiftRatio: Float = 0.02) throws -> MergeResult {
+    public static func merge(_ images: [MergeRGBImage], weights: MergeWeights = .init(), edge: String = "crop", maxShiftRatio: Float = 0.02, align: Bool = true) throws -> MergeResult {
         guard (minimumFrames...maximumFrames).contains(images.count) else { throw MergeError.invalidFrameCount(images.count) }
         guard let first = images.first, first.width > 0, first.height > 0 else { throw MergeError.invalidImage }
         guard edge == "crop" || edge == "keep" else { throw MergeError.invalidOptions }
@@ -114,10 +119,12 @@ public enum MergeCore {
         }
 
         let pivot = images.count / 2
-        let maxBits = max(1, min(6, Int(floor(log2(Double(max(2, Int(Float(min(first.width, first.height)) * maxShiftRatio))))))))
+        let alignmentStart = DispatchTime.now()
+        let maxShiftPx = Int(Float(min(first.width, first.height)) * maxShiftRatio)
+        let maxBits = max(1, min(6, Int(floor(log2(Double(max(2, maxShiftPx)))))))
         var shifts = Array(repeating: (0, 0), count: images.count)
         var alignFailed = false
-        if images.count > 1 {
+        if align && images.count > 1 {
             for i in images.indices where i != pivot {
                 guard let shift = mtbShift(images[i], reference: images[pivot], maxBits: maxBits) else { alignFailed = true; continue }
                 shifts[i] = shift
@@ -125,7 +132,7 @@ public enum MergeCore {
         }
         let shortEdge = Float(min(first.width, first.height))
         let exceeds = shifts.contains { abs(Float($0.0)) > shortEdge * maxShiftRatio || abs(Float($0.1)) > shortEdge * maxShiftRatio }
-        var fallbackReason: String? = alignFailed ? "align_failed" : (exceeds ? "shift_exceeds_ratio" : nil)
+        var fallbackReason: String? = !align ? nil : (alignFailed ? "align_failed" : (exceeds ? "shift_exceeds_ratio" : nil))
         var appliedShifts = fallbackReason == nil ? shifts : Array(repeating: (0, 0), count: images.count)
         var crop = MergeCrop(x: 0, y: 0, width: first.width, height: first.height)
         if edge == "crop", fallbackReason == nil {
@@ -137,10 +144,15 @@ public enum MergeCore {
                 crop = candidate
             }
         }
-        let aligned = fallbackReason == nil
+        let aligned = align && fallbackReason == nil
         let levels = pyramidLevelCount(width: crop.width, height: crop.height)
+        let alignmentEnd = DispatchTime.now()
+        let fusionStart = DispatchTime.now()
         let output = mertens(images, shifts: appliedShifts, crop: crop, weights: weights, levels: levels)
-        return MergeResult(image: MergeRGBImage(width: crop.width, height: crop.height, pixels: output), shiftsXY: shifts, appliedShiftsXY: appliedShifts, referenceIndex: pivot, crop: crop, pyramidLevels: levels, aligned: aligned, reason: fallbackReason)
+        let fusionEnd = DispatchTime.now()
+        let alignmentMS = Double(alignmentEnd.uptimeNanoseconds - alignmentStart.uptimeNanoseconds) / 1_000_000
+        let fusionMS = Double(fusionEnd.uptimeNanoseconds - fusionStart.uptimeNanoseconds) / 1_000_000
+        return MergeResult(image: MergeRGBImage(width: crop.width, height: crop.height, pixels: output), shiftsXY: shifts, appliedShiftsXY: appliedShifts, referenceIndex: pivot, crop: crop, pyramidLevels: levels, maxBits: maxBits, maxShiftPx: maxShiftPx, aligned: aligned, reason: fallbackReason, alignmentDurationMS: alignmentMS, fusionDurationMS: fusionMS)
     }
 
     public enum MergeError: Error, Equatable {
