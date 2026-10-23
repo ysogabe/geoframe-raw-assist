@@ -16,7 +16,7 @@ use crate::coreimage::{self, CoreImageError, DevelopSlot, EXIF_SOFTWARE, PREVIEW
 
 const PREVIEW_DIR: &str = "merged_preview";
 const FULL_DIR: &str = "merged";
-const MERGE_SCHEMA: u32 = 1;
+const MERGE_SCHEMA: u32 = 2;
 const MERGE_TIMEOUT_PREVIEW: Duration = Duration::from_secs(120);
 const MERGE_TIMEOUT_FULL: Duration = Duration::from_secs(240);
 const REASON_LENS_UNSUPPORTED: &str = "coreimage_unsupported";
@@ -229,6 +229,15 @@ fn valid_cache(
         return None;
     }
     let recipe: Value = serde_json::from_slice(&fs::read(recipe_path).ok()?).ok()?;
+    let image_bytes = fs::read(image).ok()?;
+    let image_size = u64::try_from(image_bytes.len()).ok()?;
+    let image_hash = hash_hex(&image_bytes);
+    if image_size == 0
+        || recipe["output_size"].as_u64() != Some(image_size)
+        || recipe["output_sha256"].as_str() != Some(image_hash.as_str())
+    {
+        return None;
+    }
     let frames_match = recipe["frames"].as_array().is_some_and(|frames| {
         let Some(inputs) = request["inputs"].as_array() else {
             return false;
@@ -531,6 +540,19 @@ fn merge_blocking(
     response["engine"] = json!({"name":"coreimage mtb+mertens","cli_version":version.cli_version,"macos_version":version.macos_version,"merge_version":response["merge"]["merge_version"]});
     response["request"] = serde_json::from_str(&body).expect("serialized request");
     response["lens_correction"] = lens;
+    // Fingerprint the final output after EXIF inheritance so later cache/export
+    // checks detect any replacement or corruption of the stored JPEG.
+    let output_bytes = fs::read(&output).map_err(|error| {
+        invalid(
+            "SIDECAR_BAD_RESPONSE",
+            format!("合成JPEGを読めません: {error}"),
+        )
+    })?;
+    if output_bytes.is_empty() {
+        return Err(invalid("SIDECAR_BAD_RESPONSE", "合成JPEGが空です"));
+    }
+    response["output_size"] = json!(output_bytes.len());
+    response["output_sha256"] = json!(hash_hex(&output_bytes));
     coreimage::write_provenance(&provenance, &format!("{}\n", response))?;
     coreimage::prune_cache(
         &output_dir,
@@ -603,8 +625,8 @@ pub async fn merge_bracket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     struct TestDir(PathBuf);
 
@@ -1155,9 +1177,13 @@ os.symlink(request["output"], response["output"])"#,
             "source_root",
             "lens_summary",
             "incomplete_json",
+            "changed_output",
+            "empty_output",
         ] {
             match corruption {
                 "incomplete_json" => fs::write(&recipe_path, b"{}").unwrap(),
+                "changed_output" => fs::write(&output_path, b"different bytes").unwrap(),
+                "empty_output" => fs::write(&output_path, []).unwrap(),
                 _ => {
                     let mut recipe: Value =
                         serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
@@ -1199,6 +1225,8 @@ os.symlink(request["output"], response["output"])"#,
                     "source_root",
                     "lens_summary",
                     "incomplete_json",
+                    "changed_output",
+                    "empty_output",
                 ]
                 .iter()
                 .position(|candidate| candidate == &corruption)

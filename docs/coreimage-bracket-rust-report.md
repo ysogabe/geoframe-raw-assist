@@ -63,3 +63,11 @@ cargo test --manifest-path src-tauri/Cargo.toml real_cli_merge_export_smoke -- -
 - Rust全体は **148 passed / 8 ignored / 0 failed**。フロントは132 tests、types、lint、build、diffcheckが成功。
 - `cargo build` は成功。`src-tauri/src/bracket.rs` の `PathBuf` unused import warningはこの小修正でtests module内へ移動した。
 - 同一RAWの複製とsynthetic GPSを使った確認であり、実AEB画質と実機GUI確認は引き続きpending。
+
+
+### 出力JPEG破損検知
+
+- cache recipeへEXIF継承後の出力JPEGの `output_sha256` と `output_size` を記録する。`MERGE_SCHEMA` を2へ上げ、以前のレシピを再生成させる。
+- cache hitでは通常ファイル検査に加え、非ゼロサイズと実ファイルのSHA-256/sizeがrecipeと一致することを要求する。recipe欠落・不正値・JPEGの置換/破損/空ファイルはcache missとして再生成する。
+- merged exportも同じ指紋を再検証し、指紋が欠落または不一致の画像は拒否する。JPEGデコードは追加せず、mockのsynthetic bytesも保存時の内容fingerprintで検査する。
+- `merge_cache_requires_matching_complete_recipe` に出力差替えと0 byteの再生成を追加し、`exports_only_verified_full_merged_recipe` に改変/空JPEGの拒否を追加した。

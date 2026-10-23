@@ -230,6 +230,19 @@ fn merged(
     {
         return Err("本合成のレシピではありません。".into());
     }
+    let image_size = fs::metadata(&image).map_err(io_error)?.len();
+    let expected_size = recipe["output_size"].as_u64();
+    let expected_hash = recipe["output_sha256"].as_str();
+    if image_size == 0
+        || expected_size != Some(image_size)
+        || expected_hash.is_none_or(|hash| {
+            hash.len() != 64
+                || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || sha256(&image).ok().as_deref() != Some(hash)
+        })
+    {
+        return Err("合成JPEGがレシピに記録された出力と一致しません。".into());
+    }
     let ids = recipe["capture_ids"]
         .as_array()
         .ok_or("合成レシピに capture_ids がありません。")?;
@@ -518,6 +531,8 @@ mod tests {
         fn merged_recipe(&self, inputs: Value) -> Value {
             json!({
                 "ok":true,"kind":"exposure_fusion","preview":false,"params_hash":"0123456789",
+                "output_size":b"synthetic merged JPEG".len(),
+                "output_sha256":format!("{:x}", Sha256::digest(b"synthetic merged JPEG")),
                 "capture_ids":["DSC00001","DSC00002"],"source_root":self.root,
                 "preset":{"name":"neutral_recovery","label":"階調回復"},
                 "request":{"mode":"merge","inputs":inputs,"output":self.data.join("coreimage/merged").join(self.merged_filename())}
@@ -623,6 +638,23 @@ mod tests {
             json!(f.root.join("DSC00001.ARW").to_string_lossy())
         );
         assert!(manifest["items"][0]["exif"].get("gps").is_none());
+
+        let image = f.data.join("coreimage/merged").join(filename);
+        let export_rejects_modified = || {
+            let mut item = f.item("merged");
+            item.merged_filename = Some(filename.into());
+            export_batch(&f.data, "merged-mutated", vec![item])
+        };
+        fs::write(&image, b"changed merged bytes").unwrap();
+        assert!(
+            export_rejects_modified().is_err(),
+            "changed JPEG must be rejected"
+        );
+        fs::write(&image, []).unwrap();
+        assert!(
+            export_rejects_modified().is_err(),
+            "empty JPEG must be rejected"
+        );
     }
 
     #[test]
