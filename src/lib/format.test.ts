@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../../src-tauri/tests/fixtures/presets.json";
-import { formatHighlightRecoveryEffect, SLIDER_SPECS } from "./format";
+import mergeLensReasons from "../../tests/fixtures/coreimage_merge_lens_reasons.json";
+import { formatHighlightRecoveryEffect, lensReasonLabel, SLIDER_SPECS } from "./format";
 
 /**
  * スライダーの可動域は契約 §2 の値域と一致させる（Issue #80）。値域の正は Rust
@@ -52,5 +53,14 @@ describe("formatHighlightRecoveryEffect（#81）", () => {
   it("hr 0 や情報が無いときは出さない", () => {
     expect(formatHighlightRecoveryEffect(undefined)).toBeNull();
     expect(formatHighlightRecoveryEffect({ ...base, value: 0, exposure_delta: 0, shadow_lift_delta: 0 })).toBeNull();
+  });
+});
+
+describe("Core Image ブラケット合成のレンズ理由", () => {
+  it("canonical fixture の各 reason を固有の日本語ラベルへ対応づける", () => {
+    const labels = mergeLensReasons.map((reason) => lensReasonLabel(reason));
+    expect(labels).toEqual(["Core Image が補正に未対応", "フレーム間で補正結果が一致しません"]);
+    expect(new Set(labels).size).toBe(mergeLensReasons.length);
+    expect(labels.some((label, index) => label === mergeLensReasons[index])).toBe(false);
   });
 });

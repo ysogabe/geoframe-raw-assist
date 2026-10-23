@@ -199,6 +199,7 @@ const LENS_REASON_LABELS: Record<string, string> = {
   camera_not_found: "カメラがDBに未登録",
   lensfunpy_unavailable: "lensfun 未導入",
   coreimage_unsupported: "Core Image が補正に未対応",
+  inconsistent_across_frames: "フレーム間で補正結果が一致しません",
 };
 
 export function lensReasonLabel(reason: string | undefined): string {

@@ -13,6 +13,7 @@ import {
   coreImageErrorMessage,
   engineInfoLabel,
   getEngineInfo,
+  mergeBracketCoreImage,
   developFullCoreImage,
   developPreviewCoreImage,
   resolveAdjustments,
@@ -156,6 +157,26 @@ describe("coreImageErrorMessage", () => {
 });
 
 describe("Core Image invoke", () => {
+  it("merge_bracket に固定契約の引数を渡し、MergedResultを変換せず返す", async () => {
+    const merged = { capture_ids: ["A1", "A2"], frames: 2, preview: true };
+    vi.mocked(invoke).mockResolvedValueOnce(merged);
+    await expect(mergeBracketCoreImage(["A1", "A2"], ADJ, PRESET, "preview")).resolves.toBe(merged);
+    expect(invoke).toHaveBeenLastCalledWith("merge_bracket", {
+      captureIds: ["A1", "A2"], preset: PRESET.name, adjustments: ADJ, preview: true, force: false,
+    });
+    vi.mocked(invoke).mockResolvedValueOnce(merged);
+    await mergeBracketCoreImage(["A1", "A2"], ADJ, PRESET, "full");
+    expect(invoke).toHaveBeenLastCalledWith("merge_bracket", {
+      captureIds: ["A1", "A2"], preset: PRESET.name, adjustments: ADJ, preview: false, force: false,
+    });
+  });
+
+  it("merge_bracket の失敗をそのまま返す", async () => {
+    const error = { code: "BUSY", message: "busy" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(mergeBracketCoreImage(["A1", "A2"], ADJ, PRESET, "full")).rejects.toBe(error);
+  });
+
   it("full / preview を別コマンドに送る。full は実寸と継承結果を表示に渡す", async () => {
     const full = toDevelopedResult(ciResult({ preview: false, exif_inherited: true, width: 6000, height: 4000 }), PRESET);
     vi.mocked(invoke).mockResolvedValueOnce(full);

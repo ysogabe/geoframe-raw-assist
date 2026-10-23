@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { Adjustments, CaptureId, DevelopedResult, HighlightRecoveryEffect, PresetInfo } from "./types";
+import type { Adjustments, CaptureId, DevelopedResult, HighlightRecoveryEffect, MergedResult, PresetInfo } from "./types";
 
 /** Core Image 現像。Tauri(Rust) → Swift CLI。EXIF は Rust が APP1 をコピーする。 */
 
@@ -68,6 +68,22 @@ export async function developFullCoreImage(
   preset: PresetInfo,
 ): Promise<DevelopedResult> {
   return await invoke<DevelopedResult>("develop_full_coreimage", { captureId, adjustments, preset: preset.name });
+}
+
+/** ブラケットを Core Image で合成する。Rust が既存 MergedResult 形で返す。 */
+export async function mergeBracketCoreImage(
+  captureIds: CaptureId[],
+  adjustments: Adjustments,
+  preset: PresetInfo,
+  mode: "preview" | "full",
+): Promise<MergedResult> {
+  return await invoke<MergedResult>("merge_bracket", {
+    captureIds,
+    preset: preset.name,
+    adjustments,
+    preview: mode === "preview",
+    force: false,
+  });
 }
 
 /**
