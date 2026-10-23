@@ -40,10 +40,10 @@ PATH="$PWD/work/python314-bin:$PATH" .venv/bin/python scripts/freeze_baseline.py
 
 ## 外部入力
 
-- `/Users/yoshio/works/60-misc/40-raw-assistant/work/raw/`
+- `<repo>/work/raw/`
   の DSC07402 / 07404 / 07405 / 07407 / 07408 / 07412 / 07415 / 07416 /
   07419 / 07422 / 07423 の `.arw` と `.JPG`、11 組。読み取り専用。
-- 元 RAW の有無を `rg --files /Users/yoshio/works/60-misc/40-raw-assistant/work -g '*.ARW' -g '*.arw'`
+- 元 RAW の有無を `rg --files <repo>/work -g '*.ARW' -g '*.arw'`
   で確認した。利用可能な元 RAW は上記 11 枚のみ。
   アーカイブにある過去の現像画像を元 RAW の代替として使っていない。
 - `/Volumes/Backup/100MSDCF` は未マウントのため使わない。

@@ -22,11 +22,13 @@ final class DecodeCacheTests: XCTestCase {
     private func sampleARW() throws -> String {
         var candidates: [String] = []
         if let env = ProcessInfo.processInfo.environment["GEOFRAME_TEST_ARW"] { candidates.append(env) }
-        let rawDir = "/Users/yoshio/works/60-misc/40-raw-assistant/work/raw"
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let rawDir = repoRoot.appendingPathComponent("work/raw").path
         if let names = try? FileManager.default.contentsOfDirectory(atPath: rawDir) {
             candidates += names.filter { $0.lowercased().hasSuffix(".arw") }.sorted().map { "\(rawDir)/\($0)" }
         }
-        candidates.append("/Volumes/Backup/100MSDCF/DSC04430.ARW")
         guard let path = candidates.first(where: { FileManager.default.isReadableFile(atPath: $0) }) else {
             throw XCTSkip("sample RAW not available (set GEOFRAME_TEST_ARW)")
         }
