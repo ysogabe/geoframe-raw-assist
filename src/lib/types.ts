@@ -456,7 +456,7 @@ export type ImportToPhotosError = {
 export type ImportToPhotosResponse = ImportToPhotosOk | ImportToPhotosError;
 
 // ---------------------------------------------------------------------------
-// マニフェスト（outputs/export/<batch>/manifest.json、プラン §3）
+// マニフェスト（$APPDATA/export/<batch>/manifest.json、プラン §3）
 // ---------------------------------------------------------------------------
 
 export type ManifestItemSource = {

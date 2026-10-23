@@ -86,7 +86,7 @@ export function AnalysisGate({ engineStatus, analysisState, progress, errorMessa
         <span className="gate-mark">✦</span>
         <h2>まず写真を解析します</h2>
         <p>
-          撮影フォルダのJPGとARWを読み取り、似たカットのグループ分けを行います（ピント・白飛びなどの採点は今のところ未対応です）。
+          撮影フォルダのJPGとARWを読み取り、似たカットのグループ分けと、シャープさ・白飛びなどの採点を行います。
           初回は数十秒かかります。
         </p>
         {errorMessage && <p className="gate-note">前回の解析で問題が起きました: {errorMessage}</p>}

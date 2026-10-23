@@ -65,7 +65,7 @@ export function Topbar({
           <button className="page-back" onClick={onReturn}><span>←</span> おすすめ一覧</button>
           <div className="breadcrumbs"><span>レビュー</span><b>/</b>書き出し</div>
           <h1>採用した写真を書き出す</h1>
-          <p>カメラJPGか現像済みJPEGを選び、バッチ名を付けて outputs/export/ へコピーします。</p>
+          <p>カメラJPGか現像済みJPEGを選び、バッチ名を付けてアプリのデータフォルダ（export/）へコピーします。</p>
         </div>
         <div className="operation-status">
           <span className={`engine-badge ${engineStatus}`}><i />{engineLabel(engineStatus, engineVersion)}</span>
