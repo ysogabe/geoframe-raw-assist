@@ -11,7 +11,7 @@
   （アーカイブ経路。``local_raw/`` と requirements-raw.txt の環境が前提）
 
 既定経路はアプリ本体（``local_raw``）にも rawpy / lensfunpy にも依存しない（``scripts/evaluation/``）。
-旧エンジンの比較列は、凍結済みの基準画像と ``--frozen-manifest`` で比べる（docs/evaluation-paths.md）。
+旧エンジンの比較列は、凍結済みの基準画像と ``--frozen-manifest`` で比べる（docs/development/evaluation-paths.md）。
 ``--frozen-manifest`` は凍結画像のハッシュ・寸法を照合し（欠落・改変は失敗）、現在の CI で描画して同寸で比べる。
 
 これは「どちらが良いか」の自動判定ではない。判断材料（処理時間・メモリ・明るさ分布・
@@ -33,7 +33,7 @@
 10 バリアント（rawpy 撮影時シャープ ON/OFF、Core Image decoder 8/9 × lens、apple_default、
 CI + rawpy と同じ後段仕上げ）を作り、ROI のシャープネス比・エッジ 10–90% 幅・平坦部ノイズと
 等倍クロップシートを ``sharpness_*.{csv,json,md}`` / ``sheets/`` に出す
-（docs/coreimage-engine-comparison.md §9）。
+（docs/reports/coreimage-engine-comparison.md §9）。
 
 ``--night`` は夜景・星空・長秒の評価モード（Issue #70 / #77、設計書 §4.1 / §4.3）。``NIGHT_VARIANTS``
 （camera / rawpy / CI apple_default v9 lens ON とその NR 0・シャープ 0・lens OFF・decoder 8 派生 / CI neutral v8・v9）
@@ -6413,7 +6413,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--legacy-rawpy", action="store_true",
         help="旧 rawpy / local_raw 経路（アーカイブ）を明示的に使う: rawpy 列・--bracket・--adjustments の実行・CFA 計測。"
-             "local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/evaluation-paths.md）",
+             "local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/development/evaluation-paths.md）",
     )
     parser.add_argument("--frozen-manifest", type=Path,
                         help="凍結基準のマニフェスト（例 tests/fixtures/baseline/rawpy_images.json）。照合してから現在の CI と比べる")

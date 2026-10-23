@@ -1,5 +1,7 @@
 # GeoFrame 写真選定・RAW現像支援機能 引継ぎ文書
 
+> この文書は 2026-08 時点の初期構想の引継ぎ文書です。現在の実装（Python 削除後の単一 Tauri アプリ）とは異なる点があります。現在の構成は [README](../../README.md) と [ADR 0003](../adr/0003-python-removal-single-app.md) を参照してください。
+
 作成日: 2026-08-06  
 対象: GeoFrame（写真DB／スマートディスプレイ／旅行ブログ半自動生成）  
 実装担当: Codex

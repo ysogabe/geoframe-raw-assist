@@ -453,7 +453,7 @@ B（§6）で `cloud_grad` の階調が S1/S2 に残る（`grad_levels`・`grad_
 
 ### 10.1 ROI（`sky_bright` と `cloud_grad`）の帰属規則【決定】
 
-> **改訂（2026-10-21）**: [診断レポート](../coreimage-highlight-diagnosis-report.md) §3.3・§6.4・§8（オーナー判断で採用）に従い、
+> **改訂（2026-10-21）**: [診断レポート](../reports/coreimage-highlight-diagnosis-report.md) §3.3・§6.4・§8（オーナー判断で採用）に従い、
 > 規則 3 / 4 の名称と K の取り方を改めた（ハーネスの計測 3 回目 `diagnosis2` で実装）。規則の順序と判定式は変えていない。
 > 旧名: 規則 3「色域・SDR 出力」（`gamut_output`）→「8bit 量子化」（`quant8`）、規則 4「検証不能」→「JPEG 符号化」（`jpeg_encode`）+「検証不能」（`unverifiable`）。
 > 改めた理由は、計測で規則 3 の中身が白の手前 1/255 の丸め、規則 4 の中身がほぼ JPEG の符号化で、色域・色空間の損失は観測されなかったため。
@@ -493,7 +493,7 @@ ROI の分類 = K に占める最大の帰属（≥ 50%）。2 位が 30% 以上
 | **B: CI + 代替現像の併用** | 「検証不能（API 境界）」が **2 カット以上**あり、かつ rawpy（または他の現像）が同じ ROI で `grad_texture_ratio` ≥ 0.7 を同じ p50 で達成する | 対象写真の判定条件（例: `s1_gt1_any` と `cfa_sat_cell_any` の差が閾値以上）と LibRaw / darktable フォールバックの設計を別 Issue に。ADR 0002 追補 |
 | **C: 未判定** | A でも B でもない（候補が合否を満たさないが API 境界とも言えない、またはセンサー飽和のカットばかりで判断材料が足りない） | 不足データ（太陽・夕景・夜景点光源）と追加実験を Issue に明記。#81 は C1（exposure + lift）を暫定採用するか保留かをオーナーが決める |
 
-いずれの場合も、#71 の「条件付き」判定の根拠を本レポートの数値に差し替え、`docs/coreimage-engine-comparison.md` に §17 として追記する。
+いずれの場合も、#71 の「条件付き」判定の根拠を本レポートの数値に差し替え、`docs/reports/coreimage-engine-comparison.md` に §17 として追記する。
 
 ---
 
@@ -511,7 +511,7 @@ ROI の分類 = K に占める最大の帰属（≥ 50%）。2 位が 30% 以上
 |---|---|---|---|---|
 | **T1 Swift CLI 0.4.0** | `native/coreimage-cli/Sources/CoreImageDevelop/{Request,Develop}.swift`、新規 `Diagnostics.swift`、`Tests/CoreImageDevelopTests/{RequestParserTests,SmokeTests}.swift`、新規 `DiagnosticsTests.swift`、`native/coreimage-cli/README.md`、`cliVersion` | §4 の契約を実装。`settings.gamut_mapping` / `baseline_exposure`、`diagnostics`（stats / dump / linear_space_filter / post_filters / skip_write）、応答 `diagnostics`、`--capabilities` | `swift test` 全件合格。§4.6 のスモーク (a)〜(f)。`scripts/coreimage-regression-applied.sh <ARW フォルダ>` 差分 0 件。`applied` キー集合不変（スモークで既定応答のキー集合を 0.3.0 の固定リストと比較） | `cd native/coreimage-cli && swift build -c release && swift test`、`npm run build:coreimage && scripts/coreimage-regression-applied.sh ~/works/60-misc/40-raw-assistant/work/raw` |
 | **T2 Python ハーネス `--diagnosis`** | `scripts/compare_engines.py`（新節「診断モード --diagnosis」。既存関数は変更しない。`coreimage_request` / `run_coreimage` に `diagnostics` / `extra_settings` 引数を**追加**するのみ）、`tests/test_compare_engines.py`（追記） | §5 CFA 飽和、§6 マトリクス実行、§7 ROI・位置合わせ、§8 指標、§9 候補、§10.1〜10.2 の分類、シート、CSV/JSON/MD 出力。dump は指標後に削除（`--keep-dumps`） | 純粋関数の単体テスト（CFA 合成、ROI 抽出、帰属規則、内挿、stage_loss）合格。`--highlight` の出力が従来と同一（既存テストと `highlight1` の再実行で CSV 差分なし）。T1 のビルド済み CLI で 1 カット（DSC04607）のドライランがエラー 0 | `.venv/bin/python -m pytest tests/test_compare_engines.py`、`.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF --captures DSC04607 --diagnosis --out work/engine-comparison/diag-smoke` |
-| **T3 計測とレポート** | `docs/coreimage-engine-comparison.md`（§17 追記）、`docs/coreimage-highlight-diagnosis-report.md`（新規: 判定・根拠・再現条件・API 境界）、`docs/adr/0002-coreimage-engine-decision.md`（追補）、`docs/coreimage-baseline/`（必要なら）| 10 + 3 カットの本実行、目視シートの確認（オーナー）、§10 の判定、#81 / ADR への接続 | DoD 1〜6 を満たす記述。画像はコミットしない（CSV / JSON / MD のみ。位置情報・撮影地を書かない） | `.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF --captures DSC04473 DSC04607 DSC04532 DSC04705 DSC04579 DSC04604 DSC04754 DSC04432 DSC04746 DSC04462 --diagnosis --full --full-ids DSC04473 DSC04607 DSC04705 --out work/engine-comparison/diagnosis1` |
+| **T3 計測とレポート** | `docs/reports/coreimage-engine-comparison.md`（§17 追記）、`docs/reports/coreimage-highlight-diagnosis-report.md`（新規: 判定・根拠・再現条件・API 境界）、`docs/adr/0002-coreimage-engine-decision.md`（追補）、`docs/coreimage-baseline/`（必要なら）| 10 + 3 カットの本実行、目視シートの確認（オーナー）、§10 の判定、#81 / ADR への接続 | DoD 1〜6 を満たす記述。画像はコミットしない（CSV / JSON / MD のみ。位置情報・撮影地を書かない） | `.venv/bin/python scripts/compare_engines.py --source-root /Volumes/Backup/100MSDCF --captures DSC04473 DSC04607 DSC04532 DSC04705 DSC04579 DSC04604 DSC04754 DSC04432 DSC04746 DSC04462 --diagnosis --full --full-ids DSC04473 DSC04607 DSC04705 --out work/engine-comparison/diagnosis1` |
 
 ### 11.3 順序と依存
 

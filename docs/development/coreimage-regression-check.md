@@ -1,6 +1,6 @@
 # Core Image 現像の回帰確認手順（OS 更新時）
 
-Issue #75。[ADR 0002](adr/0002-coreimage-engine-decision.md) で現像エンジンの基本設定を
+Issue #75。[ADR 0002](../adr/0002-coreimage-engine-decision.md) で現像エンジンの基本設定を
 Core Image（CIRAWFilter）の **`apple_default`・decoder 9・レンズ補正 ON** に決めた。
 `apple_default` はデコーダ内のシャープ・NR などを OS が決める値のまま使うため、**macOS を更新すると画が変わりうる**。
 この手順で、更新のたびにベースラインとの差を確かめる。
@@ -12,8 +12,8 @@ Core Image（CIRAWFilter）の **`apple_default`・decoder 9・レンズ補正 O
 | macOS | 27.0.1（Apple M3）。対応 OS は最新の macOS のみ（古い macOS の個別検証はしない） |
 | CLI | `geoframe-ci-develop` 0.1.0（`native/coreimage-cli`）。0.2.0（#79、個別上書きキーと tiff16 の sRGB 出力を追加）、0.3.0（#73、`adjustments` と応答の `adjustments_applied` を追加）、0.4.0（#92、診断モード `diagnostics` と `settings.gamut_mapping` / `baseline_exposure` を追加）、0.5.0（#82、`--batch` を追加）でも、既定リクエスト（`adjustments` / `diagnostics` 無し）の `applied` は同一（差分 0 件を確認済み） |
 | リクエスト | `"decoder_version": "9"`, `"settings": {"profile": "apple_default", "lens_correction": true}` |
-| 実効パラメータ | [`coreimage-baseline/applied-params-macos-27.0.1.json`](coreimage-baseline/applied-params-macos-27.0.1.json)（α6400 夜間・長秒 11 カット、ISO 3200 / 6400） |
-| 画質指標 | [比較レポート §9.5](coreimage-engine-comparison.md) の `CI apple_default v9 lens ON`（下表に再掲） |
+| 実効パラメータ | [`coreimage-baseline/applied-params-macos-27.0.1.json`](../coreimage-baseline/applied-params-macos-27.0.1.json)（α6400 夜間・長秒 11 カット、ISO 3200 / 6400） |
+| 画質指標 | [比較レポート §9.5](../reports/coreimage-engine-comparison.md) の `CI apple_default v9 lens ON`（下表に再掲） |
 
 実効パラメータ（CLI 応答の `applied`）の要点（ISO ごとに OS が決める値）:
 
@@ -71,7 +71,7 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
   --out work/regression/$(sw_vers -productVersion)/sharpness
 ```
 
-- 撮影 ID とコマンドは [比較レポート §9.2](coreimage-engine-comparison.md) と同じにする。
+- 撮影 ID とコマンドは [比較レポート §9.2](../reports/coreimage-engine-comparison.md) と同じにする。
 - `sharpness_summary.json` の `by_mode` から `ci_apple_v9_l1` の値を取り、1. の表と比べる。
 - `sheets/` の等倍クロップ（`detail1` / `detail2` / `corner`）を、前回の同じファイルと並べて目視する。
   特に見る点: 細部の水彩状の平滑化、白い点状のノイズ、偽色、星（夜景カット）の消失。
@@ -107,7 +107,7 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
   --out work/regression/$(sw_vers -productVersion)/adjustments
 ```
 
-- 撮影 ID・手順・閾値は [比較レポート §16](coreimage-engine-comparison.md)（昼 6 + 星空 3 カットで全チェック合格が基準。閾値は `scripts/compare_engines.py` の `ADJ_*`）。
+- 撮影 ID・手順・閾値は [比較レポート §16](../reports/coreimage-engine-comparison.md)（昼 6 + 星空 3 カットで全チェック合格が基準。閾値は `scripts/compare_engines.py` の `ADJ_*`）。
 - 後段オラクル（tiff16 sRGB、ΔE76 中央値・チャンネル差 p99）、方向・単調、NR full の星の残存率・空の高周波、白点（`impulse_vs_full` ≤ 10）、処理時間が見える。
 - 不合格は、写像の定数（`MIRED_PER_UNIT`、NR の `fullLuminanceCap` など）の較正か、指標の見直しかを §16.3 の分類（目安が非現実的 / 定数の較正 / 実装のバグ / rawpy 側の基準差）で判断する。
 - **注意（2026-10-23〜）**: `--adjustments` の実行は rawpy の掃引と Python の後段オラクルを使う**旧経路（アーカイブ）**で、
@@ -130,7 +130,7 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 ```
 
 - 見るもの: `index.md` の §2.2 の等価性（条件 9。tiff16 の max abs diff 0 と `applied` の一致）と、救済系 3 プリセットの条件 1〜5（hr 0 比で白飛びが減り、中間調 ±0.03）。
-- 手順・閾値・合否の定義は [再調整の設計書](design/coreimage-preset-retune.md) §7.4、結果の記録は [再調整レポート](coreimage-preset-retune-report.md)。
+- 手順・閾値・合否の定義は [再調整の設計書](../design/coreimage-preset-retune.md) §7.4、結果の記録は [再調整レポート](../reports/coreimage-preset-retune-report.md)。
 - `--presets` は既定の Core Image のみの経路で回る（rawpy の列は作らない）。
 
 ### 3.6 凍結基準との比較（rawpy 削除後の旧エンジン比較。数分〜）

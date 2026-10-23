@@ -1,8 +1,8 @@
 # #90 / #117: Python本体削除の検証（2026-10-23）
 
 現11枚のCore Image代理/原寸差を再現し、評価スクリプトを独立化してから本体を削除した。
-実施順は[計画](design/evaluation-before-python-removal.md)、測定値と#57の次の修正範囲は
-[計測報告](coreimage-proxy-full-measurement.md)、CLIの使い方は[評価手順](evaluation-paths.md)を参照。
+実施順は[計画](../design/evaluation-before-python-removal.md)、測定値と#57の次の修正範囲は
+[計測報告](coreimage-proxy-full-measurement.md)、CLIの使い方は[評価手順](../development/evaluation-paths.md)を参照。
 
 ## 復元点と削除範囲
 

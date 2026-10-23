@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Core Image 現像の回帰確認 3.1（docs/coreimage-regression-check.md、Issue #75）。
+# Core Image 現像の回帰確認 3.1（docs/development/coreimage-regression-check.md、Issue #75）。
 # ベースライン設定（apple_default・decoder 9・lens ON）で ARW を preview 現像し、CLI 応答の `applied`
 # （OS が決めるシャープ・NR・色温度など）をベースライン JSON と比べる。差分が 0 件なら終了コード 0。
 #

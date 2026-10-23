@@ -10,7 +10,7 @@
 > - 旧 HTTP 契約（凍結版、`/api/*` エンドポイント・`outputs/` ディレクトリ・rawpy パイプライン）は
 >   コミット `f3e24b0` 時点の本ファイルを参照。現行の決定と食い違う点は §10 にまとめた。
 > - TypeScript 側の写し: `src/lib/types.ts`。
-> - #90/#117でPython本体を削除済み。評価用Pythonは[独立評価手順](evaluation-paths.md)に従い、保存画像・JSONとNumPy/Pillow/OpenCVだけを使う。旧実装を含む最後の参照点は `e838ecc`。
+> - #90/#117でPython本体を削除済み。評価用Pythonは[独立評価手順](development/evaluation-paths.md)に従い、保存画像・JSONとNumPy/Pillow/OpenCVだけを使う。旧実装を含む最後の参照点は `e838ecc`。
 > - 節番号 §2（Adjustments）・§5（プリセット）・§9（resolve の規則）はコードのコメントから参照されている
 >   （`src-tauri/src/adjustments.rs`・`presets.rs`、`native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`、
 >   `native/coreimage-cli/README.md`）。**番号を変えないこと。**
@@ -524,7 +524,7 @@ $APPDATA/
 定義の正は `src-tauri/src/presets.rs`（`PRESETS`）。フィクスチャ `src-tauri/tests/fixtures/presets.json` と Rust のテストが一致を守る
 （再生成: `UPDATE_PRESETS_FIXTURE=1 cargo test write_presets_fixture -- --ignored`）。UI は `get_presets` で一覧を取る。
 値は #81（2026-10-22）で Core Image 向けに再調整した初期案（[`design/coreimage-preset-retune.md`](design/coreimage-preset-retune.md) §7.2。
-計測と目視は [`coreimage-preset-retune-report.md`](coreimage-preset-retune-report.md) で継続）。
+計測と目視は [`coreimage-preset-retune-report.md`](reports/coreimage-preset-retune-report.md) で継続）。
 既定プリセットは `neutral_recovery`（`DEFAULT_PRESET`）。右端は `highlight_recovery` を写像して加算した実効値。
 
 | name | label | exposure | wb_temp | shadow_lift | highlight_recovery | brightness | contrast | saturation | sharpness | noise_reduction | 実効 (EV, lift) |

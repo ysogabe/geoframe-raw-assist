@@ -1,7 +1,7 @@
 # Issue #87: PSO 探索ループの Rust 移植・実測報告
 
 2026-10-22。ブランチ `feat/87-pso-loop-rust`、作業ツリー
-`/Users/yoshio/works/60-misc/wt-87-pso-loop`。コミット・push・PR 作成なし。
+`<repo>`。コミット・push・PR 作成なし。
 Issue #87 の本文と全コメント、#57、ADR 0003 §4、M3 計画、CLI 0.7.0 の decode 契約、
 Swift `Adjustments.swift`、PR #126 の削除前ハンドラを確認した。
 
@@ -130,10 +130,10 @@ Python の絶対星数に合わせる係数は追加せず、同じ CI natural �
 ```sh
 npm ci && npm run build:coreimage
 npm run tauri:build -- --bundles app
-GEOFRAME_PSO_RAW_ROOT=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw \
+GEOFRAME_PSO_RAW_ROOT=<repo>/work/raw \
 GEOFRAME_PSO_SIDECAR="$PWD/src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app/Contents/MacOS/geoframe-ci-develop" \
 cargo test --release --manifest-path src-tauri/Cargo.toml candidates_release_benchmark -- --ignored --nocapture
-GEOFRAME_PSO_RAW_ROOT=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw \
+GEOFRAME_PSO_RAW_ROOT=<repo>/work/raw \
 cargo test --release --manifest-path src-tauri/Cargo.toml candidate_threshold_survey -- --ignored --nocapture
 ```
 

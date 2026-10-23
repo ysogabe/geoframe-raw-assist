@@ -3,7 +3,7 @@
 候補の星判定・指標・安全策・スコア・理由だけを、値もロジックも変えずに写した。RAW デコード・
 探索・アプリ設定には触れない。写しの一致は ``tests/test_evaluation_support.py`` が凍結 JSON
 （``tests/fixtures/baseline/metrics.json`` / ``tests/fixtures/pso-selection.json``）で検証する。
-旧 Python の閾値を Core Image の合否基準として使うものではない（docs/evaluation-paths.md）。
+旧 Python の閾値を Core Image の合否基準として使うものではない（docs/development/evaluation-paths.md）。
 """
 
 from __future__ import annotations

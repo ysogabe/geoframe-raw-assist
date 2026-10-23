@@ -2,7 +2,7 @@
 
 既定の評価経路はアプリ本体にも rawpy / lensfunpy にも依存しない。旧エンジンで基準画像・
 候補を作り直す経路だけが ``local_raw`` を要し、呼び出し側の ``--legacy-rawpy`` 等の明示フラグと
-``requirements-raw.txt`` の環境・``local_raw/`` の checkout を前提とする（docs/evaluation-paths.md）。
+``requirements-raw.txt`` の環境・``local_raw/`` の checkout を前提とする（docs/development/evaluation-paths.md）。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ PREREQUISITE = (
     "旧 rawpy/local_raw 経路（アーカイブ、明示 opt-in）です。Python 本体（local_raw/）は #90 / #117 で削除されるため、"
     "削除前のコミットの checkout（local_raw/ と requirements-raw.txt が残るもの）で、その環境を用意して "
     "--legacy-rawpy 等の明示フラグを付けて実行してください。既定の評価は凍結基準（--frozen-manifest）と "
-    "Core Image の出力を使います（docs/evaluation-paths.md）"
+    "Core Image の出力を使います（docs/development/evaluation-paths.md）"
 )
 
 

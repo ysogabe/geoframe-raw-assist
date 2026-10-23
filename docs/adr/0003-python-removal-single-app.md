@@ -2,7 +2,7 @@
 
 - ステータス: 承認（2026-10-22。Issue #105。オーナー判断は §6 で確定。実装の順序は [単一アプリの段階的実装プラン](../design/single-app-implementation-plan.md) が正）
 - 関連: Issue #105、[ADR 0002](0002-coreimage-engine-decision.md)（Core Image 採用と rawpy 取りやめ）、
-  [4 機能の移行設計](../design/coreimage-feature-migration.md)、[小サイズレンダの計測](../coreimage-small-render-performance.md)（#102）、
+  [4 機能の移行設計](../design/coreimage-feature-migration.md)、[小サイズレンダの計測](../reports/coreimage-small-render-performance.md)（#102）、
   `native/coreimage-cli/README.md`「バッチモード」（#82）、[単一アプリの段階的実装プラン](../design/single-app-implementation-plan.md)
 - 表記: 【確認】はコードを読んで確かめた事実（ファイルと行を併記）。【推測】は見立て。【スパイク】は `work/spike-105/`（gitignore 済み、コミットしない）で動かして確かめたもの。
 
@@ -106,7 +106,7 @@ PSO の高速化は `--batch` の op 追加（#102 §5.3）で達成できるこ
 
 現行 `local_raw/exif.py:114-134` `build_inherited_exif` は、ペア JPG の `Image.getexif()` を読み、(1) `Orientation` を 1 に、(2) ExifIFD の `PixelX/YDimension` を出力寸法に、
 (3) `MakerNote`(0x927C) を破棄、(4) `Software` を設定して `exif.tobytes()` で書き直す。**GPS IFD (0x8825) には触れておらず、カメラ JPG に GPS があればそのまま出力に継承される。**
-根拠: `docs/spikes-wave0.md:125`（実機 Sony JPEG で「GPS IFD も保持される」）と、本 ADR 作成時の合成 JPEG での再現（Pillow 13.0.0。GPS IFD 5 タグが出力で一致、MakerNote は消え、Orientation 1）。
+根拠: `docs/reports/spikes-wave0.md:125`（実機 Sony JPEG で「GPS IFD も保持される」）と、本 ADR 作成時の合成 JPEG での再現（Pillow 13.0.0。GPS IFD 5 タグが出力で一致、MakerNote は消え、Orientation 1）。
 pin されている Pillow は 12.3.0（`requirements-raw.txt`）で版が違うが、実機の根拠は spikes-wave0 側にある。
 
 つまり、このプロジェクトの「GPS・撮影地をアプリが**新たに**書き込まない」方針は守られており、同時に**カメラが書いた GPS は落とさず残す**のが現行挙動である。

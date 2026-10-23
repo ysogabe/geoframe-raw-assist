@@ -1,7 +1,7 @@
 # Core Image の白飛び（ハイライト）診断レポート（Issue #92、T3）
 
 - 対象: `apple_default`・decoder 9・レンズ補正 ON（ADR 0002 の基本路線）の白飛びが、どの段で生まれ、どのレバーで戻せるか。
-- 設計: [設計書](design/coreimage-highlight-diagnosis.md)（§10 の判定ロジック、§13 のオーナー判断はすべて推奨案で確定）。
+- 設計: [設計書](../design/coreimage-highlight-diagnosis.md)（§10 の判定ロジック、§13 のオーナー判断はすべて推奨案で確定）。
 - 道具: CLI 0.4.0（診断モード、`native/coreimage-cli/README.md`「診断モード」）、`scripts/compare_engines.py --diagnosis`（T2）。
 - 計測: 2026-10-21、macOS 27.0.1 / Apple M3、rawpy 0.27.0 / LibRaw 0.22.1、Python 3.14.6。10 カット preview（2400px）+ 3 カット full、エラー 0 件。
   帰属（§3）・ROI（§6.3）は計測 3 回目（`diagnosis2`、§8 の 3〜5 を反映）の値。段階・掃引・タスク C の合否は 2 回目と同一（§1）。

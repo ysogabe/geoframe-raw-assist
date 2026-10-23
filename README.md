@@ -52,7 +52,7 @@ DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります�
 
 元のJPG/ARWは、いずれの操作でも変更しません。
 
-処理時間・メモリの目安（macOS 27.0.1 / M3、ISO 6400 の 1 カット、Core Image CLI 単体）: プレビュー約1.0秒・RSS 約170MB、原寸約2.0秒・RSS 約270MB（[回帰確認手順](docs/coreimage-regression-check.md) §1）。
+処理時間・メモリの目安（macOS 27.0.1 / M3、ISO 6400 の 1 カット、Core Image CLI 単体）: プレビュー約1.0秒・RSS 約170MB、原寸約2.0秒・RSS 約270MB（[回帰確認手順](docs/development/coreimage-regression-check.md) §1）。
 
 ## 現像プリセット
 
@@ -70,7 +70,7 @@ DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります�
 | `backlit_rescue` | 逆光 | 明るい背景の階調を残しつつ、影になった被写体を持ち上げる |
 | `vivid_travel` | ビビッド | 旅の記録向けに色を鮮やかに強調する |
 
-各プリセットは露出・色温度・シャドウ持ち上げ・ハイライト回復・明るさ・コントラスト・彩度・シャープネス・ノイズ低減の9項目の初期値です（値の正は `src-tauri/src/presets.rs`。Core Image の `apple_default` を基準に再調整済み。[再調整レポート](docs/coreimage-preset-retune-report.md)）。写真を開いたときの初期プリセットは、解析の推薦理由に合わせて選ばれます（黒つぶれ→黒つぶれ救済、白飛び→白飛び救済、両方→逆光、高ISO・夜景→夜景ノイズ低減）。画面上のスライダーで上書きでき、調整値ごとに別ファイルとして保存されます。
+各プリセットは露出・色温度・シャドウ持ち上げ・ハイライト回復・明るさ・コントラスト・彩度・シャープネス・ノイズ低減の9項目の初期値です（値の正は `src-tauri/src/presets.rs`。Core Image の `apple_default` を基準に再調整済み。[再調整レポート](docs/reports/coreimage-preset-retune-report.md)）。写真を開いたときの初期プリセットは、解析の推薦理由に合わせて選ばれます（黒つぶれ→黒つぶれ救済、白飛び→白飛び救済、両方→逆光、高ISO・夜景→夜景ノイズ低減）。画面上のスライダーで上書きでき、調整値ごとに別ファイルとして保存されます。
 
 ### 現像候補自動生成（代理評価）
 
@@ -85,7 +85,7 @@ DMG の作成（`bundle_dmg.sh`）がまれに失敗することがあります�
   から「プレビュー現像」または「本現像」を実行してください。
 - 基準より白飛び・黒つぶれが大きく悪化する候補などは返さず、応答の `rejected` に理由を残します。
 
-探索空間・安全判定・実測は [PSO 移植の報告](docs/coreimage-pso-loop-report.md) を参照してください。代理（640px）と本現像（原寸）の見え方の比較は Issue #57 で計測中です（結果は `docs/coreimage-proxy-full-measurement.md` にまとめる予定）。
+探索空間・安全判定・実測は [PSO 移植の報告](docs/reports/coreimage-pso-loop-report.md) を参照してください。代理（640px）と本現像（原寸）の見え方の比較は Issue #57 で計測中です（結果は `docs/reports/coreimage-proxy-full-measurement.md` にまとめる予定）。
 
 候補を選択しただけで元のJPG/ARWが変更されたり、現像が勝手に始まったりすることはありません。
 
@@ -135,12 +135,12 @@ $APPDATA/
 
 macOS 標準の Core Image（`CIRAWFilter`）を、Swift 製の CLI `geoframe-ci-develop`（`native/coreimage-cli`）経由で使います。Tauri（Rust）が CLI を子プロセスとして呼び、プレビュー・本現像・ブラケット合成・候補生成の代理デコードをすべてこの経路で行います。
 
-- 基本設定は `apple_default` profile・decoder 9・レンズ補正 ON（採否は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、比較は [比較レポート](docs/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md)）。
-- 調整（Adjustments）の 9 キーは Core Image の RAW デコードと後段の CIFilter に写像しています（[パラメータ対応表](docs/coreimage-parameter-mapping.md)）。`highlight_recovery` は露出とシャドウ持ち上げへの写像です（Issue #81）。
+- 基本設定は `apple_default` profile・decoder 9・レンズ補正 ON（採否は [ADR 0002](docs/adr/0002-coreimage-engine-decision.md)、比較は [比較レポート](docs/reports/coreimage-engine-comparison.md)、CLI の設計は [ADR 0001](docs/adr/0001-coreimage-raw-poc.md)）。
+- 調整（Adjustments）の 9 キーは Core Image の RAW デコードと後段の CIFilter に写像しています（[パラメータ対応表](docs/development/coreimage-parameter-mapping.md)）。`highlight_recovery` は露出とシャドウ持ち上げへの写像です（Issue #81）。
 - 書き出す本現像・合成の JPEG には、ペアのカメラ JPEG の EXIF を引き継ぎます。
 - 外部ライブラリ（rawpy / LibRaw、lensfunpy など）には依存しません。対応 OS は最新の macOS です。
 - ビルド: `npm run build:coreimage`（Swift CLI をビルドし `src-tauri/binaries/` に置く。`tauri:dev` / `tauri:build` からも自動で実行。`cargo build` / `cargo test` の前には一度必要）。
-- macOS を更新したら [回帰確認手順](docs/coreimage-regression-check.md) で基本設定の画が変わっていないかを確かめます（`scripts/coreimage-regression-applied.sh <ARW のフォルダ>`）。
+- macOS を更新したら [回帰確認手順](docs/development/coreimage-regression-check.md) で基本設定の画が変わっていないかを確かめます（`scripts/coreimage-regression-applied.sh <ARW のフォルダ>`）。
 
 ## 評価スクリプト（開発者向け・Python）
 
@@ -155,18 +155,18 @@ python3 -m venv .venv
 - `scripts/evaluate_candidates.py` — 候補生成の評価・集計。
 - 旧エンジン（rawpy / `local_raw/`）で基準画像や候補を作り直す経路は**アーカイブ扱い**です。Python 本体（`local_raw/`）を削除する前のコミットを checkout し、その時点の `requirements-raw.txt` の環境で `--legacy-rawpy` を明示して実行します。
 
-経路と使い分けは [評価手順](docs/evaluation-paths.md)と各スクリプトの `--help` を参照してください。旧実装を含む最後の参照点は `e838ecc` です。過去の実験の記録（比較レポートなどの表と数値）はそのまま残しています。
+経路と使い分けは [評価手順](docs/development/evaluation-paths.md)と各スクリプトの `--help` を参照してください。旧実装を含む最後の参照点は `e838ecc` です。過去の実験の記録（比較レポートなどの表と数値）はそのまま残しています。
 
 ## 既知の制限
 
 - 本現像・合成は完了まで画面で待ちます（キャンセル不可）。
 - DB保存・非同期ジョブキューは未接続です。解析結果はJSONファイルのキャッシュのみです。
 - 同一バッチ名で再度書き出すと、以前の現像JPEGがフォルダに残ったままになります。
-- 露出ブラケット合成は、実際のAEB・三脚長秒ブラケットでの画質を未検証です（[ブラケット Rust 移植の報告](docs/coreimage-bracket-rust-report.md)）。
+- 露出ブラケット合成は、実際のAEB・三脚長秒ブラケットでの画質を未検証です（[ブラケット Rust 移植の報告](docs/reports/coreimage-bracket-rust-report.md)）。
 - 対応する命名は `DSC#####.JPG` / `.ARW` だけです。他機種の命名やRAW単独のフォルダ、他社のRAW形式（CR2/NEF等）は解析対象になりません。
 - `apple_default` の内部パラメータは非公開で、macOS の更新で画が変わりうります（回帰確認手順で確認）。
 
-詳細な実装状況は `docs/GEOFRAME_RAW_ASSIST_HANDOFF.md` の「MVP 実装状況」を参照してください。
+詳細な実装状況は `docs/history/GEOFRAME_RAW_ASSIST_HANDOFF.md` の「MVP 実装状況」を参照してください。
 
 ## テスト
 

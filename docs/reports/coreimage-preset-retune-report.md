@@ -1,6 +1,6 @@
 # プリセット再調整と `highlight_recovery` の写像 — 計測レポート（Issue #81）
 
-- 設計: [設計書](design/coreimage-preset-retune.md)（§7 手順・§7.4 合否・§8 シート、§11 オーナー判断 2026-10-22）。
+- 設計: [設計書](../design/coreimage-preset-retune.md)（§7 手順・§7.4 合否・§8 シート、§11 オーナー判断 2026-10-22）。
 - 実施: 2026-10-22、macOS 27.0.1 / Apple M3、CLI 0.6.0、Python 3.13 + rawpy 0.27.0。
 - **状況: 完了（反復 2 / 3 回）。条件 1〜5・7〜10 は合格、条件 6 は誤差レベルの不一致のみ（§2.3）。目視はオーナーが 2026-10-22 に合格と判断（案 C と `landscape_clear` の弱めた版は採らない）。**
   run1（初期案）→ run2（`sunset_glow` の `shadow_lift` 8 → 4）→ run3（確定値で 15 カットを再計測。ハーネスの判定修正を含む）。

@@ -74,7 +74,7 @@
 - Rust `src-tauri/src/coreimage.rs`: `develop()` が CLI を子プロセスで呼ぶ。固定値 `PROFILE="neutral"`、`DECODER_VERSION="9"`、`PREVIEW_MAX_EDGE=2400`、`FORMAT="jpeg"`。
   同時実行 1 本（`DevelopSlot`）、60 秒ウォッチドッグ、出力は `<app_data_dir>/coreimage/`。`GEOFRAME_COREIMAGE_EXPERIMENT=1` のときだけ有効。
   （この項は #72/#73 以前の状況。#72/#73 で既定が `apple_default` の Core Image プレビューに変わり、実験フラグは廃止、`GEOFRAME_PREVIEW_ENGINE=rawpy` で切り戻す形になった。）
-- パラメータ対応表 `docs/coreimage-parameter-mapping.md`: `exposure`・`wb_temp` は「近似（換算必要）」、`shadow_lift` / `brightness` / `contrast` / `saturation` は「後段 CIFilter で再現可（sRGB ガンマ空間で演算が必要）」、
+- パラメータ対応表 `docs/development/coreimage-parameter-mapping.md`: `exposure`・`wb_temp` は「近似（換算必要）」、`shadow_lift` / `brightness` / `contrast` / `saturation` は「後段 CIFilter で再現可（sRGB ガンマ空間で演算が必要）」、
   `sharpness` / `noise_reduction` は「近似」、**`highlight_recovery` は「対応なし」**。
 
 ---
@@ -83,7 +83,7 @@
 
 ### 2.1 中間案「RAW デコードだけ Core Image、後段は Python」は成り立つか
 
-【確認】現行の処理は 2 段に分かれている（`docs/coreimage-parameter-mapping.md` 原則、`engine.develop_raw`）:
+【確認】現行の処理は 2 段に分かれている（`docs/development/coreimage-parameter-mapping.md` 原則、`engine.develop_raw`）:
 デコード段（rawpy `postprocess` + lensfun）と、表示参照の後段（`engine.apply_post_decode_chain` = `_apply_shadow_lift_array` → `_resize_array` → `_apply_tone_array`）。
 後段は numpy/cv2 のみで rawpy に依存しない。
 
@@ -102,7 +102,7 @@ ADR 0002 の速度・メモリ優位（CI 0.77〜2.15 s、RSS 約 290MB）も削
 
 ### 2.2 後段処理（shadow_lift / brightness / contrast / saturation / USM）の置き場所
 
-> **実装済み（#72/#73、2026-10-21）**: プレビューの Core Image 化と Adjustments 9 キーの写像が完了した。後段は下記の前提どおり Swift CLI 内の Metal カーネル（`geoframe_tone` / `geoframe_usm`）で、1 回のレンダに含めた（CLI 0.3.0。`highlight_recovery` は no-op で代替は #81）。写像は [設計書](coreimage-preview-adjustments.md) §3.3、較正結果は [比較レポート §16](../coreimage-engine-comparison.md)。原寸・書き出しはまだ rawpy 経由。以下の本文は設計時の記述で、§1 の「現状」も #72/#73 以前のもの。
+> **実装済み（#72/#73、2026-10-21）**: プレビューの Core Image 化と Adjustments 9 キーの写像が完了した。後段は下記の前提どおり Swift CLI 内の Metal カーネル（`geoframe_tone` / `geoframe_usm`）で、1 回のレンダに含めた（CLI 0.3.0。`highlight_recovery` は no-op で代替は #81）。写像は [設計書](coreimage-preview-adjustments.md) §3.3、較正結果は [比較レポート §16](../reports/coreimage-engine-comparison.md)。原寸・書き出しはまだ rawpy 経由。以下の本文は設計時の記述で、§1 の「現状」も #72/#73 以前のもの。
 
 4 機能のうちプリセット・PSO・ブラケット合成はすべて「Adjustments の後段」に依存している（【確認】`bracket.merge_bracket` も合成結果に `_apply_shadow_lift_array` / `_apply_tone_array` を 1 回掛ける。PSO は `render_proxy` → `engine.apply_post_decode_chain`）。
 後段の置き場所は #73 で決まるが、本設計は次を前提にする:

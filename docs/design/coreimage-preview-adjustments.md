@@ -6,7 +6,7 @@
 - 関連: Issue #72 / #73（#73 のオーナーコメント: 後段は CLI 内、`noise_reduction` の ISO 帯別表と `highlight_recovery` の代替を #73 の成果物に）、
   #80（プリセットの Rust 移行）、#81（プリセット値再調整・highlight_recovery 置き換え）、#82（CLI バッチ）、#88（暗所判定）、#71（逆光評価。PR #91 で実施、ハイライトの条件は「条件付き」）。
 - 作成: 2026-10-20（設計のみ。コードは書いていない）。
-- 実装後の更新（2026-10-21）: 実装済み。T5 の較正結果（NR full の上限 0.5、§3.7 の閾値、`wb_k0_out_of_range` ガード）を §3.3・§3.7 に反映した。判断の経緯は [比較レポート §16](../coreimage-engine-comparison.md)。
+- 実装後の更新（2026-10-21）: 実装済み。T5 の較正結果（NR full の上限 0.5、§3.7 の閾値、`wb_k0_out_of_range` ガード）を §3.3・§3.7 に反映した。判断の経緯は [比較レポート §16](../reports/coreimage-engine-comparison.md)。
 
 
 ## オーナー判断（2026-10-20 確定）
@@ -512,7 +512,7 @@ T2 は T1 の実バイナリ無しで進められる（契約に対する JSON �
 | T3 フロント | `coreimage-api.ts` 書き換え（§4.4）、`App.tsx: runDevelop` の分岐とフォールバック、`types.ts` `engine?`、`app-state.ts`: `ViewerSource.previewEdge` と **`develop/ok` の通知文に `action.result.engine === "coreimage"` なら「Core Image・」を入れる**（通知は reducer が結果から組む【確認】）、`format.ts: lensReasonLabel` に `coreimage_unsupported` を追加、`BeforeAfter.tsx` バッジ・注記、`FullSizeViewer.tsx` 文言、`OperationPanel.tsx`（`CoreImageExperiment` 除去、`previewEdge` 受け渡し）、`CoreImageExperiment.tsx` 削除、CSS の不要クラス削除。テスト: `coreimage-api.test.ts`（`toDevelopedResult` / `resolveAdjustments` / `shouldFallbackToRawpy`）、`app-state.test.ts` に engine 付き結果の通知文のケースを 1 つ追加 | `src/lib/coreimage-api.ts`、`src/lib/coreimage-api.test.ts`（新規）、`src/lib/types.ts`、`src/lib/app-state.ts`、`src/lib/app-state.test.ts`、`src/lib/format.ts`、`src/App.tsx`、`src/components/{BeforeAfter,FullSizeViewer,OperationPanel}.tsx`、`src/components/CoreImageExperiment.tsx`（削除）、`src/App.css` 等 | `npm test`、`npx tsc --noEmit`、`npm run lint`、`npm run build` 緑。ブラウザモードで挙動不変 |
 | T4 ハーネス | `compare_engines.py`: `--adjustments` モード（§3.7 の掃引・オラクル・指標・シート）、`run_coreimage` に `adjustments=` 引数、rawpy ワーカーに掃引値を渡す `--worker-adjustments <JSON>`（現状の `worker_rawpy` は既定プリセットのみ【確認】）。純粋関数のテスト | `scripts/compare_engines.py`、`tests/test_compare_engines.py` | `npm run test:raw` 緑。`--dry-run` が通る |
 | T5 結合・較正 | 上記を結合してハーネスを実行。`MIRED_PER_UNIT`・NR 表・許容値の確定。`tauri:dev` で手動確認（プレビュー → 比較欄 → 原寸ビューア、フォールバック（CLI を一時的に退避して確認）、切り戻しフラグ、カット切替、フォルダ切替） | T1 の定数のみ | §3.7 の合否をすべて満たす。結果を `work/engine-comparison/adjustments1/` と比較レポートの新節に残す |
-| T6 ドキュメント | `docs/API_CONTRACT.md`（`engine?` 追加、Tauri のプレビュー経路、`outputs/preview` は rawpy 用のまま）、`docs/coreimage-parameter-mapping.md`（「#73 の決定」列）、`docs/adr/0002-coreimage-engine-decision.md` 追補（段階 1 完了、見え方不一致の注記）、`docs/coreimage-regression-check.md`（記録行: CLI 0.3.0 差分 0 件。`--adjustments` を回帰項目に追加）、`docs/design/coreimage-feature-migration.md` §2.2（前提どおり実装された旨）、`README.md`（試験機能 → 既定、切り戻しフラグ）、CLI README（T1 内） | docs 配下、`README.md` | 記述が実装と一致（メインがレビュー） |
+| T6 ドキュメント | `docs/API_CONTRACT.md`（`engine?` 追加、Tauri のプレビュー経路、`outputs/preview` は rawpy 用のまま）、`docs/development/coreimage-parameter-mapping.md`（「#73 の決定」列）、`docs/adr/0002-coreimage-engine-decision.md` 追補（段階 1 完了、見え方不一致の注記）、`docs/development/coreimage-regression-check.md`（記録行: CLI 0.3.0 差分 0 件。`--adjustments` を回帰項目に追加）、`docs/design/coreimage-feature-migration.md` §2.2（前提どおり実装された旨）、`README.md`（試験機能 → 既定、切り戻しフラグ）、CLI README（T1 内） | docs 配下、`README.md` | 記述が実装と一致（メインがレビュー） |
 
 並行時の衝突回避: T1〜T4 は互いのディレクトリに触れない。`main.rs` は T2 のみ、`types.ts` / `app-state.ts` は T3 のみ。T6 は T5 の後にメインまたは 1 人で。
 

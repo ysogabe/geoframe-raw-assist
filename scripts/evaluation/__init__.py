@@ -10,5 +10,5 @@
 - :mod:`.legacy` … 旧 rawpy / local_raw 経路（アーカイブ）の明示 opt-in ゲート
 
 旧エンジンを実行する基準生成は :mod:`.legacy` を通した明示 opt-in だけで、既定経路は
-このパッケージと numpy / Pillow / OpenCV だけで動く（docs/evaluation-paths.md）。
+このパッケージと numpy / Pillow / OpenCV だけで動く（docs/development/evaluation-paths.md）。
 """

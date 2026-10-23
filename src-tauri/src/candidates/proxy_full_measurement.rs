@@ -3,7 +3,7 @@
 //! 本番のアルゴリズム・閾値には触れない。候補生成は [`generate`]（アプリと同じ経路）、代理の再現像は
 //! [`Renderer`]、原寸は [`coreimage::develop`]（`develop_full_coreimage` と同じ経路）を使う。指標は
 //! Rust の純粋関数（[`image_metrics`] / [`star_measurements`]）だけで計算し、Python（local_raw）は使わない。
-//! 定義と実行手順は `docs/coreimage-proxy-full-measurement.md`。
+//! 定義と実行手順は `docs/reports/coreimage-proxy-full-measurement.md`。
 //!
 //! 出力（既定 `work/issue57/proxy-full/`、git 管理外）:
 //! - `cases/<key>.json` … `scripts/evaluate_candidates.py --aggregate-only` が読める形
@@ -1127,7 +1127,7 @@ fn write_json(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap() + "\n").unwrap();
 }
 
-/// 手動計測（release sidecar 必須。手順は docs/coreimage-proxy-full-measurement.md）:
+/// 手動計測（release sidecar 必須。手順は docs/reports/coreimage-proxy-full-measurement.md）:
 /// GEOFRAME_PSO_RAW_ROOT=<stars の RAW> GEOFRAME_PSO_SIDECAR=<CLI> \
 ///   cargo test --release --manifest-path src-tauri/Cargo.toml \
 ///   coreimage_proxy_full_measurement -- --ignored --nocapture

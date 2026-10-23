@@ -2,11 +2,11 @@
 
 - 対象: 11 プリセット（`src-tauri/src/presets.rs`）の値を `apple_default`・decoder 9・レンズ補正 ON（ADR 0002 の基本路線）向けに再調整し、
   CLI で no-op になっている `highlight_recovery` を `exposure` と `shadow_lift` への写像で置き換える。
-- 前提（確定済み）: #92 の判定 A（[診断レポート](../coreimage-highlight-diagnosis-report.md) §7〜§8、[ADR 0002 追補](../adr/0002-coreimage-engine-decision.md)）。
+- 前提（確定済み）: #92 の判定 A（[診断レポート](../reports/coreimage-highlight-diagnosis-report.md) §7〜§8、[ADR 0002 追補](../adr/0002-coreimage-engine-decision.md)）。
   合否の基準は **CI 既定（`d_base`）の出力**。採用候補は C1' = `exposure −0.7 + shadow_lift 40（brightness 1.0）`、強め `−1.0 + 55`。
   `brightness > 1` での戻し・`CIHighlightShadowAdjust`・gamut OFF + 自前カーブ・EDR / boost は使わない。`noise_reduction` の表は T5 で確定済みで触らない。
-- 関連: [対応表](../coreimage-parameter-mapping.md)「#73 での決定」、[プレビュー調整の設計書](coreimage-preview-adjustments.md) §3.3、
-  [比較レポート](../coreimage-engine-comparison.md) §13・§16・§17、[機能移行の設計書](coreimage-feature-migration.md) §3.1、[契約](../API_CONTRACT.md) §2 / §5 / §9。
+- 関連: [対応表](../development/coreimage-parameter-mapping.md)「#73 での決定」、[プレビュー調整の設計書](coreimage-preview-adjustments.md) §3.3、
+  [比較レポート](../reports/coreimage-engine-comparison.md) §13・§16・§17、[機能移行の設計書](coreimage-feature-migration.md) §3.1、[契約](../API_CONTRACT.md) §2 / §5 / §9。
 - 本書はコードを含まない。実装は §9 のタスクに分けて進める。撮影地・位置情報は書かない。
 
 ## 表記
@@ -236,7 +236,7 @@ Issue 本文の「rawpy 出力との ΔE76」「救済系の白飛び率が rawp
 1. 初期案（§7.2）で 1 回目を回し、1〜9 の自動判定と ΔE76 表を出す。シートを作る。
 2. 不合格 / 目視で違和感のあるプリセットだけ値を直し（1 回に動かすのは 1〜2 キー）、2 回目・3 回目を回す。各回のシートは**変えたプリセットだけ**作り直す。
 3. **最大 3 回**。3 回で合わないプリセットは最も近い値で止め、§10 の既知の限界として報告書に書く（本 Issue を止めない）。
-4. 結果は `docs/coreimage-preset-retune-report.md`（新規、数値・表・パスのみ。画像は入れない）に残し、比較レポートには §18 として手順と要約だけ足す。
+4. 結果は `docs/reports/coreimage-preset-retune-report.md`（新規、数値・表・パスのみ。画像は入れない）に残し、比較レポートには §18 として手順と要約だけ足す。
 
 ## 8. 目視用の等倍クロップシート
 
@@ -259,10 +259,10 @@ Issue 本文の「rawpy 出力との ΔE76」「救済系の白飛び率が rawp
 |---|---|---|---|
 | **T1 CLI 0.6.0** | 写像・合成・応答・capabilities | `native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`（`HighlightRecoveryMapping`: 節点表・補間・合成・クランプ。`ignoredKeys = []`）、`Develop.swift`（合成の呼び出し、`PostChainParameters.lift` のクランプ、`AdjustmentsApplied.highlight_recovery`）、`Request.swift`（`cliVersion = "0.6.0"`）、`Tests/.../AdjustmentMappingTests.swift`（節点・単調・0 恒等・100・クランプ・§2.2 の等価性。**:236 の `ignored` 期待値を空配列に**）、`SmokeTests.swift:149`（同）、`README.md`（adjustments の表・応答例・`--capabilities` 例・バージョン） | `swift test` 全合格。`--capabilities` の `adjustments.ignored` が `[]` |
 | **T2 Rust** | プリセット値・フィクスチャ・モック | `src-tauri/src/presets.rs`（§7.2 の確定値、冒頭コメント「数値は #81 で再調整」、`#[ignore]` の書き出しテスト）、`src-tauri/tests/fixtures/presets.json`（CI 値）、`src-tauri/src/coreimage.rs`（モック `:2856–2872` / `:2952` / `:3251` の `ignored` 期待値。**`:3251` は実バイナリに対するテスト**なので CLI を先に 0.6.0 にする）、`adjustments.rs`（コメントのみ）。`CACHE_KEY_SCHEMA` は上げない | `cargo test` 全合格 |
-| **T3 ハーネス** | `--presets` モードとシート | `scripts/compare_engines.py`（`--presets`、`presets.json` の読み込み、`<preset>_hr0`、§7.4 の判定、§8 のシート、§2.2 の等価性チェック。`or_preset` の読み元を `presets.json` に。**オラクル系バリアント（`oracle_adjustments`）は `highlight_recovery` を 0 に固定する**: 今はプリセットの hr をそのまま写しており（no-op だから無害）、0.6.0 ではデコード段と lift に効いて Python 側の `post_chain_oracle` と合わなくなる）、`docs/coreimage-preset-retune-report.md`（新規） | 18 カットで実行、エラー 0、`index.md` が出る |
+| **T3 ハーネス** | `--presets` モードとシート | `scripts/compare_engines.py`（`--presets`、`presets.json` の読み込み、`<preset>_hr0`、§7.4 の判定、§8 のシート、§2.2 の等価性チェック。`or_preset` の読み元を `presets.json` に。**オラクル系バリアント（`oracle_adjustments`）は `highlight_recovery` を 0 に固定する**: 今はプリセットの hr をそのまま写しており（no-op だから無害）、0.6.0 ではデコード段と lift に効いて Python 側の `post_chain_oracle` と合わなくなる）、`docs/reports/coreimage-preset-retune-report.md`（新規） | 18 カットで実行、エラー 0、`index.md` が出る |
 | **T4 Python** | legacy フィクスチャ | `scripts/export_presets_fixture.py`（出力先と docstring）、`tests/fixtures/presets_legacy_rawpy.json`（新規）、`tests/test_presets_fixture.py`（legacy を読む + 構造一致テスト） | `npm run test:raw` 全合格 |
 | **T5 フロント** | 注記・hint | `src/components/BeforeAfter.tsx:155–159`（注記を削除）、`src/lib/format.ts:143`（hint を「露出を下げて暗部を戻す」等に）、`src/lib/types.ts:62`（コメントを CI の写像に）。任意: `coreimage-api.ts: toDevelopedResult` に実効値を通して recipe 欄に出す | `npx tsc --noEmit`・`npm test`・`npm run lint` 合格 |
-| **T6 Docs** | 契約・対応表・ADR | `docs/API_CONTRACT.md` §2（hr のコメント）・§5（表を CI 値に、legacy の注記、フィクスチャ分割の説明）、`docs/coreimage-parameter-mapping.md`（「#73 での決定」の hr 行を「#81 での決定」に）、`docs/design/coreimage-preview-adjustments.md` §3.3（hr 行）、`docs/adr/0002-coreimage-engine-decision.md`（追補: #81 完了、ハイライトの条件「満たしている」へ）、`docs/coreimage-regression-check.md` §3.4（`--presets` と等価性チェックを追加）、`native/coreimage-cli/README.md`（T1） | レビューで整合 |
+| **T6 Docs** | 契約・対応表・ADR | `docs/API_CONTRACT.md` §2（hr のコメント）・§5（表を CI 値に、legacy の注記、フィクスチャ分割の説明）、`docs/development/coreimage-parameter-mapping.md`（「#73 での決定」の hr 行を「#81 での決定」に）、`docs/design/coreimage-preview-adjustments.md` §3.3（hr 行）、`docs/adr/0002-coreimage-engine-decision.md`（追補: #81 完了、ハイライトの条件「満たしている」へ）、`docs/development/coreimage-regression-check.md` §3.4（`--presets` と等価性チェックを追加）、`native/coreimage-cli/README.md`（T1） | レビューで整合 |
 
 順序: T1 → T3（ハーネスのコードは T1 と並行可。実行は T1 の後）→ T3 の反復（§7.5、オーナーの目視）→ T2 の確定値 → T4 / T5 / T6。
 T1 と T3 は worktree を分けて並行、T2 は値が確定してから。CLI は `scripts/build-coreimage-cli.sh` で `src-tauri/binaries/` に再生成する（gitignored）。
@@ -310,7 +310,7 @@ T1 と T3 は worktree を分けて並行、T2 は値が確定してから。CLI
 | 2・4・5・7〜12 | その他 | 推奨どおり進める: 完了条件は §7.4 に改訂、`highlight_rescue` は 0 / 0 / hr 90（hr 100 もシートに並べる）、フィクスチャ分割、実効値の UI 表示を入れる（T5）、CLI 0.6.0・`ignored` 空配列・`CACHE_KEY_SCHEMA` 不変、目視は §8 の 6 組、原寸の偽色は目視のみ、`sunset_glow` は hr 60 で出し 70 を並べる |
 
 実装時の補足（2026-10-22）: 計測（run1〜run3）で `sunset_glow` の `shadow_lift` を 8 → 4 に改めた（§7.2）。他は §7.2 の初期案のまま確定。
-結果は [再調整レポート](../coreimage-preset-retune-report.md)。
+結果は [再調整レポート](../reports/coreimage-preset-retune-report.md)。
 
 ### 目視（§8）のオーナー判断（2026-10-22 確定）
 

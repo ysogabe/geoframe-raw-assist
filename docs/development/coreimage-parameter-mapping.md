@@ -2,7 +2,7 @@
 
 Issue #65 PR1 時点の整理（#72/#73 での決定は末尾の「#73 での決定」節に追記した。この表の「PoC での扱い」列は PoC 時点の記述で、現在の扱いではない）。現行エンジンは `local_raw/engine.py`（ENGINE_VERSION 17 系）、
 Adjustments の型と値域は `src/lib/types.ts`。Core Image 側は `CIRAWFilter`（macOS 27, α6400, decoder 8/9）と
-後段に挿せる標準 `CIFilter`。CLI の決定事項は [ADR 0001](adr/0001-coreimage-raw-poc.md)。
+後段に挿せる標準 `CIFilter`。CLI の決定事項は [ADR 0001](../adr/0001-coreimage-raw-poc.md)。
 
 ## 原則
 
@@ -56,7 +56,7 @@ Adjustments の型と値域は `src/lib/types.ts`。Core Image 側は `CIRAWFilt
 ## #73 での決定（CLI 0.3.0、2026-10-21）
 
 上の表の「判定」を受けて、9 キーを次のように写像した。実装は `native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`（デコード段の写像と後段チェーン）、Rust 側の正規化は `src-tauri/src/adjustments.rs`。
-詳細は [設計書](design/coreimage-preview-adjustments.md) §3.3、較正の経緯は [比較レポート §16](coreimage-engine-comparison.md)。
+詳細は [設計書](../design/coreimage-preview-adjustments.md) §3.3、較正の経緯は [比較レポート §16](../reports/coreimage-engine-comparison.md)。
 写像は `apple_default` の既定値を基準にした**相対値**で、`adjustments` は `profile: "apple_default"` のときだけ受ける。
 CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVALID_REQUEST`（クランプしない。クランプは Rust の責務）。
 
@@ -86,7 +86,7 @@ CLI は `adjustments` の 9 キーをすべて必須とし、範囲外は `INVAL
 ## #81 での決定（CLI 0.6.0、2026-10-22）
 
 `highlight_recovery`（hr）を、#92 で承認した C1'（`exposure` −0.7 + `shadow_lift` 40、強め −1.0 + 55）を節点にした区分線形の写像で置き換えた。
-設計は [設計書](design/coreimage-preset-retune.md) §2〜§4、実装は `Adjustments.swift: HighlightRecoveryMapping`（合成は `Develop.swift: develop()`）。
+設計は [設計書](../design/coreimage-preset-retune.md) §2〜§4、実装は `Adjustments.swift: HighlightRecoveryMapping`（合成は `Develop.swift: develop()`）。
 
 | hr | ΔEV | Δlift | 根拠 |
 |---|---|---|---|

@@ -1,5 +1,5 @@
 # 評価スクリプト（scripts/compare_engines.py ほか・scripts/evaluation/）と残す Python テストの依存。
-# アプリ本体（local_raw）・rawpy・lensfunpy は含めない（docs/evaluation-paths.md）。
+# アプリ本体（local_raw）・rawpy・lensfunpy は含めない（docs/development/evaluation-paths.md）。
 # 旧 rawpy 経路（アーカイブ）は削除前の checkout の requirements-raw.txt を使う。
 numpy==2.5.1
 Pillow==12.3.0

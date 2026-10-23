@@ -2,7 +2,7 @@
 
 旧Python本体と独立評価の両方を含む最後の参照点は `e838ecc`。
 旧基準の再生成が必要な場合だけ、そのコミットを別checkoutで使用する。
-今回の11枚のCore Image実測・決めた修正範囲は[計測報告](coreimage-proxy-full-measurement.md)を参照。
+今回の11枚のCore Image実測・決めた修正範囲は[計測報告](../reports/coreimage-proxy-full-measurement.md)を参照。
 
 #57 / #90 / #117。実施順と検収条件は `docs/design/evaluation-before-python-removal.md`。
 この文書は `scripts/` の評価スクリプトの**使い方**（CLI モード・前提・削除後の扱い）をまとめる。
@@ -111,8 +111,8 @@ python scripts/evaluate_raw.py --source-root "$RAW" --developed ci_lens=work/raw
 
 ```sh
 CLI=native/coreimage-cli/.build/release/geoframe-ci-develop
-RAW=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw          # 11 組（読み取り専用）
-FROZEN=/Users/yoshio/works/60-misc/wt-107-baseline                 # rawpy_images.json の path は work/baseline/... から
+RAW=<repo>/work/raw          # 11 組（読み取り専用）
+FROZEN=<baseline-checkout>                 # rawpy_images.json の path は work/baseline/... から
 
 # 1. 旧 rawpy 基準（#107）の照合と、現在の CI との比較。CI 出力を次回用に凍結する
 python scripts/compare_engines.py --frozen-manifest tests/fixtures/baseline/rawpy_images.json \

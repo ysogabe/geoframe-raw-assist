@@ -3,7 +3,7 @@
 2026-10-23追補: 以下は削除前の生成記録を含む。
 保存済み画像・JSONを読む評価経路と、旧実装による基準の再生成は区別する。
 今後の順序は[評価経路独立化の計画](../../../docs/design/evaluation-before-python-removal.md)、
-削除後も維持する実行方法は[評価経路の手順](../../../docs/evaluation-paths.md)を参照。
+削除後も維持する実行方法は[評価経路の手順](../../../docs/development/evaluation-paths.md)を参照。
 凍結JSON・合成画像・旧rawpy画像の内容は今回の評価整理では更新しない。
 
 Python 廃止前の参照実装を固定する。数値の意味・許容差は
