@@ -89,3 +89,15 @@ cargo test --manifest-path src-tauri/Cargo.toml real_cli_merge_export_smoke -- -
 - `merged_copy_rejects_source_replacement_after_resolution_atomically` はrecipe解決後のsource差替えをコピーhelperで検出し、destination未発行とtemporary file cleanupを確認する。正常merged exportではコピーbytesとmanifest hashを確認する。
 
 - コピー時照合の追加後、親側でRust全149 passed / 8 ignored / 0 failed、実CLI 0.8結合1 passed（22.43秒）、cargo build警告0、git diff --check成功を確認した。GUI確認の未完了状態は前節どおり。
+
+
+## GUI接続確認の完了（2026-10-23）
+
+- デスクトップの `GeoFrame-QA84-20261023/GeoFrame RAW Assist QA84.app` へ検証済みバンドルを通常コピーし、冷起動した。起動プロセスの実行元もデスクトップのコピーであることを確認。白画面は再現せず、CLI 0.8.0の接続と写真一覧が表示された。旧プロセスが更新前の別inodeを保持していたことは確認済みだが、白画面との因果を断定するログは取得していない。白画面対応の製品コード変更は行っていない。
+- 対象は統合QAブランチ `25ede00`（PR #133、#134/#135、#136のコードを統合）から構築したアプリ。通常アプリの設定とは別の `com.geoframe.rawassist.qa84` を使った。
+- 最小EXIFへ修正した試験素材をGUIから再解析し、ブラケット2枚の1グループとして認識された。
+- 合成プレビューは7.2秒、2399×1599。本合成は14.2秒、5999×3999。実行中のスライダー・候補生成・現像・合成ボタンの無効化、プレビュー時に採用不可、本合成後の採用、原寸ビューアでの画像表示を確認した。
+- 本合成を採用してGUIから `qa84_gui_20261023` へ1件を書き出した。manifestはvariant mergedで、書き出したJPEGが元の本合成JPEGとbyte一致し、recipeのoutput_size/output_sha256およびmanifestのexported_sha256も一致することを親側で確認した。
+- GUIで使った最小EXIF fixtureの本合成はexif_inherited=falseだった。EXIF/GPS継承の成功確認は、synthetic GPSを含む別fixtureによる既存の実CLI結合テストで行った。GUIの結果をEXIF継承成功とは扱わない。
+- PR #133の候補UIも同じアプリで確認。階調回復プリセットのDSC00001に対しRust PSOからnatural/socialの2候補が表示された。socialを反映すると5項目のスライダーが変わり、自動現像は始まらず、その後の手動プレビュー現像が1.0秒・2400×1600で完了した。候補設定変更で古い合成結果の表示が抑止されることも確認した。
+- この素材は同じ実RAWのコピーとsynthetic metadataによる接続検証用。実AEB／三脚長秒ブラケットの画質、昼夜混在13ケース、#57のproxy/fullの見え方は未検証のまま。PR #136は未統合の依存PRを残している。
