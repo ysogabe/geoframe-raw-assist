@@ -28,7 +28,11 @@ neutral_recovery）か ``--cases-file``（``scripts/eval_cases/*.json``）で与
 
 例:
     # 既定: Rust ハーネスの cases/*.json（Core Image 候補）を集計する
-    python scripts/evaluate_candidates.py --aggregate-only --out work/issue57/<run> --contact-sheets
+    python scripts/evaluate_candidates.py --aggregate-only --out work/issue57/<run>
+
+    # --contact-sheets は <out>/frames/<key>__jpg.jpg と <out>/frames/<key>__<style>.jpg（と raw_metrics）が
+    # 揃っているときだけ一覧を作る。Rust ハーネスは frames/ を書かないので、その出力では一覧はできない
+    # （指定すると警告して集計だけ行う）。frames/ を書くのは旧経路の生成。
 
     # 旧経路（アーカイブ。削除前の checkout + requirements-raw.txt）
     .venv/bin/python scripts/evaluate_candidates.py --legacy-rawpy \
@@ -952,7 +956,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--case", action="append", default=[], metavar="ID[:PRESET]", help="評価ケース（繰り返し可）")
     parser.add_argument("--cases-file", type=Path, help="ケース定義 JSON（scripts/eval_cases/*.json）")
     parser.add_argument("--out", type=Path, help="出力先（既定: outputs/eval_candidates/<timestamp>）")
-    parser.add_argument("--contact-sheets", action="store_true", help="写真ごとの一覧画像を作る")
+    parser.add_argument("--contact-sheets", action="store_true",
+                        help="写真ごとの一覧画像を作る（<out>/frames/ の画像が必要。Rust ハーネスの出力には無い）")
     parser.add_argument("--force", action="store_true", help="--out に既存の cases/*.json があっても、cases/ frames/ contact_sheets/ と summary.* を消して実行する")
     parser.add_argument("--aggregate-only", action="store_true",
                         help="--out の cases/*.json（Rust の Core Image 候補ハーネス出力、または旧経路の出力）から summary（と一覧）を作る。"
@@ -969,8 +974,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not records:
             raise SystemExit(f"cases/*.json がありません: {out_dir}")
         if args.contact_sheets:
-            for record in records:
-                build_contact_sheet(record, out_dir)
+            built = [record["key"] for record in records if build_contact_sheet(record, out_dir) is not None]
+            missing = [str(record["key"]) for record in records if record["key"] not in built]
+            if missing:
+                print(
+                    f"警告: --contact-sheets の一覧を {len(missing)}/{len(records)} 件で作れませんでした"
+                    f"（{', '.join(missing[:5])}{' ほか' if len(missing) > 5 else ''}）。一覧には "
+                    f"{out_dir / 'frames'}/<key>__jpg.jpg と <key>__<style>.jpg（と候補の raw_metrics）が必要です。"
+                    "Rust の Core Image 候補ハーネスは frames/ を書かないため、その出力では一覧は作れません"
+                    "（集計 summary はそのまま作ります）。",
+                    file=sys.stderr,
+                )
         meta, errors = load_previous_run_info(out_dir)
         meta["aggregated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _write_summary(out_dir, records, errors, meta)

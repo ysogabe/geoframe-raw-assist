@@ -90,13 +90,21 @@ def _rational_to_float(value: Any) -> float | None:
 
 
 def read_capture_exif(source_jpg: Path) -> dict[str, Any]:
-    """露出・レンズ・向き・撮影日時の EXIF 要約（ピクセルと GPS は読まない）。読めなければ空 dict。"""
+    """露出・レンズ・向き・撮影日時の EXIF 要約（ピクセルと GPS は読まない）。読めなければ空 dict。
+
+    壊れた EXIF で Pillow が投げる ``OSError`` / ``ValueError`` / ``AttributeError`` は「読めない」として
+    空 dict にする（旧 ``local_raw.exif.read_capture_exif`` と同じ。e838ecc）。それ以外の例外は握り潰さない。
+    """
     try:
         with Image.open(source_jpg) as image:
-            exif = image.getexif()
-            ifd = exif.get_ifd(TAG_EXIF_IFD)
-    except OSError:
+            return _summarize_exif(image)
+    except (OSError, ValueError, AttributeError):
         return {}
+
+
+def _summarize_exif(image: Image.Image) -> dict[str, Any]:
+    exif = image.getexif()
+    ifd = exif.get_ifd(TAG_EXIF_IFD)
     lens_model = ifd.get(TAG_LENS_MODEL)
     return {
         "make": exif.get(TAG_MAKE),

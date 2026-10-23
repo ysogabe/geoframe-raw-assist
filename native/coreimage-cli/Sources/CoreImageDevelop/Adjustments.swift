@@ -2,7 +2,8 @@ import Foundation
 
 // Adjustments（アプリのスライダー 9 キー）→ CIRAWFilter / 後段チェーンへの写像（Issue #73）。
 // 設計書 docs/design/coreimage-preview-adjustments.md §3.1・§3.3・§3.4。
-// rawpy 側の式・定数は local_raw/engine.py（_capture_sharpen_params ほか）から移植している。
+// rawpy 側の式・定数は旧 Python の local_raw/engine.py（_capture_sharpen_params ほか）から移植した。
+// Python 本体は削除済み（最後の参照点は e838ecc）。現在の基準はここと Rust 側・凍結フィクスチャ。
 // ここは純粋関数だけを置く（CIRAWFilter に触るのは Develop.swift）。
 
 /// `adjustments.noise_reduction`。
@@ -45,7 +46,8 @@ public struct Adjustments: Equatable {
     /// 0.6.0（#81）で `highlight_recovery` が写像で効くようになり空になった。フィールドは契約として残す。
     public static let ignoredKeys: [String] = []
 
-    /// 数値 8 キーの値域（契約 docs/API_CONTRACT.md §2 = local_raw/presets.py: ADJUSTMENT_RANGES）。
+    /// 数値 8 キーの値域（契約 docs/API_CONTRACT.md §2。凍結表 tests/fixtures/presets_legacy_rawpy.json の
+    /// adjustment_ranges = 旧 local_raw/presets.py: ADJUSTMENT_RANGES、e838ecc）。
     /// CLI はクランプしない。範囲外は INVALID_REQUEST（クランプは Rust / Python の責務）。
     static let numericKeys: [(key: String, range: ClosedRange<Double>, set: (inout Adjustments, Double) -> Void)] = [
         ("exposure", -2.0...2.0, { $0.exposure = $1 }),
@@ -63,7 +65,8 @@ public struct Adjustments: Equatable {
 
 // MARK: - 撮影時シャープ（rawpy の _capture_sharpen_params の移植）
 
-/// local_raw/engine.py の撮影時シャープ定数（値はそのまま移植。変えるときは engine.py と揃えること）。
+/// 旧 local_raw/engine.py（e838ecc。削除済み）の撮影時シャープ定数（値はそのまま移植。旧エンジンは
+/// もう無いので、変えるときは凍結基準との比較 docs/evaluation-paths.md で差を確かめること）。
 public enum RawpySharpen {
     public static let smallEdge = 2000.0
     public static let largeEdge = 4000.0

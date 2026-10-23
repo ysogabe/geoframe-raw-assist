@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -114,6 +115,35 @@ class SourcesTest(unittest.TestCase):
             (Path(directory) / "broken.JPG").write_bytes(b"not jpeg")
             self.assertEqual(sources.read_capture_exif(Path(directory) / "broken.JPG"), {})
         self.assertIsNone(sources.ev100({"f_number": 0, "exposure_time": 1, "iso": 100}))
+
+    def test_malformed_exif_returns_empty_but_programming_errors_propagate(self):
+        """壊れた EXIF（Pillow の ValueError / AttributeError / OSError）は空 dict。それ以外は握り潰さない。"""
+
+        def opener(error: BaseException, where: str):
+            image = mock.MagicMock()
+            image.__enter__.return_value = image
+            image.__exit__.return_value = False
+            if where == "getexif":
+                image.getexif.side_effect = error
+            else:
+                image.getexif.return_value.get_ifd.side_effect = error
+            return mock.patch.object(sources.Image, "open", return_value=image)
+
+        for error in (ValueError("bad rational"), AttributeError("no attribute"), OSError("truncated")):
+            for where in ("getexif", "get_ifd"):
+                with self.subTest(error=type(error).__name__, where=where), opener(error, where):
+                    self.assertEqual(sources.read_capture_exif(Path("DSC00001.JPG")), {})
+        with opener(TypeError("bug"), "get_ifd"), self.assertRaises(TypeError):
+            sources.read_capture_exif(Path("DSC00001.JPG"))
+        # 正常な EXIF は従来どおり要約する
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "DSC00001.JPG"
+            exif = Image.Exif()
+            exif[0x010F] = "SONY"
+            exif.get_ifd(0x8769)[0xA434] = "FE 24mm F1.4 GM "
+            Image.new("RGB", (8, 8)).save(path, exif=exif)
+            summary = sources.read_capture_exif(path)
+            self.assertEqual((summary["make"], summary["lens_model"]), ("SONY", "FE 24mm F1.4 GM"))
 
 
 class PresetsTest(unittest.TestCase):

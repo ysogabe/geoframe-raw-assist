@@ -7,8 +7,12 @@
 
 既定経路（アプリ本体・rawpy・lensfunpy に依存しない）:
 
-- ``--developed LABEL=DIR``（繰り返し可）… 現像済み画像（Core Image の出力等。ファイル名が
-  ``DSC#####`` で始まるもの）を同名のカメラ JPEG と比べる。LABEL ごとに集計する。
+- ``--developed LABEL=DIR``（繰り返し可）… 現像済み画像（Core Image の出力等。ファイル名の先頭が
+  撮影 ID ``DSC#####`` ちょうど（直後が数字でない）のもの）を同じ撮影 ID のカメラ JPEG と比べる。
+  LABEL ごとに集計する。**1 つの DIR には 1 撮影 ID につき 1 枚だけ**置く（同じ撮影 ID の画像が
+  複数あれば平均が黙って偏るので失敗にする）。compare_engines の ``coreimage/preview`` 等は同じ撮影の
+  ``_preview`` / ``_preview_lens`` / ``_frozen*`` / ``_e<edge>`` を並べて持つので、そのままは渡せない。
+  評価したい 1 バリアントだけを別フォルダへ集めてから LABEL を付ける。
 - ``--frozen-manifest`` + ``--frozen-root`` … 凍結画像をハッシュ・寸法で照合し（欠落・改変は失敗）、
   カメラ JPEG と比べる。ラベルは ``frozen:<mode>``。
 
@@ -16,8 +20,11 @@
 （``local_raw/`` が残る checkout と requirements-raw.txt の環境が前提。docs/evaluation-paths.md）。
 
 例:
+    # 1 バリアント（例: レンズ補正ありのプレビュー）だけを別フォルダへ集めてから評価する
+    mkdir -p work/raw-evaluation/inputs/ci_lens
+    cp work/engine-comparison/<run>/coreimage/preview/DSC*_preview_lens.jpg work/raw-evaluation/inputs/ci_lens/
     python scripts/evaluate_raw.py --source-root work/raw \
-      --developed ci=work/engine-comparison/<run>/coreimage/preview \
+      --developed ci_lens=work/raw-evaluation/inputs/ci_lens \
       --frozen-manifest tests/fixtures/baseline/rawpy_images.json --frozen-root ../wt-107-baseline
 
     .venv/bin/python scripts/evaluate_raw.py --legacy-rawpy \
@@ -48,26 +55,16 @@ from evaluation import frozen, legacy, sources  # noqa: E402
 from evaluation.presets import PRESET_NAMES as PRESETS  # noqa: E402
 
 DEVELOPED_SUFFIXES = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
-DEVELOPED_NAME = re.compile(r"^(DSC\d{5})")
-
-CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
+#: 先頭が撮影 ID ちょうど（``DSC074020.jpg`` を ``DSC07402`` と読まないよう、直後の数字を許さない）。
+DEVELOPED_NAME = re.compile(r"^(DSC\d{5})(?!\d)")
 
 # Rec.709 輝度係数（ITU-R BT.709）。出力画像と参照JPEGの両方の luma 導出で共有する。
 REC709_LUMA = (0.2126, 0.7152, 0.0722)
 
 
 def _paired_ids(source_root: Path) -> list[str]:
-    jpg_ids = {
-        path.stem
-        for path in source_root.glob("DSC*.JPG")
-        if path.is_file() and CAPTURE_ID_PATTERN.fullmatch(path.stem)
-    }
-    raw_ids = {
-        path.stem
-        for path in source_root.glob("DSC*.ARW")
-        if path.is_file() and CAPTURE_ID_PATTERN.fullmatch(path.stem)
-    }
-    return sorted(jpg_ids & raw_ids)
+    """ARW と JPG が揃う撮影 ID（拡張子の大小を問わない。既定経路と同じ ``sources`` の解決）。"""
+    return sources.paired_ids(source_root)
 
 
 def _select_ids(available: list[str], requested: list[str] | None, limit: int) -> list[str]:
@@ -177,12 +174,23 @@ def _read_camera_rgb(path: Path) -> np.ndarray:
 
 
 def parse_developed(specs: list[str]) -> list[tuple[str, Path]]:
-    """``LABEL=DIR`` の並び。LABEL は英数字・``_``・``-``・``:``・``.``。"""
+    """``LABEL=DIR`` の並び。LABEL は英数字・``_``・``-``・``:``・``.``。同じ LABEL の重複は失敗。
+
+    LABEL ごとに集計するため、同じ LABEL を 2 回指定すると別フォルダの同じ撮影 ID が 1 つの集計に混ざる。
+    """
     result = []
+    seen: dict[str, str] = {}
     for spec in specs:
         label, sep, directory = spec.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z0-9_.:-]+", label) or not directory:
             raise SystemExit(f"--developed は LABEL=DIR で指定してください: {spec!r}")
+        if label in seen:
+            raise SystemExit(
+                f"--developed の LABEL {label!r} が重複しています（{seen[label]!r} と {spec!r}）。"
+                "同じ LABEL は 1 つの集計にまとまり、同じ撮影 ID が重複して平均が偏ります。"
+                "フォルダごとに別の LABEL（例 ci_a=DIR_A ci_b=DIR_B）を付けるか、1 フォルダにまとめてください。"
+            )
+        seen[label] = spec
         path = Path(directory).expanduser().resolve()
         if not path.is_dir():
             raise SystemExit(f"--developed のフォルダがありません: {path}")
@@ -191,13 +199,27 @@ def parse_developed(specs: list[str]) -> list[tuple[str, Path]]:
 
 
 def developed_images(directory: Path) -> list[tuple[str, Path]]:
-    """フォルダ直下の現像済み画像（``DSC#####`` で始まる名前）を (capture_id, path) で返す。"""
-    found = []
+    """フォルダ直下の現像済み画像（先頭が撮影 ID ``DSC#####`` ちょうどの名前）を (capture_id, path) で返す。
+
+    同じ撮影 ID の画像が 2 枚以上あれば ``SystemExit``（どれか 1 枚を黙って選ぶことも、全部を同じ LABEL に
+    混ぜて平均を偏らせることもしない）。評価したい 1 バリアントだけを別フォルダに置いて指定し直してもらう。
+    """
+    by_capture: dict[str, list[Path]] = {}
     for path in sorted(directory.iterdir()):
         match = DEVELOPED_NAME.match(path.name)
         if match and path.is_file() and path.suffix.lower() in DEVELOPED_SUFFIXES:
-            found.append((match.group(1), path))
-    return found
+            by_capture.setdefault(match.group(1), []).append(path)
+    duplicated = {cid: paths for cid, paths in by_capture.items() if len(paths) > 1}
+    if duplicated:
+        detail = "\n".join(f"- {cid}: {', '.join(p.name for p in paths)}" for cid, paths in sorted(duplicated.items()))
+        raise SystemExit(
+            f"--developed のフォルダに同じ撮影 ID の画像が複数あります（1 撮影 ID につき 1 枚にしてください）: {directory}\n"
+            f"{detail}\n"
+            "同じ LABEL に混ぜると集計が重複分だけ偏ります。compare_engines の coreimage/preview 等は "
+            "_preview / _preview_lens / _frozen* / _e<edge> を並べて持つので、評価したい 1 バリアントだけを"
+            "別フォルダへ集め、バリアントごとに --developed LABEL=DIR を分けて指定してください。"
+        )
+    return [(cid, paths[0]) for cid, paths in sorted(by_capture.items())]
 
 
 def evaluate_image(label: str, capture_id: str, path: Path, source_root: Path, extra: dict[str, object] | None = None) -> dict[str, object]:
@@ -245,10 +267,11 @@ def run_legacy(args: argparse.Namespace, source_root: Path, run_root: Path) -> t
                     )
                     output_root = preview_root if args.preview else developed_root
                     output_path = output_root / str(result["filename"])
-                    metrics = _metrics(
-                        _read_rgb(output_path),
-                        _read_rgb(source_root / f"{capture_id}.JPG"),
-                    )
+                    camera = sources.find_capture_file(source_root, capture_id, "JPG")
+                    if camera is None:
+                        raise FileNotFoundError(f"カメラ JPEG がありません: {capture_id}")
+                    # 既定経路と同じく、カメラ JPEG は EXIF の向きを反映して読む（出力は正立）。
+                    metrics = _metrics(_read_rgb(output_path), _read_camera_rgb(camera))
                     row.update(metrics)
                     row["elapsed_seconds"] = float(result["elapsed_seconds"])
                     row["output"] = str(output_path)
@@ -263,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--source-root", type=Path, required=True, help="カメラ JPEG（と旧経路では ARW）のあるフォルダ")
     parser.add_argument("--output-root", type=Path, default=Path("work/raw-evaluation"))
     parser.add_argument("--developed", action="append", default=[], metavar="LABEL=DIR",
-                        help="現像済み画像のフォルダ（DSC##### で始まる名前）。LABEL ごとに集計（繰り返し可）")
+                        help="現像済み画像のフォルダ（先頭が撮影 ID DSC##### の名前、1 撮影 ID につき 1 枚）。LABEL ごとに集計（繰り返し可）")
     parser.add_argument("--frozen-manifest", type=Path, help="凍結画像のマニフェスト（例 tests/fixtures/baseline/rawpy_images.json）")
     parser.add_argument("--frozen-root", type=Path, help="凍結マニフェストの path の基準ディレクトリ")
     parser.add_argument("--legacy-rawpy", action="store_true",
@@ -307,7 +330,7 @@ def main(argv: list[str] | None = None) -> None:
     for label, directory in developed:
         images = developed_images(directory)
         if not images:
-            raise SystemExit(f"--developed {label} に DSC##### で始まる画像がありません: {directory}")
+            raise SystemExit(f"--developed {label} に先頭が撮影 ID（DSC#####）の画像がありません: {directory}")
         rows.extend(evaluate_image(label, cid, path, source_root) for cid, path in images)
 
     errors = sum(bool(row.get("error")) for row in rows)

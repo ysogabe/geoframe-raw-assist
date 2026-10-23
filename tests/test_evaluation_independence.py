@@ -178,7 +178,7 @@ class PostRemovalWorkflowTest(unittest.TestCase):
             self.assertGreater(row["frozen_delta_e76"], 0.0)  # 偽 CI とカメラ JPEG は違う画像
             self.assertEqual((row["ci_width"], row["ci_height"]), (row["frozen_width"], row["frozen_height"]))
             self.assertEqual(row["ci_profile"], "apple_default")
-        self.assertTrue((out / "sheets" / "DSC00001_preview_frozen.jpg").is_file())
+        self.assertTrue((out / "sheets" / "DSC00001_preview_01_frozen.jpg").is_file())
         self.assertTrue(json.loads((out / "frozen_verification.json").read_text())["ok"])
         # 凍結した CI 出力を基準に再実行すると完全一致（OS 更新前後の回帰確認の形）
         captured = json.loads(capture.read_text())
@@ -194,6 +194,80 @@ class PostRemovalWorkflowTest(unittest.TestCase):
         # 凍結ルート自身を --out にすると上書きを拒否する
         self.run_script("compare_engines.py", "--frozen-manifest", capture, "--frozen-root", out,
                         "--source-root", self.source, "--cli", self.cli, "--out", out, ok=False)
+
+    def test_frozen_duplicate_capture_mode_entries_keep_distinct_outputs(self):
+        """同じ撮影 ID・mode の行が request 違いで複数あっても、出力・シート・凍結ハッシュが上書きで壊れない。"""
+        base, manifest = self.frozen_set("frozen-dup")
+        rows = json.loads(manifest.read_text())
+        preview = next(r for r in rows if r["capture_id"] == "DSC00001" and r["mode"] == "preview")
+        presets = json.loads((REPO / "src-tauri/tests/fixtures/presets.json").read_text())["presets"]
+        adjustments = dict(next(p for p in presets if p["name"] == "neutral_recovery")["adjustments"])
+        requests = []
+        for exposure in (0.0, 1.0):
+            requests.append({"profile": "apple_default", "lens": True, "decoder_version": 9,
+                             "adjustments": {**adjustments, "exposure": exposure}})
+        manifest.write_text(json.dumps([dict(preview, request=r) for r in requests]), encoding="utf-8")
+        out = Path(self.tmp.name) / "dup-out"
+        capture = Path(self.tmp.name) / "dup-capture" / "ci_frozen.json"
+        self.run_script("compare_engines.py", "--frozen-manifest", manifest, "--frozen-root", base,
+                        "--source-root", self.source, "--cli", self.cli, "--out", out, "--frozen-capture", capture)
+        report = json.loads((out / "frozen_comparison.json").read_text())
+        self.assertEqual(report["errors"], [])
+        outputs = [row["output"] for row in report["rows"]]
+        self.assertEqual(len(set(outputs)), 2)
+        self.assertEqual(len(list((out / "sheets").glob("DSC00001_preview_*_frozen.jpg"))), 2)
+        captured = json.loads(capture.read_text())
+        self.assertEqual([c["request"]["adjustments"]["exposure"] for c in captured], [0.0, 1.0])
+        self.assertEqual(len({c["path"] for c in captured}), 2)
+        self.assertEqual(len({c["sha256"] for c in captured}), 2)  # 画素も違う（後の行で上書きされていない）
+        for entry in captured:
+            self.assertEqual(_sha(out / entry["path"]), entry["sha256"])
+        out2 = Path(self.tmp.name) / "dup-replay"
+        self.run_script("compare_engines.py", "--frozen-manifest", capture, "--frozen-root", out,
+                        "--source-root", self.source, "--cli", self.cli, "--out", out2)
+        replay = json.loads((out2 / "frozen_comparison.json").read_text())
+        self.assertEqual(len(replay["rows"]), 2)
+        for row in replay["rows"]:
+            self.assertEqual(row["frozen_identical_fraction"], 1.0)
+
+    def test_frozen_outputs_overlapping_inputs_are_rejected_before_any_write(self):
+        """--out / --frozen-capture が凍結入力と重なるなら、照合レポートも含めて何も書かずに拒否する。"""
+
+        def snapshot(root: Path) -> dict[str, str]:
+            return {p.relative_to(root).as_posix(): _sha(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+        base, manifest = self.frozen_set("frozen-guard")
+        malformed = base / "malformed.json"
+        malformed.write_text("{not json", encoding="utf-8")
+        nested_out = base / "work" / "out"
+        cases = {
+            "out-is-root": ("--out", base),
+            "out-inside-root": ("--out", nested_out),
+            "out-contains-root": ("--out", base.parent),
+        }
+        for name, (flag, out) in cases.items():
+            for manifest_path in (manifest, malformed):
+                for verify_only in (False, True):
+                    with self.subTest(case=name, manifest=manifest_path.name, verify_only=verify_only):
+                        before = snapshot(base)
+                        extra = ["--frozen-verify-only"] if verify_only else [
+                            "--source-root", self.source, "--cli", self.cli]
+                        proc = self.run_script("compare_engines.py", "--frozen-manifest", manifest_path,
+                                               "--frozen-root", base, flag, out, *extra, ok=False)
+                        self.assertIn("凍結入力を上書きしうる出力先", proc.stderr)
+                        self.assertEqual(snapshot(base), before)
+                        self.assertFalse(nested_out.exists())
+        # --out が別でも、--frozen-capture が凍結マニフェスト自身・凍結ルートの中なら拒否する
+        for capture in (manifest, base / "work" / "ci_frozen.json"):
+            with self.subTest(capture=str(capture)):
+                before = snapshot(base)
+                out = Path(self.tmp.name) / "guard-capture-out"
+                proc = self.run_script("compare_engines.py", "--frozen-manifest", manifest, "--frozen-root", base,
+                                       "--source-root", self.source, "--cli", self.cli, "--out", out,
+                                       "--frozen-capture", capture, ok=False)
+                self.assertIn("--frozen-capture", proc.stderr)
+                self.assertEqual(snapshot(base), before)
+                self.assertFalse(out.exists())
 
     def test_frozen_missing_modified_and_resized_artifacts_fail(self):
         for case in ("missing", "modified", "dimensions", "pixels"):
@@ -312,6 +386,12 @@ class PostRemovalWorkflowTest(unittest.TestCase):
         self.assertEqual(summary["rejected_by_style"], {"foreground": 2})
         markdown = (out / "summary.md").read_text()
         self.assertIn("参考診断", markdown)
+        # Rust ハーネスの出力には frames/ が無い: --contact-sheets は黙って空にせず、警告して集計だけ行う
+        proc = self.run_script("evaluate_candidates.py", "--aggregate-only", "--out", out, "--contact-sheets")
+        self.assertIn("frames", proc.stderr)
+        self.assertIn("2/2", proc.stderr)
+        self.assertFalse((out / "contact_sheets").exists())
+        self.assertEqual(json.loads((out / "summary.json").read_text())["summary"]["cases"], 2)
         # 生成・現像はこのスクリプトでは行わない（旧経路は明示 opt-in で、本体が無ければ止まる）
         proc = self.run_script("evaluate_candidates.py", "--case", "DSC00001:nightscape", "--source-root", self.source,
                                "--out", Path(self.tmp.name) / "cand-gen", ok=False)

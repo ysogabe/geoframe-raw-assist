@@ -44,7 +44,7 @@ Core Image を描画するモードは CLI（`npm run build:coreimage` →
 | モード | 既定 / 旧経路 | 内容 |
 |---|---|---|
 | `--frozen-manifest M --frozen-root R --frozen-verify-only` | 既定 | 凍結物の照合だけ（CLI・現像元不要）。`<out>/frozen_verification.json` |
-| `--frozen-manifest M --frozen-root R --source-root RAW` | 既定 | 照合後、同じ撮影 ID・mode を現在の CI で描画し、凍結画像と同寸で比較（ΔE76・RGB MAE・輝度差・完全一致画素率・各画像の指標）。`frozen_comparison.{json,csv}`、`sheets/*_frozen.jpg` |
+| `--frozen-manifest M --frozen-root R --source-root RAW` | 既定 | 照合後、同じ撮影 ID・mode を現在の CI で描画し、凍結画像と同寸で比較（ΔE76・RGB MAE・輝度差・完全一致画素率・各画像の指標）。`frozen_comparison.{json,csv}`、`sheets/<id>_<mode>_<NN>_frozen.jpg`（`NN` はマニフェストの行番号。CI 出力は `coreimage/<mode>/<id>_<mode>_frozen<NN>*.jpg`。同じ撮影 ID・mode の行が複数あっても上書きしない） |
 | 上 + `--frozen-capture FILE` | 既定 | 今回の CI 出力を同じ形式のマニフェストとして書く（凍結ルートは `--out`）。**描画エラーが 1 件でもあれば書かない**（既存の完全な基準を部分結果で置き換えない） |
 | `--captures` / `--select auto`（無指定） | 既定 | camera / coreimage / coreimage_lens の比較 |
 | `--sharpness` / `--night` / `--highlight` / `--presets` / `--diagnosis` | 既定 | CI 系の列だけで実行。rawpy 列・rawpy 後段仕上げ（`*_usm`）は `skipped: legacy_rawpy`、`--diagnosis` の CFA 飽和（センサー段の帰属）は計測しない |
@@ -55,13 +55,16 @@ Core Image を描画するモードは CLI（`npm run build:coreimage` →
 凍結マニフェストの行に `request`（profile / lens / decoder_version / adjustments）があればそれで描画する。
 無い行（#107 の rawpy 基準）は `apple_default`・lens ON・decoder 9・`--frozen-preset`（既定 `neutral_recovery`）の
 CI プリセット値で描画する。差の合否閾値は持たない。失敗（終了コード 1）は照合失敗と描画失敗だけ。
-`--out` が凍結画像を含む場合は上書きを避けるため拒否する。
+凍結入力を上書きしうる出力先は、照合レポートを書く前に（`--frozen-verify-only` でも）拒否する: `--out` が
+`--frozen-root` と同じ・その中・それを含む、`--out` が `--frozen-manifest` を含む、`--frozen-capture` が
+`--frozen-manifest` と同じ・`--frozen-root` の中。照合後も、凍結画像が `--out` の中にある・`--frozen-capture` と
+同じなら拒否する。
 
 ### `scripts/evaluate_candidates.py`
 
 | モード | 既定 / 旧経路 | 内容 |
 |---|---|---|
-| `--aggregate-only --out DIR [--contact-sheets]` | 既定 | `DIR/cases/*.json` を集計して `summary.{json,md}` |
+| `--aggregate-only --out DIR [--contact-sheets]` | 既定 | `DIR/cases/*.json` を集計して `summary.{json,md}`。`--contact-sheets` は `DIR/frames/<key>__jpg.jpg`・`<key>__<style>.jpg` がある場合だけ一覧を作る（Rust ハーネスは `frames/` を書かないので、その出力では警告して集計だけ） |
 | `--case` / `--cases-file`（生成） | 旧経路のみ | 旧 rawpy 候補生成 + 実RAW現像。`--legacy-rawpy` 必須 |
 
 Core Image 候補の `cases/*.json` は Rust の候補ハーネスが書く（このスクリプトは候補を生成しない）。
@@ -76,11 +79,20 @@ Core Image 候補の `cases/*.json` は Rust の候補ハーネスが書く（�
 
 | モード | 既定 / 旧経路 | 内容 |
 |---|---|---|
-| `--developed LABEL=DIR`（繰り返し可） | 既定 | `DSC#####` で始まる現像済み画像をカメラ JPEG と比べる（LABEL ごとに集計） |
+| `--developed LABEL=DIR`（繰り返し可） | 既定 | 先頭が撮影 ID `DSC#####` ちょうど（直後が数字でない）の現像済み画像をカメラ JPEG と比べる（LABEL ごとに集計）。**1 DIR に 1 撮影 ID 1 枚**、LABEL の重複も不可（どちらも平均が黙って偏るので失敗にする） |
 | `--frozen-manifest M --frozen-root R` | 既定 | 凍結画像を照合してからカメラ JPEG と比べる（ラベル `frozen:<mode>`） |
 | `--legacy-rawpy [--presets ...] [--preview]` | 旧経路 | 旧エンジンで各プリセットを現像して評価 |
 
 エラー行（カメラ JPEG 欠落・読めない画像等）が 1 件でもあれば終了コード 1。
+
+compare_engines の `coreimage/preview` 等は同じ撮影の `_preview` / `_preview_lens` / `_frozen<NN>` / `_e<edge>` を
+並べて持つので、そのまま `--developed` に渡すと失敗する。評価したい 1 バリアントだけを別フォルダへ集める:
+
+```sh
+mkdir -p work/raw-evaluation/inputs/ci_lens
+cp work/engine-comparison/<run>/coreimage/preview/DSC*_preview_lens.jpg work/raw-evaluation/inputs/ci_lens/
+python scripts/evaluate_raw.py --source-root "$RAW" --developed ci_lens=work/raw-evaluation/inputs/ci_lens
+```
 
 ### 凍結スクリプト
 

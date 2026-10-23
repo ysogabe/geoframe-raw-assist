@@ -6244,8 +6244,36 @@ def frozen_request(entry: dict[str, Any], preset: str) -> dict[str, Any]:
     return request
 
 
+def frozen_path_conflicts(manifest: Path, root: Path, out: Path, capture: Path | None) -> list[str]:
+    """凍結入力（凍結ルート・マニフェスト）へ書き込みうる出力先の組み合わせを列挙する（パスだけで判定）。
+
+    照合より前に呼ぶ（照合レポート ``frozen_verification.json`` の書き込みも ``--out`` へ行うため）。
+    マニフェストが壊れていても判定できるよう、マニフェストの中身は読まない。
+    """
+    manifest, root, out = manifest.resolve(), root.resolve(), out.resolve()
+    problems = []
+    if out == root:
+        problems.append(f"--out が --frozen-root と同じです: {out}")
+    elif out.is_relative_to(root):
+        problems.append(f"--out が --frozen-root の中にあります: {out}")
+    elif root.is_relative_to(out):
+        problems.append(f"--out が --frozen-root を含みます: {out}")
+    if manifest.is_relative_to(out):
+        problems.append(f"--out が --frozen-manifest を含みます: {manifest}")
+    if capture is not None:
+        capture = capture.resolve()
+        if capture == manifest:
+            problems.append(f"--frozen-capture が --frozen-manifest と同じファイルです: {capture}")
+        if capture.is_relative_to(root):
+            problems.append(f"--frozen-capture が --frozen-root の中にあります: {capture}")
+    return problems
+
+
 def verify_frozen(manifest: Path, root: Path, out: Path) -> list[frozen.FrozenImage]:
-    """凍結物を照合し ``frozen_verification.json`` を書く。失敗なら書いてから SystemExit(1)。"""
+    """凍結物を照合し ``frozen_verification.json`` を書く。失敗なら書いてから SystemExit(1)。
+
+    呼ぶ前に ``frozen_path_conflicts`` で ``out`` が凍結入力と重ならないことを確かめておくこと。
+    """
     out.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {"manifest": str(manifest), "root": str(root)}
     try:
@@ -6263,7 +6291,11 @@ def verify_frozen(manifest: Path, root: Path, out: Path) -> list[frozen.FrozenIm
 
 
 def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str, capture: Path | None) -> int:
-    """照合済みの凍結画像ごとに現在の CI で描画し、凍結画像と同寸で比べる。描画失敗が 1 件でもあれば 1 を返す。"""
+    """照合済みの凍結画像ごとに現在の CI で描画し、凍結画像と同寸で比べる。描画失敗が 1 件でもあれば 1 を返す。
+
+    出力のバリアント名・シート名はマニフェストの行番号で一意にする（同じ撮影 ID・mode の行が request 違いで
+    複数あっても、出力が上書きされて凍結マニフェストのハッシュが食い違わないように）。
+    """
     rows: list[dict[str, Any]] = []
     captured: list[dict[str, Any]] = []
     for index, image in enumerate(images, 1):
@@ -6272,14 +6304,16 @@ def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str
             raise SystemExit(f"凍結行の mode は preview / full のどちらかです: {cid} {mode}")
         ctx.say(f"[frozen] ({index}/{len(images)}) {cid} {mode} {image.dimensions[0]}x{image.dimensions[1]}")
         request = frozen_request(image.entry, preset)
-        base = {"capture_id": cid, "mode": mode, "frozen_path": image.entry["path"],
+        variant = f"frozen{index:02d}"
+        base = {"capture_id": cid, "mode": mode, "frozen_index": index, "frozen_variant": variant,
+                "frozen_path": image.entry["path"],
                 "frozen_width": image.dimensions[0], "frozen_height": image.dimensions[1],
                 "ci_profile": request["profile"], "ci_lens": request["lens"], "ci_decoder_version": request["decoder_version"]}
         if not source_file(ctx.source_root, cid, "ARW").is_file():
             rows.append({**base, "error": "source ARW がありません"})
             continue
         row = run_coreimage(ctx, cid, mode, bool(request["lens"]), decoder_version=str(request["decoder_version"]),
-                            profile=str(request["profile"]), variant="frozen_cmp", adjustments=request["adjustments"],
+                            profile=str(request["profile"]), variant=variant, adjustments=request["adjustments"],
                             max_edge=max(image.dimensions) if mode == "preview" else None)
         if row.get("error"):
             rows.append({**base, **row})
@@ -6295,7 +6329,7 @@ def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str
         sheet_size = fit_size(reference.shape[1], reference.shape[0], 900)
         save_plain_jpeg(labeled_row([("frozen", resize_to(reference, sheet_size)), ("current Core Image", resize_to(fitted, sheet_size))],
                                     f"{cid} {mode}  ΔE76 {out_row['frozen_delta_e76']:.2f}  fit {fit}"),
-                        ctx.out / "sheets" / f"{cid}_{mode}_frozen.jpg")
+                        ctx.out / "sheets" / f"{cid}_{mode}_{index:02d}_frozen.jpg")
         if capture is not None:
             output = Path(row["output"])
             with Image.open(output) as handle:
@@ -6410,21 +6444,30 @@ def main(argv: list[str] | None = None) -> None:
         if not args.frozen_root:
             raise SystemExit("--frozen-manifest には --frozen-root が必要です")
         out = (args.out or DEFAULT_OUT_ROOT / time.strftime("frozen-%Y%m%d-%H%M%S")).resolve()
-        images = verify_frozen(args.frozen_manifest.resolve(), args.frozen_root.expanduser().resolve(), out)
+        manifest = args.frozen_manifest.resolve()
+        root = args.frozen_root.expanduser().resolve()
+        capture = args.frozen_capture.resolve() if args.frozen_capture else None
+        conflicts = frozen_path_conflicts(manifest, root, out, None if args.frozen_verify_only else capture)
+        if conflicts:
+            # 照合レポートを含め、凍結入力のある場所へは何も書かない（凍結ルートとは別の --out を求める）。
+            raise SystemExit("凍結入力を上書きしうる出力先です（別の --out / --frozen-capture を指定してください）:\n- "
+                             + "\n- ".join(conflicts))
+        images = verify_frozen(manifest, root, out)
         print(f"凍結物の照合: PASS（{len(images)} 件）", flush=True)
         if args.frozen_verify_only:
             return
-        inside = [str(i.path) for i in images if i.path.resolve().is_relative_to(out)]
+        inside = [str(i.path) for i in images
+                  if i.path.resolve().is_relative_to(out) or (capture is not None and i.path.resolve() == capture)]
         if inside:
             # 現在の CI 出力で凍結画像を上書きしないよう、凍結ルートとは別の --out を求める。
-            raise SystemExit("--out が凍結画像を含みます（上書きを避けるため別の出力先を指定してください）: " + ", ".join(inside))
+            raise SystemExit("--out / --frozen-capture が凍結画像と重なります（上書きを避けるため別の出力先を指定してください）: "
+                             + ", ".join(inside))
         if not args.source_root or not args.source_root.expanduser().is_dir():
             raise SystemExit("--frozen-manifest の比較には --source-root（ARW のあるフォルダ）が必要です")
         if not args.cli.is_file():
             raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {args.cli}")
         ctx = RunContext(source_root=args.source_root.expanduser().resolve(), out=out, cli=args.cli.resolve(),
                          max_edge=args.max_edge, legacy_rawpy=False)
-        capture = args.frozen_capture.resolve() if args.frozen_capture else None
         raise SystemExit(run_frozen(ctx, images, preset=args.frozen_preset, capture=capture))
     if args.frozen_verify_only:
         raise SystemExit("--frozen-verify-only には --frozen-manifest が必要です")
