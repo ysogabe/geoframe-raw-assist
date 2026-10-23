@@ -58,3 +58,7 @@ merge requestでは `settings.exposure_ev` は値が0でも、非nullで明示�
 ## 親側の最終再検証
 
 2026-10-23、修正後に親側でSwift全144件（9件skip、失敗0件）を確認した。release同梱用CLI 0.8.0のビルドとgit diff --checkも成功。手動境界レビューでは信頼度7以上の新規リスクは0件だった。
+
+### 親側の最終版・原寸2枚の資源検証
+
+CLI 0.8.0の色変換修正後に、既存DSC07415.ARWを一時フォルダへ別名コピーした2枚（6000×4000、max_edge指定なし）を合成した。CLI totalは12.718秒、maximum RSSは2,435,121,152 bytes、peak footprintは2,497,317,840 bytes。新式の事前見積もり2,976,000,000 bytes内で成功した。出力5999×3999、ignored exposure/highlight_recoveryも確認。一時コピーと生成物は検証後に回収し、元RAWは変更していない。同一露出画像の複製による資源確認であり、実AEBの画質検証ではない。
