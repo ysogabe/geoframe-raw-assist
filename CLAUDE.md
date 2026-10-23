@@ -20,7 +20,26 @@
   - 環境に `CI=1` が設定されており、そのままだと tauri CLI が `--ci 1` エラーになるため `CI` を必ず外す。
 - ローカル実行: `env -u CI npm run tauri:dev`（Python サーバは使わない。単一アプリ化 ADR 0003）
 - Rust テスト: `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）／ Swift: `swift test --package-path native/coreimage-cli`
+- 配布形での確認: `env -u CI npm run tauri:build` → `open "src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app"`（Python に依存していないことを見るときは `.venv` を退避してから起動）
 - Python（評価スクリプトのみ。`requirements-dev.txt`、アプリ本体・rawpy・lensfunpyは不要）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`。旧実装の最後の参照点は `e838ecc`、削除後の手順は `docs/evaluation-paths.md`。
+- フロント ⇔ Rust の契約（コマンド名・引数・戻り値・エラー code・`$APPDATA` 配下の保存先・EXIF/GPS 継承）は `docs/API_CONTRACT.md`。コマンドを変えたら同じ PR で更新する。
+- WebView のデバッグ: debug ビルドで右クリック →「要素の詳細を表示」。WebView の自動操作（Playwright 等）は持たないので、reducer の `vitest` と Rust / Swift の単体テストで押さえる。
+
+## 画面の確認観点（手動。UI に触れる PR の本文にチェックリストとして載せる）
+
+1. 起動直後（現像元フォルダ未設定 / 解析前 / 一覧）の表示が意図どおり。
+2. フォルダ選択 → 解析の進捗 → 一覧（サムネイルが出る。出ないときは asset scope か `geoframe://` 配信を疑う）。
+3. 操作パネル: 元 JPG、フィルムストリップ、原寸ビューア、←→ 移動、調整値破棄の確認ダイアログ。
+4. プレビュー → 本現像 → 前後比較。エラー時の文言（`SIDECAR_*` などの code がそのまま出る）。
+5. ブラケットグループの合成（プレビュー / 本合成）、現像候補の生成。
+6. 書き出し → Finder で表示、写真.app への取り込み（初回はオートメーションの許可導線）。
+
+## EXIF / GPS の確認
+
+原寸現像・本合成はカメラのペア JPG の EXIF を継承する（Orientation 1・寸法更新・Software 設定・MakerNote 破棄、**GPS は継承する。アプリが新たに書くことはしない**。ADR 0003 決定 5）。`exiftool` はこの Mac に無い。
+
+- `mdls -name kMDItemLatitude -name kMDItemLongitude -name kMDItemOrientation <出力.jpg>`（Spotlight のメタデータ）【要確認: GPS 付きの実機 JPG ではまだ試していない。Spotlight の索引外の場所では値が出ないことがある】
+- 自動テストは `cargo test`（`exif_inherit.rs` の合成 JPG で GPS 保持・MakerNote 除去を確認）。
 
 ## 環境の注意
 
