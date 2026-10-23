@@ -57,4 +57,6 @@ impl RgbImage {
 }
 
 #[cfg(test)]
+mod proxy_full_measurement;
+#[cfg(test)]
 mod tests;

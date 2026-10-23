@@ -37,6 +37,7 @@ full 約 2.0 秒・RSS 約 270 MB。
 - macOS のメジャー / マイナー更新の後（セキュリティ更新だけのときは 3.1 のみでよい）。
 - Xcode / Swift の更新で CLI を作り直した後（3.1 のみ）。
 - CLI のリクエスト・既定値を変えた PR（3.1 と 3.2）。`adjustments` の写像・後段・NR 表を変えた場合は 3.4 も行う。
+- 旧エンジン（rawpy）の基準と比べたいとき（3.6。rawpy 自体は回さない）。
 
 ## 3. 手順
 
@@ -74,8 +75,10 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 - `sharpness_summary.json` の `by_mode` から `ci_apple_v9_l1` の値を取り、1. の表と比べる。
 - `sheets/` の等倍クロップ（`detail1` / `detail2` / `corner`）を、前回の同じファイルと並べて目視する。
   特に見る点: 細部の水彩状の平滑化、白い点状のノイズ、偽色、星（夜景カット）の消失。
-- 注意: 現在の比較ハーネスは rawpy の現像も同時に行う（`.venv` が必要）。rawpy を取りやめた後は
-  Core Image のみで回すモードが必要になる（ADR 0002 の移行作業で対応する）。
+- 比較ハーネスの既定は **Core Image のみ**（カメラ JPEG と CI のバリアント）で、rawpy の列は作らない。
+  Python 環境は評価用の `requirements-dev.txt`（NumPy / Pillow / OpenCV）だけでよく、rawpy・`local_raw/` は不要。
+  §9 の表にある rawpy の列は過去の記録で、再生成はしない（旧エンジンとの比較が要るときは 3.6 の凍結基準を使う）。
+- 2026-10-23 より前の記録（4. の表・比較レポートの数値）は rawpy 列を含むハーネスで取ったもの。CI の列はそのまま比べてよい。
 
 ### 3.3 合否の目安
 
@@ -107,6 +110,10 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 - 撮影 ID・手順・閾値は [比較レポート §16](coreimage-engine-comparison.md)（昼 6 + 星空 3 カットで全チェック合格が基準。閾値は `scripts/compare_engines.py` の `ADJ_*`）。
 - 後段オラクル（tiff16 sRGB、ΔE76 中央値・チャンネル差 p99）、方向・単調、NR full の星の残存率・空の高周波、白点（`impulse_vs_full` ≤ 10）、処理時間が見える。
 - 不合格は、写像の定数（`MIRED_PER_UNIT`、NR の `fullLuminanceCap` など）の較正か、指標の見直しかを §16.3 の分類（目安が非現実的 / 定数の較正 / 実装のバグ / rawpy 側の基準差）で判断する。
+- **注意（2026-10-23〜）**: `--adjustments` の実行は rawpy の掃引と Python の後段オラクルを使う**旧経路（アーカイブ）**で、
+  `--legacy-rawpy` の明示が必要になった（`--dry-run` によるリクエストの契約検査だけは不要）。Python 本体（`local_raw/`）の削除後は、
+  削除前のコミットを checkout し、その時点の `requirements-raw.txt` の環境を用意して `--legacy-rawpy` を付けて回す。
+  通常の OS 更新では 3.1・3.2・3.5 と 3.6 の凍結基準との比較を先に行い、写像そのものを変えたときにだけこの旧経路を使う。
 - CLI 0.6.0（#81）からは `adjustments_ignored_empty`（`ignored` が空）がチェックに入る。オラクル `or_preset` は CI 値（`src-tauri/tests/fixtures/presets.json`）の既定プリセットを hr 0 で使う。
 
 ### 3.5 プリセットと `highlight_recovery` の写像の確認（CLI 0.6.0 以降。数十分）
@@ -124,6 +131,19 @@ CLI 応答の `applied` をベースライン JSON の同じ撮影 ID と比べ�
 
 - 見るもの: `index.md` の §2.2 の等価性（条件 9。tiff16 の max abs diff 0 と `applied` の一致）と、救済系 3 プリセットの条件 1〜5（hr 0 比で白飛びが減り、中間調 ±0.03）。
 - 手順・閾値・合否の定義は [再調整の設計書](design/coreimage-preset-retune.md) §7.4、結果の記録は [再調整レポート](coreimage-preset-retune-report.md)。
+- `--presets` は既定の Core Image のみの経路で回る（rawpy の列は作らない）。
+
+### 3.6 凍結基準との比較（rawpy 削除後の旧エンジン比較。数分〜）
+
+rawpy（旧エンジン）の画は、Python 本体の削除前に**凍結した基準画像**（ハッシュ・寸法つきのマニフェスト）として残し、
+現在の Core Image の出力と同じ寸法で比べる。凍結物の欠落・改変は失敗として止まる。
+
+- `--frozen-manifest <マニフェスト>` と `--frozen-root <凍結物の基準ディレクトリ>` で、凍結物を照合してから現在の CI で描画して比べる。
+- `--frozen-verify-only` は凍結物のハッシュ・寸法の照合だけを行う（CLI・現像元フォルダは不要。このとき `--source-root` は省略できる）。
+- `--frozen-capture` は今回の CI 出力を凍結マニフェストとして書き出す（次の OS 更新で `--frozen-manifest` に渡す CI 側の基準になる）。
+
+フラグの正確な意味・凍結物の置き場所・旧経路（`--legacy-rawpy`）との使い分けは、[評価手順](evaluation-paths.md)と
+`scripts/compare_engines.py --help` を正とする（この節はそれらの要約で、食い違うときはそちらに従う）。
 
 ## 4. 記録
 

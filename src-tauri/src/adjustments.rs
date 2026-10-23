@@ -1,7 +1,8 @@
 //! Adjustments（現像パラメータ 9 キー）の検証と正規化（Issue #72 / #73）。
 //!
-//! 値域と規則は `local_raw/presets.py`（`ADJUSTMENT_RANGES` / `resolve_adjustments`）と
-//! 契約 `docs/API_CONTRACT.md` §2 に合わせる。設計書
+//! 値域と規則は契約 `docs/API_CONTRACT.md` §2 に合わせる（由来は旧 Python の `local_raw/presets.py`
+//! の `ADJUSTMENT_RANGES` / `resolve_adjustments`。Python 本体は削除済みで、最後の参照点は `e838ecc`。
+//! 旧値は凍結表 `tests/fixtures/presets_legacy_rawpy.json` に残る）。設計書
 //! `docs/design/coreimage-preview-adjustments.md` §4.3。
 //!
 //! - 9 キーすべて必須。欠けたキー・未知のキーは `ADJUSTMENTS_INVALID`。
@@ -26,7 +27,8 @@ use crate::coreimage::CoreImageError;
 /// 検証エラーのコード（フロントはフォールバックせずバグとして表示する。設計書 §2.6）。
 pub const ADJUSTMENTS_INVALID: &str = "ADJUSTMENTS_INVALID";
 
-/// 数値キーの値域（契約 §2。`local_raw/presets.py: ADJUSTMENT_RANGES` と同じ順・同じ値）。
+/// 数値キーの値域（契約 §2。凍結表 `tests/fixtures/presets_legacy_rawpy.json` の `adjustment_ranges`
+/// （旧 `local_raw/presets.py: ADJUSTMENT_RANGES`、`e838ecc`）と同じ順・同じ値）。
 pub const ADJUSTMENT_RANGES: [(&str, f64, f64); 8] = [
     ("exposure", -2.0, 2.0),
     ("wb_temp", -100.0, 100.0),
@@ -41,7 +43,8 @@ pub const ADJUSTMENT_RANGES: [(&str, f64, f64); 8] = [
 /// 列挙キー。
 pub const NOISE_REDUCTION_KEY: &str = "noise_reduction";
 
-/// `noise_reduction` の選択肢（`local_raw/presets.py: NOISE_REDUCTION_CHOICES`）。
+/// `noise_reduction` の選択肢（凍結表の `noise_reduction_choices`。旧 `local_raw/presets.py:
+/// NOISE_REDUCTION_CHOICES`、`e838ecc`）。
 pub const NOISE_REDUCTION_CHOICES: [&str; 3] = ["off", "light", "full"];
 
 /// 契約にあるキー（数値 8 種 + `noise_reduction`）か。
@@ -53,7 +56,7 @@ fn invalid(message: impl Into<String>) -> CoreImageError {
     CoreImageError::new(ADJUSTMENTS_INVALID, message)
 }
 
-/// 数値 1 つを検証してクランプする（`presets.py: _coerce_number` と同じ規則）。
+/// 数値 1 つを検証してクランプする（旧 `local_raw/presets.py: _coerce_number` と同じ規則。`e838ecc`）。
 fn coerce_number(
     key: &str,
     value: &Value,

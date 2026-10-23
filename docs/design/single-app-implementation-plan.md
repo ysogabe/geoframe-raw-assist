@@ -57,10 +57,18 @@ M1  提案の質を戻す
 M2  ブラケット合成                 #83 → #84                      ┐ M2 と M3 は並列
 M3  現像候補（PSO）と暗所          #86 ‖ N-B → #87、#88、#57。#85 は閉じる ┘
 M4  後片付け
-    #90 + N-H  Python 全削除（local_raw/、tests/test_*.py、requirements-raw.txt）
+    #57 のCI proxy/原寸差を現11枚で再現 → 修正範囲を決定
+    評価経路を独立化し local_raw/rawpy 無しの保存画像・JSON比較を検収
+    #90 + N-H  Python 本体削除（local_raw/、旧アプリのテスト、requirements-raw.txt）
+               評価スクリプトと独立したテスト・requirements-dev.txtは維持
     N-DOC  API_CONTRACT を Tauri コマンド契約に書き直す、CLAUDE.md の検証手順
     N-F    （将来）Google Drive アップロードを Rust で実装する
 ```
+
+2026-10-23追補: M4の前提と検収順は
+[評価経路を先に独立させる計画](evaluation-before-python-removal.md)を参照。
+`compare_engines.py`の遅延importも含む実行依存を解消してから削除する。
+`image_work`の昼夜混在13ケースは素材待ちであり、現11枚の評価には含めない。
 
 ### 2.1 新規 Issue の一覧（タイトルと範囲。作成はメインが行う）
 

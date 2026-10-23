@@ -4,7 +4,7 @@
       "rootMarkers": ["Cargo.toml", "src-tauri/Cargo.toml", ".git"]
     },
     "pyright": {
-      "rootMarkers": ["requirements-raw.txt", "pyrightconfig.json", "pyproject.toml", "setup.py", ".git"]
+      "rootMarkers": ["requirements-dev.txt", "pyrightconfig.json", "pyproject.toml", "setup.py", ".git"]
     },
     "clangd": {
       "rootMarkers": ["compile_commands.json", "CMakeLists.txt", ".clangd", ".git"]

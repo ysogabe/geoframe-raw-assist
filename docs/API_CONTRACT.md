@@ -10,6 +10,7 @@
 > - 旧 HTTP 契約（凍結版、`/api/*` エンドポイント・`outputs/` ディレクトリ・rawpy パイプライン）は
 >   コミット `f3e24b0` 時点の本ファイルを参照。現行の決定と食い違う点は §10 にまとめた。
 > - TypeScript 側の写し: `src/lib/types.ts`。
+> - #90/#117でPython本体を削除済み。評価用Pythonは[独立評価手順](evaluation-paths.md)に従い、保存画像・JSONとNumPy/Pillow/OpenCVだけを使う。旧実装を含む最後の参照点は `e838ecc`。
 > - 節番号 §2（Adjustments）・§5（プリセット）・§9（resolve の規則）はコードのコメントから参照されている
 >   （`src-tauri/src/adjustments.rs`・`presets.rs`、`native/coreimage-cli/Sources/CoreImageDevelop/Adjustments.swift`、
 >   `native/coreimage-cli/README.md`）。**番号を変えないこと。**
@@ -544,7 +545,7 @@ $APPDATA/
 > 白飛び側にしか無かったため、`shadow_rescue` と `backlit_rescue` を足した。逆光は専用の検出コードを持たず、
 > `highlight_clipping` と `deep_shadows` が同時に立つことをシグナルにする（初期プリセット選択はフロント `app-state.ts`）。
 
-旧 rawpy 向けの値（legacy 表、`tests/fixtures/presets_legacy_rawpy.json`）は Python 参照実装用で、本契約の対象外（#117 で削除予定）。
+旧 rawpy 向けの値（legacy 表、`tests/fixtures/presets_legacy_rawpy.json`）は凍結した評価参照として保持し、アプリでは読まない。本契約の対象外で、#90/#117で削除したPython本体とは独立している。
 
 ---
 

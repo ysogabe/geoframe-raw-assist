@@ -18,7 +18,14 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import evaluate_candidates as ec  # noqa: E402
-from local_raw import engine  # noqa: E402
+
+try:  # 旧 rawpy / local_raw 経路（アーカイブ）。Python 本体の削除後は DevelopParityTests だけ skip する。
+    import importlib.util as _ilu
+
+    LEGACY_AVAILABLE = _ilu.find_spec("local_raw") is not None and _ilu.find_spec("rawpy") is not None
+except (ImportError, ValueError):
+    LEGACY_AVAILABLE = False
+engine = None  # DevelopParityTests.setUpClass が旧経路のときだけ読み込む
 
 
 def _metrics(**overrides):
@@ -323,8 +330,15 @@ class PairFrameTests(unittest.TestCase):
                 self.assertEqual(frame.size, (ec.FRAME_EDGE, 320))
 
 
+@unittest.skipUnless(LEGACY_AVAILABLE, "旧 rawpy / local_raw 経路（アーカイブ）が無い環境")
 class DevelopParityTests(unittest.TestCase):
-    """develop_real_array が engine.develop_raw と同じ関数を同じ順序・同じ引数で呼ぶこと。"""
+    """旧経路: develop_real_array が engine.develop_raw と同じ関数を同じ順序・同じ引数で呼ぶこと。"""
+
+    @classmethod
+    def setUpClass(cls):
+        global engine
+        engine = ec.legacy.import_module("local_raw.engine", "test")
+        cls.lens = ec.legacy.import_module("local_raw.lens", "test")
 
     class FakeRaw:
         camera_whitebalance = [1.0, 1.0, 1.0, 1.0]
@@ -354,7 +368,7 @@ class DevelopParityTests(unittest.TestCase):
             wrap(engine, "_postprocess_params", "postprocess_params"),
             wrap(engine, "_decode_16bit_to_float01", "decode16"),
             wrap(engine, "apply_lens_correction", "lens"),
-            wrap(ec, "apply_lens_correction", "lens"),
+            wrap(self.lens, "apply_lens_correction", "lens"),
             wrap(engine, "apply_post_decode_chain", "chain"),
         ]
 
@@ -368,7 +382,7 @@ class DevelopParityTests(unittest.TestCase):
 
     def test_call_order_is_fixed(self):
         adjustments = engine.resolve_adjustments("neutral_recovery")
-        calls = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({})))
+        calls = self._run(lambda: ec.develop_real_array(self.FakeRaw(), adjustments, self.lens.probe_lens({})))
         self.assertEqual([c[0] for c in calls], ["postprocess_params", "decode16", "lens", "chain"])
         self.assertEqual(calls[0][1], (adjustments, True, None))  # preview 相当（full デコード）
         self.assertEqual(calls[2][2], {"force_skip_vignetting": False})
@@ -377,7 +391,7 @@ class DevelopParityTests(unittest.TestCase):
     def test_dark_scene_passes_fixed_gain_and_skips_vignetting(self):
         adjustments = engine.resolve_adjustments("neutral_recovery")
         calls = self._run(
-            lambda: ec.develop_real_array(self.FakeRaw(), adjustments, ec.probe_lens({}), 5.0)
+            lambda: ec.develop_real_array(self.FakeRaw(), adjustments, self.lens.probe_lens({}), 5.0)
         )
         self.assertEqual(calls[0][1], (adjustments, True, 5.0))
         self.assertEqual(calls[2][2], {"force_skip_vignetting": True})
@@ -386,7 +400,7 @@ class DevelopParityTests(unittest.TestCase):
         adjustments = engine.resolve_adjustments("neutral_recovery")
         calls = self._run(
             lambda: ec.develop_real_array(
-                self.FakeRaw(), adjustments, ec.probe_lens({}), None, {"iso": 3200}
+                self.FakeRaw(), adjustments, self.lens.probe_lens({}), None, {"iso": 3200}
             )
         )
         self.assertEqual(calls[3][2], {"iso": 3200})
@@ -397,7 +411,7 @@ class DevelopParityTests(unittest.TestCase):
         bright_k = engine.detect_dark_scene(exif or {})["bright_k"]
         mine = self._run(
             lambda: ec.develop_real_array(
-                self.FakeRaw(), adjustments, ec.probe_lens({}), bright_k, exif
+                self.FakeRaw(), adjustments, self.lens.probe_lens({}), bright_k, exif
             )
         )
 

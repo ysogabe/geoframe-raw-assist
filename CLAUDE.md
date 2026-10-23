@@ -21,7 +21,7 @@
 - ローカル実行: `env -u CI npm run tauri:dev`（Python サーバは使わない。単一アプリ化 ADR 0003）
 - Rust テスト: `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）／ Swift: `swift test --package-path native/coreimage-cli`
 - 配布形での確認: `env -u CI npm run tauri:build` → `open "src-tauri/target/release/bundle/macos/GeoFrame RAW Assist.app"`（Python に依存していないことを見るときは `.venv` を退避してから起動）
-- Python（`scripts/` の評価用と移行期間の参照実装のみ。#117 で削除予定）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`
+- Python（評価スクリプトのみ。`requirements-dev.txt`、アプリ本体・rawpy・lensfunpyは不要）: `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`。旧実装の最後の参照点は `e838ecc`、削除後の手順は `docs/evaluation-paths.md`。
 - フロント ⇔ Rust の契約（コマンド名・引数・戻り値・エラー code・`$APPDATA` 配下の保存先・EXIF/GPS 継承）は `docs/API_CONTRACT.md`。コマンドを変えたら同じ PR で更新する。
 - WebView のデバッグ: debug ビルドで右クリック →「要素の詳細を表示」。WebView の自動操作（Playwright 等）は持たないので、reducer の `vitest` と Rust / Swift の単体テストで押さえる。
 

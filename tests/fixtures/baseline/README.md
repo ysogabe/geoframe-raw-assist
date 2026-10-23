@@ -1,16 +1,22 @@
 # Python 基準値の凍結（#107）
 
+2026-10-23追補: 以下は削除前の生成記録を含む。
+保存済み画像・JSONを読む評価経路と、旧実装による基準の再生成は区別する。
+今後の順序は[評価経路独立化の計画](../../../docs/design/evaluation-before-python-removal.md)、
+削除後も維持する実行方法は[評価経路の手順](../../../docs/evaluation-paths.md)を参照。
+凍結JSON・合成画像・旧rawpy画像の内容は今回の評価整理では更新しない。
+
 Python 廃止前の参照実装を固定する。数値の意味・許容差は
 `docs/design/single-app-implementation-plan.md` §3.8 / §4 と
 `docs/adr/0003-python-removal-single-app.md` に従う。
 実機写真および派生画像はここには置かない。
 
-## 再生成
+## 再生成（削除前の参照点 `e838ecc` のcheckoutでのみ）
 
 リポジトリルートで実行する（外部入力が必要）。
 
 ```sh
-.venv/bin/python scripts/freeze_baseline.py
+.venv/bin/python scripts/freeze_baseline.py --legacy-generate
 .venv/bin/python scripts/freeze_baseline.py --audit-only
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
@@ -23,7 +29,7 @@ Python 廃止前の参照実装を固定する。数値の意味・許容差は
 mkdir -p work/python314-bin
 ln -sf /opt/homebrew/bin/python3.14 work/python314-bin/python3
 /opt/homebrew/bin/python3.14 -m venv --clear .venv
-PATH="$PWD/work/python314-bin:$PATH" .venv/bin/python scripts/freeze_baseline.py
+PATH="$PWD/work/python314-bin:$PATH" .venv/bin/python scripts/freeze_baseline.py --legacy-generate
 ```
 
 既存 `.venv` を作り直す `--clear` は環境を作り直す場合だけ使用する。

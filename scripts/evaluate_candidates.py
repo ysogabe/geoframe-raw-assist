@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""現像候補自動生成（``local_raw/development_candidates.py``）の質を測る評価スクリプト。
+"""現像候補自動生成の質を測る評価スクリプト（集計は Core Image 候補・旧 rawpy 候補の共通形式）。
+
+**既定経路（Core Image / 現行）**: Rust の候補生成ハーネスが書いた ``<out>/cases/*.json``
+（``metrics`` = CI 640px 代理、``raw_metrics`` = 同じ adjustments の CI 原寸を 640px に縮小した指標）を
+``--aggregate-only --out <out>`` で集計する。アプリ本体（local_raw）・rawpy・lensfunpy は使わない。
+旧 Python の安全策閾値（``CLIP_WORSEN_LIMIT`` 等）による列は「旧閾値の参考診断」と明記し、
+CI の受け入れ判定には使わない（summary の ``acceptance``）。
+
+**旧経路（アーカイブ、``--legacy-rawpy`` の明示 opt-in）**: 以下は ``local_raw`` と rawpy が残る
+checkout でだけ動く旧 rawpy 候補生成の評価（docs/evaluation-paths.md）。
 
 候補生成は ARW を ``half_size`` デコードした代理画像で指標を計算する。このスクリプトは
 各候補の調整値で **本番相当の実RAW現像**（full-size デコード → レンズ補正 →
@@ -18,11 +27,19 @@ neutral_recovery）か ``--cases-file``（``scripts/eval_cases/*.json``）で与
 実フォルダは ``--root キー=パス``（繰り返し可）で渡す。``--source-root`` は ``default`` キーの別名。
 
 例:
-    .venv/bin/python scripts/evaluate_candidates.py \
+    # 既定: Rust ハーネスの cases/*.json（Core Image 候補）を集計する
+    python scripts/evaluate_candidates.py --aggregate-only --out work/issue57/<run>
+
+    # --contact-sheets は <out>/frames/<key>__jpg.jpg と <out>/frames/<key>__<style>.jpg（と raw_metrics）が
+    # 揃っているときだけ一覧を作る。Rust ハーネスは frames/ を書かないので、その出力では一覧はできない
+    # （指定すると警告して集計だけ行う）。frames/ を書くのは旧経路の生成。
+
+    # 旧経路（アーカイブ。削除前の checkout + requirements-raw.txt）
+    .venv/bin/python scripts/evaluate_candidates.py --legacy-rawpy \
       --source-root /Volumes/KIOXIA/image_work \
       --case DSC02849:neutral_recovery --case DSC03203:nightscape --contact-sheets
 
-    .venv/bin/python scripts/evaluate_candidates.py \
+    .venv/bin/python scripts/evaluate_candidates.py --legacy-rawpy \
       --cases-file scripts/eval_cases/candidates_baseline.json \
       --root image_work=/Volumes/KIOXIA/image_work --root stars=work/raw --contact-sheets
 
@@ -48,15 +65,16 @@ from unittest import mock
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# ``python scripts/evaluate_candidates.py`` は ``scripts/`` を sys.path の先頭に置くため、
-# リポジトリ直下の local_raw を import できるようにする（evaluate_raw.py と同じ流儀）。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# 評価用の独立サポート（scripts/evaluation/）。アプリ本体・rawpy・lensfunpy に依存しない。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from local_raw import config, development_candidates as dc, engine  # noqa: E402
-from local_raw.exif import read_capture_exif  # noqa: E402
-from local_raw.lens import apply_lens_correction, probe_lens  # noqa: E402
-from local_raw.presets import DEFAULT_PRESET, PRESETS  # noqa: E402
+from evaluation import candidate_metrics as cm  # noqa: E402
+from evaluation import legacy  # noqa: E402
+from evaluation.presets import DEFAULT_PRESET, PRESET_NAMES as PRESETS  # noqa: E402
+
+#: 旧 Python 安全策の閾値に基づく列の位置づけ（CI の受け入れ判定ではない）。
+INHERITED_DIAGNOSTIC = "inherited_python_threshold_diagnostic"
 
 CAPTURE_ID_PATTERN = re.compile(r"^DSC\d{5}$")
 #: root キー名はケースキー（= 出力ファイル名）に入るため、安全な文字だけを許す。
@@ -80,7 +98,7 @@ COMPARE_METRICS: tuple[str, ...] = (
 #: 実RAWで natural とほぼ同じ画像とみなす平均絶対画素差（0..1）。
 NEAR_NATURAL_DEVIATION = 0.01
 #: 実RAW指標の計算に使う長辺（代理画像と同じ）。
-COMPARE_EDGE = dc.MAX_PROXY_EDGE
+COMPARE_EDGE = cm.MAX_PROXY_EDGE
 #: コンタクトシートの1コマの高さ・キャプション高さ。
 SHEET_FRAME_HEIGHT = 380
 SHEET_CAPTION_HEIGHT = 62
@@ -258,9 +276,12 @@ def compare_proxy_vs_raw(records: Sequence[dict[str, Any]]) -> dict[str, dict[st
 
 
 def find_broken_candidates(
-    records: Sequence[dict[str, Any]], limit: float = dc.CLIP_WORSEN_LIMIT
+    records: Sequence[dict[str, Any]], limit: float = cm.CLIP_WORSEN_LIMIT
 ) -> list[dict[str, Any]]:
-    """実RAWで natural 比 shadow_clip / highlight_clip が ``limit`` 以上悪化した候補。"""
+    """実RAWで natural 比 shadow_clip / highlight_clip が ``limit`` 以上悪化した候補。
+
+    ``limit`` の既定は旧 Python の安全策閾値。Core Image 候補では参考診断であって合否ではない。
+    """
 
     broken: list[dict[str, Any]] = []
     for record in records:
@@ -406,6 +427,15 @@ def distribution(values: Sequence[float]) -> dict[str, float | int | None]:
     }
 
 
+def _generation_seconds(record: dict[str, Any]) -> float | None:
+    """候補生成の所要秒（旧 rawpy は ``gen_elapsed``、Rust は ``elapsed_ms.total``）。"""
+
+    if isinstance(record.get("gen_elapsed"), (int, float)):
+        return float(record["gen_elapsed"])
+    total = (record.get("elapsed_ms") or {}).get("total")
+    return float(total) / 1000.0 if isinstance(total, (int, float)) else None
+
+
 def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """候補数・rejected 内訳・highlight カテゴリ・exposure の分布・star_scene・所要時間。"""
 
@@ -422,7 +452,7 @@ def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
             rejected_details.append({"case": record["key"], "style": item["id"], "reason": item["reason"]})
         for candidate in record["candidates"]:
             style_counts[candidate["id"]] += 1
-            category = dc.highlight_category(float(candidate["adjustments"]["highlight_recovery"]))
+            category = cm.highlight_category(float(candidate["adjustments"]["highlight_recovery"]))
             categories_all[category] += 1
             if candidate["id"] != "natural":
                 categories_non_natural[category] += 1
@@ -454,8 +484,10 @@ def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "exposure_non_natural": dict(sorted(exposures.items(), key=lambda kv: float(kv[0]))),
         "star_scene": star_rows,
         "star_scene_true": sum(row["is_star_scene"] for row in star_rows),
-        "generation_seconds": distribution([r["gen_elapsed"] for r in records]),
-        "proxy_decodes": distribution([float(r["proxy"]["decodes"]) for r in records]),
+        "generation_seconds": distribution([v for v in (_generation_seconds(r) for r in records) if v is not None]),
+        "proxy_decodes": distribution(
+            [float(r["proxy"]["decodes"]) for r in records if isinstance((r.get("proxy") or {}).get("decodes"), (int, float))]
+        ),
         "real_develop_seconds": distribution(
             [
                 float(c["raw_timing"]["t_total"])
@@ -464,6 +496,27 @@ def summarize_counts(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 if c.get("raw_timing")
             ]
         ),
+    }
+
+
+def engine_sources(records: Sequence[dict[str, Any]]) -> list[str]:
+    """レコードの候補生成経路（``proxy.source``。旧 rawpy レコードは source を持たない）。"""
+
+    return sorted({str((r.get("proxy") or {}).get("source") or "legacy_rawpy_proxy") for r in records})
+
+
+def acceptance_basis(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """summary の判定列の位置づけ。旧 Python の閾値・狙い判定は参考診断で、CI の受け入れ判定ではない。"""
+
+    return {
+        "engine_sources": engine_sources(records),
+        "authoritative_ci_acceptance": None,
+        "broken_candidates": INHERITED_DIAGNOSTIC,
+        "style_goals": INHERITED_DIAGNOSTIC,
+        "near_natural": INHERITED_DIAGNOSTIC,
+        "clip_worsen_limit": cm.CLIP_WORSEN_LIMIT,
+        "note": "broken_candidates / style_goals / near_natural は旧 Python の閾値・狙いを流用した参考診断。"
+                "Core Image 候補の合否は実測に基づいて別途決める（この集計は合否を出さない）。",
     }
 
 
@@ -480,6 +533,7 @@ def build_summary(records: Sequence[dict[str, Any]], errors: Sequence[dict[str, 
         "cases_with_raw_metrics": len(ok),
         "errors": None if errors is None else list(errors),
         "candidates_total": sum(len(r["candidates"]) for r in records),
+        "acceptance": acceptance_basis(records),
         "proxy_vs_raw": compare_proxy_vs_raw(ok),
         "broken_candidates": find_broken_candidates(ok),
         "style_goals": summarize_style_goals(ok),
@@ -518,7 +572,10 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
             f"| {metric} | {row['n']} | {_fmt(row['within_photo_spearman_mean'])} | {row['within_photo_n']} "
             f"| {_fmt(row['pooled_spearman'])} | {_fmt(row['mae'], 4)} | {_fmt(row['bias_raw_minus_proxy'], 4, True)} |"
         )
-    lines += ["", f"## 壊れた候補（実RAWで natural 比 shadow/highlight_clip が {dc.CLIP_WORSEN_LIMIT:.2f} 以上悪化）", ""]
+    acceptance = summary.get("acceptance") or {}
+    if acceptance:
+        lines += ["", "## 判定の位置づけ", "", f"- 経路: {acceptance.get('engine_sources')}", f"- {acceptance.get('note')}"]
+    lines += ["", f"## 壊れた候補（参考診断: 旧 Python 閾値。実RAW/原寸で natural 比 shadow/highlight_clip が {cm.CLIP_WORSEN_LIMIT:.2f} 以上悪化）", ""]
     if summary["broken_candidates"]:
         lines += [
             "| ケース | スタイル | raw Δshadow | raw Δhighlight | proxy Δshadow | proxy Δhighlight |",
@@ -532,7 +589,7 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
             )
     else:
         lines.append("なし")
-    lines += ["", "## スタイル別の狙い達成（natural 比）", "", "| スタイル | 狙い | n | 実RAW達成 | 代理達成 | 実RAW平均Δ | 代理平均Δ |", "|---|---|---:|---:|---:|---:|---:|"]
+    lines += ["", "## スタイル別の狙い達成（natural 比。参考診断: 旧 Python の狙い）", "", "| スタイル | 狙い | n | 実RAW達成 | 代理達成 | 実RAW平均Δ | 代理平均Δ |", "|---|---|---:|---:|---:|---:|---:|"]
     for style, row in summary["style_goals"].items():
         lines.append(
             f"| {style} | {row['goal']} | {row['n']} | {row['raw_achieved']}/{row['n']} "
@@ -546,7 +603,7 @@ def render_markdown(summary: dict[str, Any], meta: dict[str, Any] | None = None)
         lines.append(f"| {style} | {row['n']} | {_fmt(row['mean'], 4)} | {_fmt(row['min'], 4)} | {_fmt(row['max'], 4)} |")
     lines.append("")
     if summary["near_natural"]:
-        lines.append(f"natural とほぼ同じ候補（差 < {NEAR_NATURAL_DEVIATION}）:")
+        lines.append(f"natural とほぼ同じ候補（参考診断。差 < {NEAR_NATURAL_DEVIATION}）:")
         for row in summary["near_natural"]:
             lines.append(f"- {row['case']} / {row['style']}（{row['raw_mean_abs_diff']:.4f}）")
     else:
@@ -612,7 +669,7 @@ def develop_real_array(
     dark_scene_bright_k: float | None = None,
     capture_exif: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any], dict[str, float]]:
-    """engine.develop_raw と同じ手順（full デコード → レンズ補正 → 後段）を配列のまま行う。
+    """旧経路（アーカイブ）: engine.develop_raw と同じ手順（full デコード → レンズ補正 → 後段）を配列のまま行う。
 
     ``capture_exif`` はペアJPG の EXIF 要約（無ければ None）。RAW から ISO が取れないときの
     フォールバックにだけ使う。
@@ -620,11 +677,13 @@ def develop_real_array(
     ファイルには何も書かない。戻り値の配列は長辺 ``COMPARE_EDGE`` に揃える前の PREVIEW サイズ。
     """
 
+    engine = legacy.import_module("local_raw.engine", "旧 rawpy 候補の実RAW現像")
+    lens = legacy.import_module("local_raw.lens", "旧 rawpy 候補の実RAW現像")
     started = time.monotonic()
     rgb = raw.postprocess(**engine._postprocess_params(raw, adjustments, True, dark_scene_bright_k))
     decode_seconds = time.monotonic() - started
     rgb = engine._decode_16bit_to_float01(rgb)
-    rgb, lens_correction = apply_lens_correction(
+    rgb, lens_correction = lens.apply_lens_correction(
         rgb, lens_resolution, force_skip_vignetting=dark_scene_bright_k is not None
     )
     # ISO は develop_raw と同じ規則: RAW のメタデータ → 取れなければペアJPG の EXIF。
@@ -690,9 +749,15 @@ def prepare_out_dir(out_dir: Path, force: bool) -> None:
 
 
 def run_case(case: dict[str, str], source_root: Path, out_dir: Path) -> dict[str, Any]:
-    """1ケース: 候補生成 → 各候補を実RAW現像 → 実RAW指標。"""
+    """旧経路（アーカイブ）1ケース: 旧 rawpy 候補生成 → 各候補を実RAW現像 → 実RAW指標。"""
 
-    import rawpy
+    feature = "旧 rawpy 候補生成の評価"
+    rawpy = legacy.import_module("rawpy", feature)
+    config = legacy.import_module("local_raw.config", feature)
+    dc = legacy.import_module("local_raw.development_candidates", feature)
+    engine = legacy.import_module("local_raw.engine", feature)
+    read_capture_exif = legacy.import_module("local_raw.exif", feature).read_capture_exif
+    probe_lens = legacy.import_module("local_raw.lens", feature).probe_lens
 
     key = case_key(case)
     capture_id, preset = case["capture_id"], case["preset"]
@@ -807,7 +872,7 @@ def build_contact_sheet(record: dict[str, Any], out_dir: Path) -> Path | None:
         with Image.open(pair_path) as pair:
             panels.append(_panel(pair.convert("RGB"), "camera JPG (pair)", record["capture_id"], record["preset"]))
     # natural を先頭、以降は STYLE_IDS の順。
-    order = {style: index for index, style in enumerate(dc.STYLE_IDS)}
+    order = {style: index for index, style in enumerate(cm.STYLE_IDS)}
     for candidate in sorted(record["candidates"], key=lambda c: order.get(c["id"], 99)):
         frame_path = frames_dir / f"{key}__{candidate['id']}.jpg"
         metrics = candidate.get("raw_metrics")
@@ -853,7 +918,16 @@ def _write_summary(out_dir: Path, records: list[dict[str, Any]], errors: list[di
 
 
 def _load_records(out_dir: Path) -> list[dict[str, Any]]:
-    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted((out_dir / "cases").glob("*.json"))]
+    """``cases/*.json`` を読む。``key`` の無いレコード（外部ハーネス出力）はファイル名を key にする。"""
+
+    records = []
+    for path in sorted((out_dir / "cases").glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or not isinstance(record.get("candidates"), list):
+            raise SystemExit(f"候補レコードの形式が不正です（candidates 配列が必要）: {path}")
+        record.setdefault("key", path.stem)
+        records.append(record)
+    return records
 
 
 def load_previous_run_info(out_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
@@ -882,9 +956,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--case", action="append", default=[], metavar="ID[:PRESET]", help="評価ケース（繰り返し可）")
     parser.add_argument("--cases-file", type=Path, help="ケース定義 JSON（scripts/eval_cases/*.json）")
     parser.add_argument("--out", type=Path, help="出力先（既定: outputs/eval_candidates/<timestamp>）")
-    parser.add_argument("--contact-sheets", action="store_true", help="写真ごとの一覧画像を作る")
+    parser.add_argument("--contact-sheets", action="store_true",
+                        help="写真ごとの一覧画像を作る（<out>/frames/ の画像が必要。Rust ハーネスの出力には無い）")
     parser.add_argument("--force", action="store_true", help="--out に既存の cases/*.json があっても、cases/ frames/ contact_sheets/ と summary.* を消して実行する")
-    parser.add_argument("--aggregate-only", action="store_true", help="--out の cases/*.json から summary（と一覧）だけ作り直す")
+    parser.add_argument("--aggregate-only", action="store_true",
+                        help="--out の cases/*.json（Rust の Core Image 候補ハーネス出力、または旧経路の出力）から summary（と一覧）を作る。"
+                             "local_raw / rawpy は使わない")
+    parser.add_argument("--legacy-rawpy", action="store_true",
+                        help="旧 rawpy 候補生成 + 実RAW現像（アーカイブ）を実行する。local_raw/ が残る checkout と requirements-raw.txt の環境が前提")
     args = parser.parse_args(argv)
 
     if args.aggregate_only:
@@ -895,13 +974,28 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not records:
             raise SystemExit(f"cases/*.json がありません: {out_dir}")
         if args.contact_sheets:
-            for record in records:
-                build_contact_sheet(record, out_dir)
+            built = [record["key"] for record in records if build_contact_sheet(record, out_dir) is not None]
+            missing = [str(record["key"]) for record in records if record["key"] not in built]
+            if missing:
+                print(
+                    f"警告: --contact-sheets の一覧を {len(missing)}/{len(records)} 件で作れませんでした"
+                    f"（{', '.join(missing[:5])}{' ほか' if len(missing) > 5 else ''}）。一覧には "
+                    f"{out_dir / 'frames'}/<key>__jpg.jpg と <key>__<style>.jpg（と候補の raw_metrics）が必要です。"
+                    "Rust の Core Image 候補ハーネスは frames/ を書かないため、その出力では一覧は作れません"
+                    "（集計 summary はそのまま作ります）。",
+                    file=sys.stderr,
+                )
         meta, errors = load_previous_run_info(out_dir)
         meta["aggregated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _write_summary(out_dir, records, errors, meta)
         print(f"summary を更新しました: {out_dir}")
         return
+    if not args.legacy_rawpy:
+        raise SystemExit(
+            "候補の生成・現像はこのスクリプトでは行いません。Core Image 候補は Rust の候補ハーネスで cases/*.json を作り、"
+            "--aggregate-only --out <dir> で集計してください。旧 rawpy 候補生成を回すなら --legacy-rawpy: "
+            + legacy.PREREQUISITE
+        )
 
     try:
         cases: list[dict[str, str]] = [parse_case_spec(spec) for spec in args.case]
@@ -918,7 +1012,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     prepare_out_dir(out_dir, args.force)
     meta = {
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "engine_version": engine.ENGINE_VERSION,
+        "engine_version": legacy.import_module("local_raw.engine", "旧 rawpy 候補生成の評価").ENGINE_VERSION,
         "roots": {key: str(path) for key, path in sorted(roots.items()) if key in {c["root"] for c in cases}},
         "cases_file": str(args.cases_file) if args.cases_file else None,
     }
@@ -964,4 +1058,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except legacy.LegacyUnavailable as error:
+        raise SystemExit(str(error)) from None

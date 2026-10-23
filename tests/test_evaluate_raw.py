@@ -4,6 +4,8 @@
 """
 
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -161,6 +163,112 @@ class Rec709Tests(unittest.TestCase):
         expected_reference_luma = reference[:, :, 0]
         expected_mae = float(np.abs(expected_luma - expected_reference_luma).mean())
         self.assertAlmostEqual(metrics["camera_jpg_luma_mae"], expected_mae, places=6)
+
+
+
+def _write_image(path: Path, size=(24, 16), color=(120, 80, 40), exif=None) -> None:
+    from PIL import Image
+
+    image = Image.new("RGB", size, color)
+    image.save(path, **({"exif": exif} if exif is not None else {}))
+
+
+class DevelopedImagesTests(unittest.TestCase):
+    """--developed の 1 LABEL に同じ撮影 ID を重複して混ぜない（平均を黙って偏らせない）。"""
+
+    def test_distinct_captures_with_any_suffix_are_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("DSC00001_preview_lens.jpg", "DSC00002.tif", "DSC00003-final.PNG", "notes.txt", "IMG_0001.jpg"):
+                _write_image(root / name) if not name.endswith(".txt") else (root / name).write_text("x")
+            found = evaluate_raw.developed_images(root)
+            self.assertEqual([cid for cid, _ in found], ["DSC00001", "DSC00002", "DSC00003"])
+            self.assertEqual(found[0][1].name, "DSC00001_preview_lens.jpg")
+
+    def test_capture_stem_boundary_rejects_longer_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_image(root / "DSC07402.jpg")
+            _write_image(root / "DSC074020.jpg")  # 6 桁: DSC07402 の別バリアントとして数えない
+            self.assertEqual([(cid, p.name) for cid, p in evaluate_raw.developed_images(root)],
+                             [("DSC07402", "DSC07402.jpg")])
+            self.assertIsNone(evaluate_raw.DEVELOPED_NAME.match("DSC074020.jpg"))
+
+    def test_multiple_variants_of_one_capture_fail_with_guidance(self):
+        """compare_engines の coreimage/preview そのもの（同じ撮影の複数バリアント）は失敗にする。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("DSC00001_preview.jpg", "DSC00001_preview_lens.jpg", "DSC00001_preview_frozen01.jpg",
+                         "DSC00002_preview.jpg"):
+                _write_image(root / name)
+            with self.assertRaises(SystemExit) as caught:
+                evaluate_raw.developed_images(root)
+            message = str(caught.exception)
+            self.assertIn("DSC00001", message)
+            self.assertIn("DSC00001_preview_lens.jpg", message)
+            self.assertNotIn("DSC00002", message)
+            self.assertIn("1 バリアント", message)
+
+    def test_main_rejects_ambiguous_directory_without_writing_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, developed, out = root / "raw", root / "dev", root / "out"
+            source.mkdir(); developed.mkdir()
+            _write_image(source / "DSC00001.JPG")
+            _write_image(developed / "DSC00001_preview.jpg")
+            _write_image(developed / "DSC00001_preview_lens.jpg")
+            with self.assertRaises(SystemExit) as caught:
+                evaluate_raw.main(["--source-root", str(source), "--output-root", str(out), "--developed", f"ci={developed}"])
+            self.assertIn("複数", str(caught.exception))
+            self.assertEqual(list(out.rglob("evaluation.json")), [])
+
+    def test_duplicate_label_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a", Path(directory) / "b"
+            a.mkdir(); b.mkdir()
+            self.assertEqual([label for label, _ in evaluate_raw.parse_developed([f"ci_a={a}", f"ci_b={b}"])],
+                             ["ci_a", "ci_b"])
+            with self.assertRaises(SystemExit) as caught:
+                evaluate_raw.parse_developed([f"ci={a}", f"ci={b}"])
+            self.assertIn("重複", str(caught.exception))
+            self.assertIn("別の LABEL", str(caught.exception))
+
+
+class LegacyCameraReadingTests(unittest.TestCase):
+    """旧経路もカメラ JPEG を既定経路と同じく解決する（拡張子の大小を問わない・EXIF の向きを反映）。"""
+
+    def test_lowercase_extension_and_orientation_match_standalone_path(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "raw"
+            source.mkdir()
+            (source / "DSC00001.arw").write_bytes(b"raw")
+            exif = Image.Exif()
+            exif[0x0112] = 6  # 90° 回転: 24x16 のカメラ JPEG は正立で 16x24
+            rng = np.random.default_rng(7)
+            Image.fromarray(rng.integers(0, 256, size=(16, 24, 3), dtype=np.uint8)).save(source / "DSC00001.jpg", exif=exif)
+
+            def develop_raw(capture_id, preset, *, preview, force):
+                name = f"{capture_id}-{preset}.jpg"
+                _write_image(engine.PREVIEW_ROOT / name, size=(16, 24), color=(90, 100, 110))
+                return {"filename": name, "elapsed_seconds": 0.5}
+
+            config = types.SimpleNamespace(source_root=lambda: None)
+            engine = types.SimpleNamespace(develop_raw=develop_raw, OUTPUT_ROOT=None, PREVIEW_ROOT=None, ENGINE_VERSION="test")
+            modules = {"local_raw.config": config, "local_raw.engine": engine}
+            args = types.SimpleNamespace(ids=None, limit=0, presets=["std"], preview=True)
+            with mock.patch.object(evaluate_raw.legacy, "import_module", side_effect=lambda name, feature: modules[name]):
+                self.assertEqual(evaluate_raw._paired_ids(source), ["DSC00001"])
+                rows, ids, meta = evaluate_raw.run_legacy(args, source, root / "run")
+            self.assertEqual(ids, ["DSC00001"])
+            self.assertNotIn("error", rows[0])
+            output = evaluate_raw._read_rgb(Path(rows[0]["output"]))
+            expected = evaluate_raw._metrics(output, evaluate_raw._read_camera_rgb(source / "DSC00001.jpg"))
+            for key, value in expected.items():
+                self.assertAlmostEqual(rows[0][key], value, places=6, msg=key)
+            self.assertEqual(evaluate_raw._read_camera_rgb(source / "DSC00001.jpg").shape[:2], (24, 16))
 
 
 if __name__ == "__main__":
