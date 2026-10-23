@@ -29,8 +29,13 @@ public struct MergeRGBImage: Equatable {
     }
 
     fileprivate var hasValidPixels: Bool {
-        if let floatStorage { return floatStorage.count == width * height * 3 && floatStorage.allSatisfy(\.isFinite) }
-        return uint16Storage?.count == width * height * 3
+        let (pixelCount, pixelOverflow) = width.multipliedReportingOverflow(by: height)
+        let (rgbCount, rgbOverflow) = pixelCount.multipliedReportingOverflow(by: 3)
+        guard !pixelOverflow, !rgbOverflow else { return false }
+        if let floatStorage {
+            return floatStorage.count == rgbCount && floatStorage.allSatisfy { $0.isFinite && (0...1).contains($0) }
+        }
+        return uint16Storage?.count == rgbCount
     }
 }
 
@@ -58,7 +63,10 @@ public struct MergeCrop: Equatable {
 
 public struct MergeResult: Equatable {
     public let image: MergeRGBImage
+    /// Detected MTB shifts retained for diagnosis, even when alignment falls back.
     public let shiftsXY: [(Int, Int)]
+    /// Shifts actually applied while constructing the merge input.
+    public let appliedShiftsXY: [(Int, Int)]
     public let referenceIndex: Int
     public let crop: MergeCrop
     public let pyramidLevels: Int
@@ -67,6 +75,7 @@ public struct MergeResult: Equatable {
 
     public static func == (lhs: MergeResult, rhs: MergeResult) -> Bool {
         lhs.image == rhs.image && lhs.shiftsXY.elementsEqual(rhs.shiftsXY, by: ==)
+            && lhs.appliedShiftsXY.elementsEqual(rhs.appliedShiftsXY, by: ==)
             && lhs.referenceIndex == rhs.referenceIndex && lhs.crop == rhs.crop
             && lhs.pyramidLevels == rhs.pyramidLevels && lhs.aligned == rhs.aligned && lhs.reason == rhs.reason
     }
@@ -116,13 +125,22 @@ public enum MergeCore {
         }
         let shortEdge = Float(min(first.width, first.height))
         let exceeds = shifts.contains { abs(Float($0.0)) > shortEdge * maxShiftRatio || abs(Float($0.1)) > shortEdge * maxShiftRatio }
-        let fallback = alignFailed || exceeds
-        if fallback { shifts = Array(repeating: (0, 0), count: images.count) }
-        let crop = edge == "crop" && !fallback ? commonCrop(width: first.width, height: first.height, shifts: shifts) : MergeCrop(x: 0, y: 0, width: first.width, height: first.height)
-        let aligned = !fallback
+        var fallbackReason: String? = alignFailed ? "align_failed" : (exceeds ? "shift_exceeds_ratio" : nil)
+        var appliedShifts = fallbackReason == nil ? shifts : Array(repeating: (0, 0), count: images.count)
+        var crop = MergeCrop(x: 0, y: 0, width: first.width, height: first.height)
+        if edge == "crop", fallbackReason == nil {
+            let candidate = commonCrop(width: first.width, height: first.height, shifts: shifts)
+            if candidate.width <= 0 || candidate.height <= 0 {
+                fallbackReason = "empty_common_crop"
+                appliedShifts = Array(repeating: (0, 0), count: images.count)
+            } else {
+                crop = candidate
+            }
+        }
+        let aligned = fallbackReason == nil
         let levels = pyramidLevelCount(width: crop.width, height: crop.height)
-        let output = mertens(images, shifts: shifts, crop: crop, weights: weights, levels: levels)
-        return MergeResult(image: MergeRGBImage(width: crop.width, height: crop.height, pixels: output), shiftsXY: shifts, referenceIndex: pivot, crop: crop, pyramidLevels: levels, aligned: aligned, reason: fallback ? (exceeds ? "shift_exceeds_ratio" : "align_failed") : nil)
+        let output = mertens(images, shifts: appliedShifts, crop: crop, weights: weights, levels: levels)
+        return MergeResult(image: MergeRGBImage(width: crop.width, height: crop.height, pixels: output), shiftsXY: shifts, appliedShiftsXY: appliedShifts, referenceIndex: pivot, crop: crop, pyramidLevels: levels, aligned: aligned, reason: fallbackReason)
     }
 
     public enum MergeError: Error, Equatable {
@@ -256,7 +274,7 @@ public enum MergeCore {
     private static func commonCrop(width: Int, height: Int, shifts: [(Int, Int)]) -> MergeCrop {
         let x0 = max(0, shifts.map(\.0).max() ?? 0), x1 = width + min(0, shifts.map(\.0).min() ?? 0)
         let y0 = max(0, shifts.map(\.1).max() ?? 0), y1 = height + min(0, shifts.map(\.1).min() ?? 0)
-        return MergeCrop(x: x0, y: y0, width: max(1, x1 - x0), height: max(1, y1 - y0))
+        return MergeCrop(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
     }
 
     private static func shiftedCrop(_ image: MergeRGBImage, shift: (Int, Int), crop: MergeCrop) -> Plane {

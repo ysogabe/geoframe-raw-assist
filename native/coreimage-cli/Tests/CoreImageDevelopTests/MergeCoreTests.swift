@@ -62,6 +62,7 @@ final class MergeCoreTests: XCTestCase {
         XCTAssertEqual(result.shiftsXY[0].0, 1); XCTAssertEqual(result.shiftsXY[0].1, -1)
         XCTAssertEqual(result.shiftsXY[1].0, 0); XCTAssertEqual(result.shiftsXY[1].1, 0)
         XCTAssertEqual(result.shiftsXY[2].0, 1); XCTAssertEqual(result.shiftsXY[2].1, -1)
+        XCTAssertTrue(result.appliedShiftsXY.elementsEqual(result.shiftsXY, by: ==))
         XCTAssertTrue(result.aligned)
         XCTAssertEqual(result.crop, MergeCrop(x: 0, y: 0, width: 96, height: 96))
     }
@@ -71,6 +72,8 @@ final class MergeCoreTests: XCTestCase {
         let result = try MergeCore.merge([flat, flat])
         XCTAssertFalse(result.aligned)
         XCTAssertEqual(result.reason, "align_failed")
+        XCTAssertTrue(result.shiftsXY.allSatisfy { $0 == (0, 0) })
+        XCTAssertTrue(result.appliedShiftsXY.allSatisfy { $0 == (0, 0) })
         XCTAssertTrue(result.image.pixels.allSatisfy { $0.isFinite && (0...1).contains($0) })
     }
 
@@ -79,6 +82,7 @@ final class MergeCoreTests: XCTestCase {
         let shifted = translating(base, dx: 1, dy: -1)
         let result = try MergeCore.merge([base, shifted], edge: "crop")
         XCTAssertEqual(result.crop, MergeCrop(x: 1, y: 0, width: 95, height: 95))
+        XCTAssertTrue(result.appliedShiftsXY.elementsEqual(result.shiftsXY, by: ==))
         XCTAssertEqual(result.image.width, 95)
         XCTAssertEqual(result.image.height, 95)
     }
@@ -90,12 +94,22 @@ final class MergeCoreTests: XCTestCase {
         for group in 0..<3 {
             let images = try (0..<3).map { index in try readRGB(baseURL.appendingPathComponent("bracket-\(group)-\(index).png")) }
             let debugResult = try MergeCore.merge(images, edge: "keep")
+            let expectedShifts: [[(Int, Int)]] = [
+                [(-1, -1), (0, 0), (1, 1)],
+                [(1, -1), (0, 0), (1, -1)],
+                [(-1, 1), (0, 0), (-1, 1)],
+            ]
+            XCTAssertTrue(debugResult.shiftsXY.elementsEqual(expectedShifts[group], by: ==), "group \(group) MTB shifts")
             let actual = debugResult.image
             let reference = try readRGB(baseURL.appendingPathComponent("bracket-\(group)-merged.png"))
             XCTAssertEqual(actual.width, 96); XCTAssertEqual(actual.height, 96)
             let mse = zip(actual.pixels, reference.pixels).reduce(Float.zero) { $0 + ($1.0 - $1.1) * ($1.0 - $1.1) } / Float(actual.pixels.count)
             let psnr = 10 * log10(1 / Double(mse))
-            XCTAssertGreaterThanOrEqual(psnr, 45, "group \(group) PSNR \(psnr)dB; target is 50dB")
+            let absoluteErrors = zip(actual.pixels, reference.pixels).map { abs($0.0 - $0.1) }.sorted()
+            let meanAbsoluteError = absoluteErrors.reduce(Float.zero, +) / Float(absoluteErrors.count)
+            let p95AbsoluteError = absoluteErrors[Int(Float(absoluteErrors.count - 1) * 0.95)]
+            let maxAbsoluteError = absoluteErrors.last ?? 0
+            XCTAssertGreaterThanOrEqual(psnr, 50, "group \(group) PSNR \(psnr)dB; MAE \(meanAbsoluteError), p95 abs \(p95AbsoluteError), max abs \(maxAbsoluteError); target is 50dB")
         }
     }
 
@@ -110,6 +124,24 @@ final class MergeCoreTests: XCTestCase {
         XCTAssertThrowsError(try MergeCore.merge([image, MergeRGBImage(width: 5, height: 4, pixels: Array(repeating: 0.5, count: 60))]))
         var invalid = image; invalid.pixels[3] = .nan
         XCTAssertThrowsError(try MergeCore.merge([image, invalid]))
+        var negative = image; negative.pixels[3] = -0.01
+        XCTAssertThrowsError(try MergeCore.merge([image, negative]))
+        var tooLarge = image; tooLarge.pixels[3] = 1e30
+        XCTAssertThrowsError(try MergeCore.merge([image, tooLarge]))
+        let overflowing = MergeRGBImage(width: Int.max, height: 1, pixels: [])
+        XCTAssertThrowsError(try MergeCore.merge([overflowing, overflowing]))
+    }
+
+    func testEmptyCommonCropFallsBackWithoutLosingDetectedShifts() throws {
+        let base = patternedImage(width: 16, height: 16)
+        let positive = translating(base, dx: 8, dy: 0)
+        let negative = translating(base, dx: -8, dy: 0)
+        let result = try MergeCore.merge([positive, base, negative], edge: "crop", maxShiftRatio: 1)
+        XCTAssertFalse(result.aligned)
+        XCTAssertEqual(result.reason, "empty_common_crop")
+        XCTAssertEqual(result.crop, MergeCrop(x: 0, y: 0, width: 16, height: 16))
+        XCTAssertTrue(result.shiftsXY.contains { $0 != (0, 0) })
+        XCTAssertTrue(result.appliedShiftsXY.allSatisfy { $0 == (0, 0) })
     }
 
     private func assertClose(_ actual: [Float], _ expected: [Float], accuracy: Float, file: StaticString = #filePath, line: UInt = #line) {
