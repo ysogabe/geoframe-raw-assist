@@ -42,7 +42,7 @@ from evaluation import frozen, legacy  # noqa: E402
 # Old-engine modules, loaded only by load_legacy() for --legacy-generate.
 analysis = bracket = config = dc = export = build_inherited_exif = compare = evaluate = None
 
-DEFAULT_SOURCE = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
+DEFAULT_SOURCE = Path(__file__).resolve().parents[1] / 'work' / 'raw'
 FIXTURES = ROOT / 'tests/fixtures/baseline'
 WORK = ROOT / 'work/baseline'
 # EXIF values outside this camera/technical allowlist are hashed too: arbitrary

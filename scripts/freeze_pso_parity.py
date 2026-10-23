@@ -98,7 +98,7 @@ def freeze_real():
     engine = legacy.import_module('local_raw.engine', feature)
     read_capture_exif = legacy.import_module('local_raw.exif', feature).read_capture_exif
     resolve_adjustments = legacy.import_module('local_raw.presets', feature).resolve_adjustments
-    source = Path('/Users/yoshio/works/60-misc/40-raw-assistant/work/raw')
+    source = Path(__file__).resolve().parents[1] / 'work' / 'raw'
     output = ROOT / 'work/pso-parity'
     output.mkdir(parents=True, exist_ok=True)
     cases = json.loads((FIXTURES / 'candidates.json').read_text())['records']

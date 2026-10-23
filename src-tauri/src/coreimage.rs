@@ -2051,13 +2051,13 @@ pub(crate) mod tests {
         // 期待値は Python で計算: hashlib.sha1(str(Path(p).resolve()).encode()).hexdigest()[:8]
         assert_eq!(root_key_for(Path::new("/")), "42099b4a");
         assert_eq!(
-            root_key_for(Path::new("/Users/yoshio/Pictures/日本語 フォルダ")),
-            "a7451179"
+            root_key_for(Path::new("/Users/alice/Pictures/日本語 フォルダ")),
+            "a82e76e8"
         );
-        // `.` / `..` は畳まれる（/Users/yoshio/b/c）。
+        // `.` / `..` は畳まれる（/Users/alice/b/c）。
         assert_eq!(
-            root_key_for(Path::new("/Users/yoshio/a/../b/./c")),
-            "2dc61a0d"
+            root_key_for(Path::new("/Users/alice/a/../b/./c")),
+            "ff8241a7"
         );
     }
 
