@@ -257,11 +257,12 @@ public enum RequestParser {
         return (format, jpegQuality, outputColorSpace)
     }
 
-    static func parseDecoderVersion(_ dict: [String: Any]) throws -> String? {
+    static func parseDecoderVersion(_ dict: [String: Any], allowedVersions: Set<String> = allowedDecoderVersions) throws -> String? {
         var decoderVersion: String?
         if let raw = dict["decoder_version"], !(raw is NSNull) {
-            guard let string = raw as? String, allowedDecoderVersions.contains(string) else {
-                throw DevelopError(.invalidRequest, "decoder_version must be \"8\" or \"9\" (or omitted for the latest)")
+            guard let string = raw as? String, allowedVersions.contains(string) else {
+                let versions = allowedVersions.sorted().map { "\"\($0)\"" }.joined(separator: " or ")
+                throw DevelopError(.invalidRequest, "decoder_version must be \(versions) (or omitted for the latest)")
             }
             decoderVersion = string
         }

@@ -55,6 +55,10 @@ merge requestでは `settings.exposure_ev` は値が0でも、非nullで明示�
 
 今回のrelease resource smokeは、`DSC07415.ARW` のハードリンク2件、decoder 9、max_edge 2400、M3/macOS 27.0.1で実施した。単発/バッチJPEGはbyte一致し、両応答に ignored exposure / highlight_recovery が記録された。単一実行の壁時計は7.30秒、最大RSSは647,233,536 bytes。metadata 6000×4000からのpreview見積もりは2400×1600×(6×2+112) = 952,320,000 bytes（約0.89 GiB）で、実測RSSはこの予算内だった。元画像は同一露出の複製なので、これもブラケット画質評価ではない。
 
+### decoder versionの契約修正（2026-10-23）
+
+merge requestはdecoder version 9に固定した。省略時は従来どおり最新decoder（現在9）を選び、明示した `"9"` は許可し、`"8"`、数値・booleanなどの不正型、未知versionは `INVALID_REQUEST` で拒否する。共通request parserの8/9対応は保ち、mergeだけ許可値を9に絞る。mergeの単発と `--batch` はどちらも `RequestParser.parseMerge` を通ることをコードで確認し、parser境界とbatch応答の回帰テストを追加した。`swift test --filter 'CoreImageDevelopTests\.(MergeRequestTests|BatchTests|RequestParserTests)'` は30件成功、実RAW依存2件skip、失敗0件。非mergeのdecoder 8受理テストも成功した。`git diff --check` 成功。
+
 ## 親側の最終再検証
 
 2026-10-23、修正後に親側でSwift全144件（9件skip、失敗0件）を確認した。release同梱用CLI 0.8.0のビルドとgit diff --checkも成功。手動境界レビューでは信頼度7以上の新規リスクは0件だった。

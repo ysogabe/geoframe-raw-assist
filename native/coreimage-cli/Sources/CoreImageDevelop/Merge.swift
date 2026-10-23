@@ -90,7 +90,8 @@ extension RequestParser {
             guard let q = number(raw), (0...1).contains(q) else { throw DevelopError(.invalidRequest, "jpeg_quality must be a number in 0...1") }
             quality = q
         }
-        let decoder = try parseDecoderVersion(dict)
+        // Merge's contract is pinned to decoder 9; the shared request parser still supports 8 and 9.
+        let decoder = try parseDecoderVersion(dict, allowedVersions: ["9"]) ?? "9"
         let settings = try parseSettings(dict["settings"])
         if settings.exposureEV != 0 { throw DevelopError(.invalidRequest, "merge requires settings.exposure_ev to be 0") }
         let adjustments = try parseAdjustments(dict["adjustments"]) ?? { throw DevelopError(.invalidRequest, "merge requires all 9 adjustment keys") }()
