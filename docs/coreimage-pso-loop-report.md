@@ -141,6 +141,21 @@ cargo test --release --manifest-path src-tauri/Cargo.toml candidate_threshold_su
 先行測定は `measurements-initial.json` に保存。これらは gitignore 対象。
 結果は候補調整値・指標・時間・許可した撮影技術項目のみで、画像や位置情報は保存しない。
 
+## scratch 出力境界の追補
+
+候補生成のアプリ経路は、Tauri の app data ルートを canonical 化した後、
+`coreimage` と `coreimage/candidates` を1段ずつ検査する。両方とも symlink と通常ファイルを拒否し、
+canonical な親子関係が app data 配下に一致することを確認してから Renderer に渡す。
+任意パスを受ける Renderer API は手動テスト・計測向けに分け、アプリ経路は検証済み
+`ScratchParent` を使う。実行ごとのディレクトリは新規作成し、Unix では作成時から mode 0700。
+
+この検査はパス検査とファイル作成の間に同じローカル app data を変更できるプロセスがいる場合の
+TOCTOU を完全には防がない。openat 等の fd 相対操作は実装していない。合成ディレクトリで
+`coreimage` / `candidates` の symlink、通常ファイル、正規ディレクトリを検証し、通常 Renderer
+テストで scratch の mode と成功・失敗時の後片付けを確認した。
+追補時の検証: `cargo test --manifest-path src-tauri/Cargo.toml` は 139 passed / 7 ignored。
+`cargo build --manifest-path src-tauri/Cargo.toml` は警告0、`git diff --check` は成功。
+
 ## 検証
 
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **137 passed / 7 ignored**。手動テストは上記で別途実行。

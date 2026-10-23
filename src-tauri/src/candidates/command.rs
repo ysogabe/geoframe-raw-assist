@@ -1,7 +1,7 @@
 use super::{
     image_ops::{gaussian, std},
     pso,
-    renderer::{error, Evaluator, Renderer, MAX_EDGE},
+    renderer::{error, Evaluator, Renderer, ScratchParent, MAX_EDGE},
     selection::{guard_failure, reasons, score},
     stars::{detect_star_scene, ExifHints},
     RgbImage,
@@ -131,7 +131,7 @@ fn exif_hints(root: &Path, capture: &str) -> ExifHints {
 pub(super) fn generate(
     root: &Path,
     sidecar: &Path,
-    scratch: &Path,
+    scratch: ScratchParent,
     capture: &str,
     preset: &str,
     seed: Option<u32>,
@@ -143,7 +143,7 @@ pub(super) fn generate(
     let input = coreimage::resolve_arw(root, capture)?;
     let exif = exif_hints(root, capture);
     progress("decode", 0, 1);
-    let renderer = Renderer::new(sidecar, &input, scratch)?;
+    let renderer = Renderer::new_with_scratch_parent(sidecar, &input, scratch)?;
     let mut evaluator = Evaluator::new(renderer, &base, exif)?;
     let star = detect_star_scene(&evaluator.image, &exif);
     evaluator.enable_stars(&base, star.is_star_scene)?;
@@ -236,7 +236,8 @@ pub async fn generate_development_candidates(
         // プレビュー・原寸現像と同じ実行枠を取り、CLI は1本だけ起動する。
         let _slot=coreimage::DEVELOP_SLOT.acquire()?;
         let root=coreimage::read_source_root(&data)?;
-        generate(&root,&sidecar,&data.join("coreimage/candidates"),&capture_id,&preset,seed,budget,|stage,completed,total| {
+        let scratch = ScratchParent::for_app_data(&data)?;
+        generate(&root,&sidecar,scratch,&capture_id,&preset,seed,budget,|stage,completed,total| {
             let _=app.emit("development-candidates-progress",json!({"capture_id":capture_id,"preset":preset,"stage":stage,"completed":completed,"total":total}));
         })
     }).await.map_err(|e|error(format!("候補生成スレッドが異常終了しました: {e}")))?

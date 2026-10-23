@@ -1513,6 +1513,47 @@ fn prepare_output_dirs(
     Ok((coreimage_dir, mode_dir))
 }
 
+/// 候補代理画像の scratch 親を、アプリデータ配下の実ディレクトリとして準備する。
+/// アプリデータの場所は Tauri から受け取り、そのルートを canonical 化してから
+/// `coreimage/candidates` を1段ずつ検査する。
+pub(crate) fn prepare_candidate_scratch_dir(
+    app_data_dir: &Path,
+) -> Result<PathBuf, CoreImageError> {
+    fs::create_dir_all(app_data_dir).map_err(|error| {
+        output_dir_error(format!(
+            "アプリのデータフォルダを作れません: {}: {error}",
+            app_data_dir.display()
+        ))
+    })?;
+    let app_data_dir = app_data_dir.canonicalize().map_err(|error| {
+        output_dir_error(format!("アプリのデータフォルダを解決できません: {error}"))
+    })?;
+    if !fs::symlink_metadata(&app_data_dir).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return Err(output_dir_error(
+            "アプリのデータフォルダが実ディレクトリではありません",
+        ));
+    }
+    let coreimage_dir = app_data_dir.join(OUTPUT_DIR_NAME);
+    let candidates_dir = coreimage_dir.join("candidates");
+    ensure_real_dir(&coreimage_dir)?;
+    ensure_real_dir(&candidates_dir)?;
+    let canonical_coreimage = coreimage_dir
+        .canonicalize()
+        .map_err(|error| output_dir_error(format!("候補出力先を解決できません: {error}")))?;
+    let canonical_candidates = candidates_dir
+        .canonicalize()
+        .map_err(|error| output_dir_error(format!("候補出力先を解決できません: {error}")))?;
+    if canonical_coreimage.parent() != Some(app_data_dir.as_path())
+        || canonical_candidates.parent() != Some(canonical_coreimage.as_path())
+    {
+        return Err(output_dir_error(format!(
+            "候補出力先がアプリのデータフォルダの外を指しています: {}",
+            candidates_dir.display()
+        )));
+    }
+    Ok(canonical_candidates)
+}
+
 /// 画像と来歴の両方が通常ファイルで、来歴から結果を組み立てられればキャッシュヒット。
 /// 画像だけなら来歴の書き込みが途中で落ちたとみなして現像し直す。
 fn load_cached(context: &ResultContext<'_>) -> Option<CoreImagePreviewResult> {

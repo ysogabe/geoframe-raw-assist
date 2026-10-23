@@ -23,18 +23,44 @@ pub fn error(message: impl Into<String>) -> CoreImageError {
     CoreImageError::new("CANDIDATES_FAILED", message)
 }
 
+/// Canonical scratch parent. Application calls obtain this only through the app-data validator;
+/// standalone renderer tests and benchmarks may explicitly construct a regular directory.
+pub(super) struct ScratchParent(PathBuf);
+impl ScratchParent {
+    pub(super) fn for_app_data(app_data_dir: &Path) -> Result<Self, CoreImageError> {
+        Ok(Self(crate::coreimage::prepare_candidate_scratch_dir(
+            app_data_dir,
+        )?))
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_directory(path: &Path) -> Result<Self, CoreImageError> {
+        fs::create_dir_all(path).map_err(|e| error(e.to_string()))?;
+        let metadata = fs::symlink_metadata(path).map_err(|e| error(e.to_string()))?;
+        if !metadata.file_type().is_dir() {
+            return Err(error("scratch 親が実ディレクトリではありません"));
+        }
+        Ok(Self(path.canonicalize().map_err(|e| error(e.to_string()))?))
+    }
+}
+
 /// この実行が新規作成した一時ディレクトリだけを回収する（成功・エラー・panic 共通）。
 struct Scratch(PathBuf);
 impl Scratch {
-    fn new(parent: &Path) -> Result<Self, CoreImageError> {
-        fs::create_dir_all(parent).map_err(|e| error(e.to_string()))?;
+    fn new(parent: &ScratchParent) -> Result<Self, CoreImageError> {
         loop {
-            let path = parent.join(format!(
+            let path = parent.0.join(format!(
                 "pso-{}-{}",
                 std::process::id(),
                 NEXT_RUN.fetch_add(1, Ordering::Relaxed)
             ));
-            match fs::create_dir(&path) {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(error(e.to_string())),
@@ -59,10 +85,20 @@ pub struct Renderer {
     pub render_ms: f64,
 }
 impl Renderer {
+    #[cfg(test)]
     pub fn new(sidecar: &Path, input: &Path, scratch: &Path) -> Result<Self, CoreImageError> {
+        let parent = ScratchParent::for_directory(scratch)?;
+        Self::new_with_scratch_parent(sidecar, input, parent)
+    }
+
+    pub(super) fn new_with_scratch_parent(
+        sidecar: &Path,
+        input: &Path,
+        scratch: ScratchParent,
+    ) -> Result<Self, CoreImageError> {
         Ok(Self {
             session: BatchSession::start(sidecar, Duration::from_secs(60))?,
-            scratch: Scratch::new(scratch)?,
+            scratch: Scratch::new(&scratch)?,
             input: input.to_path_buf(),
             handles: HashMap::new(),
             decodes: 0,

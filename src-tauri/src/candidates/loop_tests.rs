@@ -2,6 +2,63 @@ use super::*;
 use crate::candidates::{metrics::Metrics, pso};
 use std::fs;
 
+fn scratch_test_root(name: &str) -> std::path::PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("geoframe-candidate-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn app_scratch_parent_rejects_symlinked_components_and_files() {
+    let root = scratch_test_root("path-guard");
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+
+    let app_data = root.join("linked-candidates");
+    fs::create_dir(&app_data).unwrap();
+    fs::create_dir(app_data.join("coreimage")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, app_data.join("coreimage/candidates")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, app_data.join("coreimage/candidates")).unwrap();
+    assert!(crate::coreimage::prepare_candidate_scratch_dir(&app_data).is_err());
+    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+    let app_data = root.join("linked-coreimage");
+    fs::create_dir(&app_data).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, app_data.join("coreimage")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, app_data.join("coreimage")).unwrap();
+    assert!(crate::coreimage::prepare_candidate_scratch_dir(&app_data).is_err());
+    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+    let app_data = root.join("file-component");
+    fs::create_dir(&app_data).unwrap();
+    fs::write(app_data.join("coreimage"), "file").unwrap();
+    assert!(crate::coreimage::prepare_candidate_scratch_dir(&app_data).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn app_scratch_parent_accepts_real_directories() {
+    let root = scratch_test_root("path-valid");
+    let app_data = root.join("app-data");
+    fs::create_dir(&app_data).unwrap();
+    let scratch = crate::coreimage::prepare_candidate_scratch_dir(&app_data).unwrap();
+    assert_eq!(
+        scratch,
+        app_data
+            .canonicalize()
+            .unwrap()
+            .join("coreimage/candidates")
+    );
+    assert!(fs::symlink_metadata(&scratch).unwrap().file_type().is_dir());
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn request_validation_and_seed_contract() {
     assert_eq!(
@@ -173,7 +230,7 @@ fn candidates_release_benchmark() {
         let result = generate(
             &root,
             &sidecar,
-            &work,
+            ScratchParent::for_directory(&work).unwrap(),
             capture,
             preset,
             None,
@@ -247,6 +304,16 @@ done
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let scratch = dir.join("scratch");
     let mut renderer = Renderer::new(&program, &dir.join("input.ARW"), &scratch).unwrap();
+    let run_dir = fs::read_dir(&scratch)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     let base = resolve_adjustments("nightscape", None).unwrap();
     renderer.render(&base).unwrap();
     assert_eq!(renderer.decodes, 2); // 最初のハンドルが失われても1回だけ再decode。
