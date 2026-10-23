@@ -586,7 +586,7 @@ $APPDATA/
 
 ## 8. テスト運用
 
-検証コマンドと画面の確認観点はリポジトリ直下の `CLAUDE.md`「ビルド / 検証コマンド」「画面の確認観点」に置く
+検証コマンドと画面の確認観点は [USAGE.md](USAGE.md) §7.1「テストと検証」・§7.5「画面の手動確認の観点」に置く
 （`docs/design/single-app-implementation-plan.md` §6 の内容）。契約に関わる自動テスト:
 
 - `cargo test --manifest-path src-tauri/Cargo.toml`（事前に `npm run build:coreimage`）… 入力検証・キャッシュキー・出力先分離・
