@@ -20,6 +20,8 @@ import type {
   Analysis,
   CaptureId,
   DevelopedResult,
+  DevelopmentCandidate,
+  DevelopmentCandidatesResponse,
   GroupInfo,
   PhotoInfo,
   PresetInfo,
@@ -53,6 +55,11 @@ type OperationPanelProps = {
   isPhotoAccepted: (captureId: CaptureId) => boolean;
   /** 写真の採用トグル。**引数の撮影ID**が宛先（表示カーソルではない）。 */
   onAcceptPhoto: (captureId: CaptureId) => void;
+  candidatesResponse: DevelopmentCandidatesResponse | null;
+  candidatesBusy: boolean;
+  candidatesError: string;
+  onGenerateCandidates: () => void;
+  onApplyCandidate: (candidate: DevelopmentCandidate) => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
   elapsedLabel: string;
@@ -99,6 +106,11 @@ export function OperationPanel({
   onResetAdjustments,
   isPhotoAccepted,
   onAcceptPhoto,
+  candidatesResponse,
+  candidatesBusy,
+  candidatesError,
+  onGenerateCandidates,
+  onApplyCandidate,
   onDevelop,
   developMode,
   elapsedLabel,
@@ -298,6 +310,11 @@ export function OperationPanel({
             onResetAdjustments={onResetAdjustments}
             photoAccepted={isPhotoAccepted(captureId)}
             onAcceptPhoto={() => onAcceptPhoto(captureId)}
+            candidatesResponse={candidatesResponse}
+            candidatesBusy={candidatesBusy}
+            candidatesError={candidatesError}
+            onGenerateCandidates={onGenerateCandidates}
+            onApplyCandidate={onApplyCandidate}
             onDevelop={onDevelop}
             developMode={developMode}
             elapsedLabel={elapsedLabel}

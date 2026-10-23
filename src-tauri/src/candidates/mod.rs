@@ -1,5 +1,8 @@
-//! PSO の純関数。探索ループと Tauri コマンドは #87 で接続する。
-#![allow(dead_code)] // #87 で使うため、接続前の純関数を保持する。
+//! Core Image 代理画像による多目的 PSO と現像候補コマンド。
+
+pub(crate) mod command;
+mod pso;
+mod renderer;
 
 mod image_ops;
 pub mod metrics;

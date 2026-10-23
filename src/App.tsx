@@ -4,6 +4,7 @@ import {
   acceptedSummaryOf,
   activePreset,
   changedAdjustmentKeys,
+  currentDevelopmentCandidatesResponse,
   developedGroupIds,
   effectiveAdjustments,
   heroCaptureOf,
@@ -34,7 +35,8 @@ import {
 import { SOURCE_FOLDER_NO_PAIRS, sourceFolderErrorMessage } from "./lib/format";
 import { adjacentGroupId, isEditableTarget } from "./lib/group-nav";
 import { confirmDiscard } from "./lib/confirm";
-import type { Adjustments, ExportItem } from "./lib/types";
+import { invoke } from "@tauri-apps/api/core";
+import type { Adjustments, DevelopmentCandidatesResponse, ExportItem } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
@@ -413,7 +415,7 @@ export default function Home() {
   }
 
   async function runDevelop(mode: DevelopMode) {
-    if (!group || !captureId) return;
+    if (!group || !captureId || state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
     if (state.engineStatus !== "ready") {
       dispatch({ type: "notice/set", message: ENGINE_STOPPED_MESSAGE, tone: "error" });
       return;
@@ -445,9 +447,28 @@ export default function Home() {
     }
   }
 
-  // 現像候補（generateDevelopmentCandidates）とブラケット合成（mergeBracket）の実行ハンドラは
-  // 隠している間は持たない。M3 / M2 で Tauri コマンドの invoke として戻す（reducer の
-  // candidates/* ・ merge/* アクションと state は残してある）。
+  async function runDevelopmentCandidates() {
+    if (!group || !captureId || state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
+    if (state.engineStatus !== "ready") {
+      dispatch({ type: "notice/set", message: ENGINE_STOPPED_MESSAGE, tone: "error" });
+      return;
+    }
+    const preset = activePreset(state);
+    if (!preset) return;
+    const generation = state.sourceFolderGeneration;
+    dispatch({ type: "candidates/start", captureId, generation });
+    try {
+      const response = await invoke<DevelopmentCandidatesResponse>("generate_development_candidates", {
+        captureId, preset: preset.name,
+      });
+      dispatch({ type: "candidates/ok", captureId, response, generation });
+    } catch (error) {
+      dispatch({ type: "candidates/fail", captureId, generation,
+        message: messageOf(error, "現像候補の生成に失敗しました。") });
+    }
+  }
+
+  // ブラケット合成は M2 で戻す。
 
   async function runExport() {
     if (!isValidBatchName(state.batchName) || exportRows.length === 0) return;
@@ -615,6 +636,11 @@ export default function Home() {
                   variant: state.fullResults[id] ? "developed" : "camera_jpg",
                 })
               }
+              candidatesResponse={currentDevelopmentCandidatesResponse(state, captureId)}
+              candidatesBusy={state.developmentCandidatesBusy}
+              candidatesError={state.developmentCandidatesError}
+              onGenerateCandidates={() => void runDevelopmentCandidates()}
+              onApplyCandidate={(candidate) => dispatch({ type: "candidates/apply", candidate, captureId })}
               onDevelop={(mode) => void runDevelop(mode)}
               developMode={developMode}
               elapsedLabel={elapsedLabel}
