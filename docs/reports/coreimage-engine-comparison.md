@@ -1,11 +1,11 @@
 # Core Image と rawpy のエンジン比較（Issue #65 PR3）
 
 現行エンジン（rawpy/LibRaw, `local_raw/engine.py`）と Core Image CLI（`geoframe-ci-develop`,
-[`native/coreimage-cli/README.md`](../native/coreimage-cli/README.md)）を、同じ α6400 ARW 21 カットで
+[`native/coreimage-cli/README.md`](../../native/coreimage-cli/README.md)）を、同じ α6400 ARW 21 カットで
 比較した記録（§9 は解像感＝ピント甘さに絞った追加評価、29 カット。§10〜§15 は ADR 0002 の移行条件の確認＝夜景・星空・長秒 #70、ブラケットの前提、白点 #77、ハイライト #71 の道具）。**採否の判断は ADR 0002 で行う**。この文書は事実・所見・判断材料（論点）までに留める。
 
-関連: [ADR 0001](adr/0001-coreimage-raw-poc.md)（CLI の設計判断）、
-[パラメータ対応表](coreimage-parameter-mapping.md)。
+関連: [ADR 0001](../adr/0001-coreimage-raw-poc.md)（CLI の設計判断）、
+[パラメータ対応表](../development/coreimage-parameter-mapping.md)。
 
 ## 1. 環境
 
@@ -515,7 +515,7 @@ ADR 0002「置き換えに進む条件」のうち最重要とされた「夜景
 
 ```sh
 npm run build:coreimage            # CLI 0.2.0（#79 の output_color_space / settings 上書き入り）
-RAW=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw   # 星空 11 組（ARW は小文字 .arw、JPG は .JPG）
+RAW=<repo>/work/raw   # 星空 11 組（ARW は小文字 .arw、JPG は .JPG）
 .venv/bin/python scripts/compare_engines.py --source-root $RAW \
   --captures DSC07402 DSC07404 DSC07405 DSC07407 DSC07408 DSC07412 DSC07415 DSC07416 DSC07419 DSC07422 DSC07423 \
   --night --full --full-ids DSC07415 DSC07407 DSC07402 --night-scales DSC07415 DSC07407 \

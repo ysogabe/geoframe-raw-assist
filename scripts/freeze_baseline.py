@@ -13,7 +13,7 @@ Retained after the Python app removal (#90 / #117), with no local_raw / rawpy / 
 
 Regeneration (full run or ``--sections``) re-runs the old Python engine and is an
 explicit archival opt-in: ``--legacy-generate`` on a checkout that still has
-``local_raw/`` and the requirements-raw.txt environment (docs/evaluation-paths.md).
+``local_raw/`` and the requirements-raw.txt environment (docs/development/evaluation-paths.md).
 """
 from __future__ import annotations
 

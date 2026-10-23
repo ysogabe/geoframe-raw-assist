@@ -26,6 +26,6 @@
 ## 作業状態
 
 - branch: `codex/84-merge-ui`
-- worktree: `/Users/yoshio/.t3/worktrees/40-raw-assistant/t3-9130b8a6`
+- worktree: `<repo>`
 - 変更は未stage・未commitです。
 - 親担当のbranch管理、stage、commit、push、PR作成は行っていません。

@@ -17,7 +17,7 @@
   カメラ JPEG と比べる。ラベルは ``frozen:<mode>``。
 
 旧経路（アーカイブ）: ``--legacy-rawpy`` で旧 rawpy エンジンを各プリセットで現像して評価する
-（``local_raw/`` が残る checkout と requirements-raw.txt の環境が前提。docs/evaluation-paths.md）。
+（``local_raw/`` が残る checkout と requirements-raw.txt の環境が前提。docs/development/evaluation-paths.md）。
 
 例:
     # 1 バリアント（例: レンズ補正ありのプレビュー）だけを別フォルダへ集めてから評価する

@@ -35,8 +35,8 @@ Pillow のある開発用 Python と外部 JPEG が必要なため `#[ignore]` �
 
 ```sh
 npm ci && npm run build:coreimage
-GEOFRAME_ANALYSIS_DIR=/Users/yoshio/works/60-misc/40-raw-assistant/work/raw \
-GEOFRAME_ANALYSIS_PYTHON=/Users/yoshio/works/60-misc/wt-107-baseline/.venv/bin/python \
+GEOFRAME_ANALYSIS_DIR=<repo>/work/raw \
+GEOFRAME_ANALYSIS_PYTHON=<baseline-checkout>/.venv/bin/python \
 cargo test --manifest-path src-tauri/Cargo.toml analysis::tests::compare_scoring_baseline -- --ignored --nocapture
 ```
 

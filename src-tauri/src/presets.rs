@@ -25,7 +25,7 @@
 //! （設計書 §2・§3）。非救済の 8 プリセットは hr 0（= CI 既定 + 後段の個性）、hr > 0 は
 //! `highlight_rescue` / `backlit_rescue` / `sunset_glow` だけ（案 B、オーナー判断 2026-10-22）。
 //! 値は設計書 §7.2 の初期案で、ハーネスの計測（§7.3〜7.5）は未実施（サンプルのボリューム未マウント、
-//! `docs/coreimage-preset-retune-report.md`）。
+//! `docs/reports/coreimage-preset-retune-report.md`）。
 
 use serde::Serialize;
 use serde_json::{Map, Value};

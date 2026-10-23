@@ -44,8 +44,8 @@
 
 ```sh
 CARGO_TARGET_DIR="/private/tmp/codex-merge-smoke-target-84" \
-GEOFRAME_MERGE_SMOKE_CLI="/Users/yoshio/.t3/worktrees/40-raw-assistant/t3-11fe9636/src-tauri/binaries/geoframe-ci-develop-aarch64-apple-darwin" \
-GEOFRAME_MERGE_SMOKE_ARW="/Users/yoshio/works/60-misc/40-raw-assistant/work/raw/DSC07415.arw" \
+GEOFRAME_MERGE_SMOKE_CLI="<repo>/src-tauri/binaries/geoframe-ci-develop-aarch64-apple-darwin" \
+GEOFRAME_MERGE_SMOKE_ARW="<repo>/work/raw/DSC07415.arw" \
 cargo test --manifest-path src-tauri/Cargo.toml real_cli_merge_export_smoke -- --ignored --nocapture
 ```
 

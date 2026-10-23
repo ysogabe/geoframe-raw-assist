@@ -140,7 +140,7 @@ CLI 0.8.0 / macOS 27.0.1、budget 48、写真ごとの既定seed。11ケース�
 ケース・描画・指標・セッション終了のエラーは0。640px再現像と生成時指標の最大差は **0**。
 実行は675.17秒だが、他のCLI検証の並行実行を含むため性能比較には使わない。
 
-数値の保存先は [proxy-full-2026-10-23](coreimage-baseline/proxy-full-2026-10-23/)。
+数値の保存先は [proxy-full-2026-10-23](../coreimage-baseline/proxy-full-2026-10-23/)。
 `proxy_full_summary.json`、`provenance.json`、`cases/*.json`を保存し、全生測定は
 `measurements.json.gz` に圧縮した（標準ライブラリの `gzip.open` と `json.load` で読める）。
 実写画像は含めない。適用値のUSM ISOは技術情報として残るが、GPSは保存していない。

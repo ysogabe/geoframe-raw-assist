@@ -1,5 +1,5 @@
 {
-  "description": "Core Image ベースライン（apple_default・decoder 9・lens ON、mode=preview）の実効パラメータ。OS 更新時の回帰確認で差分を取る（docs/coreimage-regression-check.md）",
+  "description": "Core Image ベースライン（apple_default・decoder 9・lens ON、mode=preview）の実効パラメータ。OS 更新時の回帰確認で差分を取る（docs/development/coreimage-regression-check.md）",
   "macos_version": "27.0.1",
   "cli_version": "0.1.0",
   "request": {

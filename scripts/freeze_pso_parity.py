@@ -10,7 +10,7 @@
   python scripts/freeze_pso_parity.py --real-images
 旧 Python の half デコードで既定の読み取り専用入力から work/pso-parity/ にメタデータなしの
 float32 RGB と EXIF の露光・F値・ISO だけを保存する。GPS は取得・保存しない。
-local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/evaluation-paths.md）。
+local_raw/ が残る checkout と requirements-raw.txt の環境が前提（docs/development/evaluation-paths.md）。
 """
 import argparse
 import json
