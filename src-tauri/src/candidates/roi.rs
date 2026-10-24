@@ -32,6 +32,7 @@ pub(super) fn crop_u8(src: &image::RgbImage, frac: [f64; 4]) -> Result<RgbImage,
     }
     RgbImage::new(w, h, pixels)
 }
+#[cfg(test)]
 pub(super) fn crop(img: &RgbImage, frac: [f64; 4]) -> Result<RgbImage, String> {
     let (x, y, w, h) = rect(frac, img.width, img.height);
     let mut pixels = Vec::with_capacity(w * h);
