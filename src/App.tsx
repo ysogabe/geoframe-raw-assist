@@ -4,6 +4,7 @@ import {
   acceptedMergeOf,
   acceptedSummaryOf,
   activePreset,
+  adjustmentsLostOnLeave,
   changedAdjustmentKeys,
   currentDevelopmentCandidatesResponse,
   developedGroupIds,
@@ -318,7 +319,7 @@ export default function Home() {
   async function moveToGroup(groupId: number, scroll: "top" | "media") {
     if (!group || groupId === group.id) return;
     if (confirmingRef.current) return;
-    if (changedKeys.length > 0) {
+    if (adjustmentsLostOnLeave(state, group)) {
       const fromGroupId = group.id;
       confirmingRef.current = true;
       let ok: boolean;
