@@ -287,6 +287,33 @@ describe("zoom / pan の既存挙動", () => {
     expect(refit.view).toEqual(centeredView(0.25, BASE, { width: 1500, height: 1000 }));
   });
 
+  it("全体表示のままステージが縮んだら、新しい fit へ追従する（旧倍率で保持しない）", () => {
+    const atFit = readyAfter(); // scale === fit === 0.2
+    const small = { width: 900, height: 600 }; // 新 fit 0.15
+    const shrunk = viewerReducer(atFit, { type: "stage/fit", stage: small, initial: false });
+    expect(shrunk.fit).toBeCloseTo(0.15);
+    expect(shrunk.view).toEqual(centeredView(shrunk.fit, BASE, small));
+  });
+
+  it("全体表示のままステージが広がったときも新しい fit へ追従する", () => {
+    const wide = { width: 1500, height: 1000 };
+    const grown = viewerReducer(readyAfter(), { type: "stage/fit", stage: wide, initial: false });
+    expect(grown.view).toEqual(centeredView(0.25, BASE, wide));
+  });
+
+  it("全体表示とみなす判定は浮動小数の誤差を吸収し、実際に拡大した倍率は拡大中として保持する", () => {
+    const atFit = readyAfter();
+    const noisy = { ...atFit, view: { ...atFit.view, scale: atFit.fit * (1 + 1e-9) } };
+    const small = { width: 900, height: 600 };
+    const followed = viewerReducer(noisy, { type: "stage/fit", stage: small, initial: false });
+    expect(followed.view).toEqual(centeredView(followed.fit, BASE, small));
+    // 0.1% でも拡大していれば、ユーザー操作の結果として保持する。
+    const zoomedSlightly = { ...atFit, view: { ...atFit.view, scale: atFit.fit * 1.001 } };
+    expect(viewerReducer(zoomedSlightly, { type: "stage/fit", stage: small, initial: false }).view).toBe(
+      zoomedSlightly.view,
+    );
+  });
+
   it("全体 / 原寸ボタン相当", () => {
     const zoomed = run(readyAfter(), { type: "zoom/to", point: { x: 600, y: 400 }, target: 1 });
     expect(zoomed.view.scale).toBe(1);
