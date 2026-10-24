@@ -199,7 +199,7 @@ localStorage.removeItem("geoframe.previewTiming");      // OFF（既定）
 5. SMB とローカルの差（`STORAGE_LABEL` 違いの 2 実行）。
 
 各方式のp50/p95、RGB差、資源値は[結果と数値アーカイブ](coreimage-preview-transport-results-2026-10-24.md)を参照。
-Stage1のボタン→rAFは実アプリ起動の承認待ちで未測定。FFIは現時点で保留。
+Stage1は専用QAアプリの実WKWebViewで8行（ok5/欠測3）を確認した。debug・少数例として[結果報告](coreimage-preview-transport-results-2026-10-24.md)へ分離し、releaseの方式比較や一般的p95には使わない。FFIは現時点で保留。
 
 
 ## 10. 可逆（TIFF16）対照：JPEG の差の由来を切り分ける
@@ -251,9 +251,9 @@ fake CLI の契約テスト（実 CLI 不要）: `cargo test --manifest-path src
 
 | 項目 | 結果 |
 |---|---|
-| `single_repeat` の差（決定性） | 未測定 |
-| `batch_stateless` の差 | 未測定 |
-| `batch_decode_render` の 16bit 差（max/mean/ヒストグラム） | 未測定 |
-| JPEG 差との関係（半精度由来か増幅か） | 未判断 |
+| `single_repeat` の差（決定性） | 今回の条件で完全一致 |
+| `batch_stateless` の差 | 今回の条件で完全一致 |
+| `batch_decode_render` の 16bit 差（max/mean/ヒストグラム） | 最大96/65535、詳細は結果/数値アーカイブ |
+| JPEG 差との関係（半精度由来か増幅か） | 小さいTIFF16差とJPEGの最大11/255を併記。増幅量や画質合否を断定しない |
 
 UIの欠測には、比較が合成面のまま・別の結果へ差し替わった場合も含まれる。実測時はstatus別件数を併記する。
