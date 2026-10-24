@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 import {
+  type AcceptedMergeView,
   MERGE_MAX_FRAMES,
   MERGE_MIN_FRAMES,
   defaultMergeFrames,
@@ -35,6 +36,9 @@ type BracketMergeProps = {
    */
   accepted: boolean;
   onAcceptMerged: () => void;
+  /** 採用済みだが今の合成設定に合わない合成。無ければ null。✓ は今の合成には移さず別行で出す。 */
+  previousAccepted: AcceptedMergeView | null;
+  onRemovePreviousAccepted: () => void;
   panelRef: RefObject<HTMLElement | null>;
 };
 
@@ -55,6 +59,8 @@ export function BracketMerge({
   hasFull,
   accepted,
   onAcceptMerged,
+  previousAccepted,
+  onRemovePreviousAccepted,
   panelRef,
 }: BracketMergeProps) {
   const selected = new Set(frames);
@@ -136,13 +142,13 @@ export function BracketMerge({
         </button>
       </div>
 
-      {/* 採用は本合成の結果があるときだけ。プレビューは書き出しに使えない。 */}
+      {/* 新規採用は今の設定に合う本合成があるときだけ。プレビューや古い本合成は採用できない。 */}
       <div className="bracket-accept">
         <button
           type="button"
           className={`accept-toggle${accepted ? " on" : ""}`}
           aria-pressed={accepted}
-          disabled={!hasFull && !accepted}
+          disabled={!hasFull}
           onClick={onAcceptMerged}
         >
           {accepted ? "採用を外す" : "合成した1枚を採用する"}
@@ -153,6 +159,17 @@ export function BracketMerge({
             : "本合成すると採用できます。"}
         </small>
       </div>
+
+      {previousAccepted && (
+        <div className="bracket-accept bracket-accept-previous">
+          <button type="button" className="accept-toggle on" aria-pressed="true" onClick={onRemovePreviousAccepted}>
+            以前の設定の採用を外す
+          </button>
+          <small>
+            採用済み（以前の設定{previousAccepted.result ? `、${previousAccepted.result.frames}枚` : "、成果物なし"}）
+          </small>
+        </div>
+      )}
 
       {blockReason ? (
         <p className="bracket-block" role="status">{blockReason}</p>
