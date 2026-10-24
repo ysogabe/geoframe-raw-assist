@@ -80,8 +80,14 @@ Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurem
 `single_cli` の出力 JPEG をデコードした RGB を基準に、他方式の最終反復の出力をステップごとに比較し、
 `rawpixels_identical` / `bytes_identical` / `max_abs_diff` / `mean_abs_diff` / `differing_pixels` を記録する。**合否にしない**（画質閾値未決）。
 
-期待: `rust_develop_*` と `batch_stateless` は同じ CLI 経路なので画素一致の見込み。`batch_decode_render` は保持画素が half float のため、
-README に記載のとおり 8bit JPEG で 1 段以内の差が出うる（`DecodeCacheTests`）。差があっても失敗扱いにせず、そのまま記録する。
+期待: `rust_develop_*` と `batch_stateless` は同じ CLI 経路なので画素一致の見込み。`batch_decode_render` は保持画素が half float のため
+`single_cli` と一致しないことがある。**差の大きさを事前に決めず、品質の合否にもしない**（閾値は未定義）。
+
+**訂正（初回報告）**: 初回の報告に「decode は半精度のため JPEG で 1 階調以内」と書いたが、これは断定できない。README の既知の差は
+**640px TIFF16 sRGB の最大 34〜81/65535**（8bit の 0.1〜0.3 段）で、JPEG の差とは**単位が違う**（JPEG は 8bit 化・DCT 量子化・色変換を挟む）。
+親のローカル実測（2 撮影 ID × 2 系列、warm 3）では、`batch_decode_render` の JPEG が single に対して非一致（max 8〜10/255、mean 約 0.29）、
+`batch_stateless` はバイト一致だった。この JPEG の差が既知の半精度差の増幅なのか別要因なのかは、JPEG だけからは言えない。
+→ §10 の可逆（TIFF16）対照で、8bit に落とさず 16bit のまま比べる。いずれも品質閾値ではなく記録。
 
 ## 6. 素材・保管場所の記録（公平比較）
 
@@ -191,3 +197,61 @@ localStorage.removeItem("geoframe.previewTiming");      // OFF（既定）
 | ピーク RSS | 未測定 |
 | Stage1 の ボタン→rAF（`origin_to_raf_ms`） | 未測定 |
 | FFI PoC への進否 | 未判断 |
+
+## 10. 可逆（TIFF16）対照：JPEG の差の由来を切り分ける
+
+JPEG ベンチの `batch_decode_render` の差が、decode op の半精度保持（既知）によるのか、JPEG 化で増幅されたものかを切り分けるための
+**独立した** test。既存の JPEG ベンチ（§2〜§7）の契約・出力・意味は変えない（`transport_bench/lossless.rs` に分離）。
+
+- リクエスト: JPEG ベンチと同じ 9 キー・2400px・レンズ補正 ON・decoder 9・apple_default。違いは `format: tiff16` と
+  `output_color_space: srgb`（JPEG と同じ sRGB 域）だけ（tiff16 に `jpeg_quality` は送れない）。
+- 比べる組（基準 = 単発 CLI の 1 回目）:
+
+| pair | 意味 |
+|---|---|
+| `single_repeat` | 単発 CLI の 2 回目 vs 1 回目。**決定性の対照**。0 でなければ他の差を解釈できない |
+| `batch_stateless` | batch の `op` 無し現像 vs 単発。輸送だけの対照（同じ経路なので画素一致の見込み） |
+| `batch_decode_render` | `op: decode` → `op: render` vs 単発。RGBAh（半精度）保持由来の差が出る組。`decode_reused` も記録 |
+
+- 比較は **16bit のまま**（8bit に量子化しない）。非圧縮・16bit・RGB・strip の TIFF だけを読む自前の最小リーダー
+  （`image` クレートに tiff が無く、依存は足さない）。読めない構造（LZW・BigTIFF・8bit・アルファ付き・タイル）は推測せず
+  `comparable: false` と理由を記録する。実 CLI の TIFF16（2400×1600・ビッグエンディアン・非圧縮・9 行/strip・SampleFormat 付き）を
+  読めることは確認済み。
+- 記録: `max_abs_diff`（/65535。参考に `/257` の 8bit 換算）、`mean_abs_diff`、符号付き平均（other−reference）、RMS、
+  異サンプル数・異画素数、チャンネル別の max/mean/異サンプル数、`abs_diff_percentiles`（p50/p95/p99/p99.9、厳密な順位統計）、
+  `abs_diff_log2_histogram`（0, 1, 2–3, 4–7, … の |差| 別サンプル数）、`bytes_identical`。
+  系列×組ごとの要約は `summary_by_pair_and_series`。小さい n の p99.9 は極値に張り付く。
+- **RGBAh レイヤ差・TIFF 差を品質閾値にしない。** JPEG の差と直接比較しない（単位が違う）。既知の 640px の差（最大 34〜81/65535）は
+  参考で、本対照は 2400px。
+- 既定の系列は `decode_exposure`（decode 段）と `post_shadow_lift`（後段）の 2 つ（各 5 ステップ）。`SERIES` で上書き可。
+  FFI は現時点で保留（単発 stateless の輸送差は数 ms。ライフサイクル/E2E 条件を揃えてから再検討）。
+
+実行（親が実 CLI で。環境変数は §7 と同じ）:
+
+```sh
+GEOFRAME_TRANSPORT_BENCH_SIDECAR=<実CLI> \
+GEOFRAME_TRANSPORT_BENCH_SOURCE_ROOT=<ARWフォルダ> \
+GEOFRAME_TRANSPORT_BENCH_CAPTURES=DSC04430,DSC04880 \
+GEOFRAME_TRANSPORT_BENCH_STORAGE_LABEL=local \
+GEOFRAME_TRANSPORT_BENCH_OUT=work/issue141/lossless-local \
+  cargo test --release --manifest-path src-tauri/Cargo.toml coreimage_lossless_control -- --ignored --nocapture --test-threads=1
+# SMB: SOURCE_ROOT / STORAGE_LABEL(=smb-backup) / OUT だけ替えて再実行
+```
+
+| 環境変数（`GEOFRAME_TRANSPORT_BENCH_`） | 内容 |
+|---|---|
+| `SIDECAR` / `SOURCE_ROOT` / `CAPTURES` / `STORAGE_LABEL` / `OUT` / `TIMEOUT_S` / `SERIES` | §7 と同じ（`SERIES` の既定だけ上の 2 系列） |
+| `KEEP_IMAGES=1` | 比較後も TIFF（約 23MB/枚）を `<OUT>/lossless/` に残す。既定は消す。コミットしない |
+| `TIFF_SAMPLE` | `tiff16_reader_reads_real_cli_output`（任意）が読む既存 TIFF のパス。RAW は使わない |
+
+期待される出力: `<OUT>/lossless-control-<label>-<unix>.json`（スキーマ `geoframe.lossless-control.v1`）と標準出力の「結果: <パス>」。
+`errors`・`environment.session_restarts`・`summary_by_pair_and_series`・`captures[].series[].steps[].pairs.<pair>`。
+公開 JSON にパス・GPS・画素列は出さない。実行時間の目安は 1 ID×2 系列×4 経路で TIFF16 を 40 枚前後書くため数分。
+fake CLI の契約テスト（実 CLI 不要）: `cargo test --manifest-path src-tauri/Cargo.toml lossless`。
+
+| 項目 | 結果 |
+|---|---|
+| `single_repeat` の差（決定性） | 未測定 |
+| `batch_stateless` の差 | 未測定 |
+| `batch_decode_render` の 16bit 差（max/mean/ヒストグラム） | 未測定 |
+| JPEG 差との関係（半精度由来か増幅か） | 未判断 |
