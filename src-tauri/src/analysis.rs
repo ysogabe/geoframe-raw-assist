@@ -190,11 +190,15 @@ fn hex(bytes: &[u8]) -> String {
 
 /// 解析結果の世代（`analysis_revision`）。入力から導かない一意値で、同じ入力・同じ秒の
 /// 再解析でも必ず変わる。キャッシュに保存されるので、同じ結果を何度読んでも変わらない。
+///
+/// 一意性を担うのは「ナノ秒の現在時刻 + プロセス ID + プロセス内の連番」の組。同じプロセス内では
+/// 連番が必ず違い、別プロセス（再起動）とは時刻か PID が違う。`RandomState` の値は推測しにくくする
+/// ための補助で、一意性の根拠にはしない（std の鍵はスレッドごとに 1 度だけ乱数で初期化され、
+/// 以後は増分されるだけなので、呼び出しごとに新しい乱数になるわけではない）。
 fn new_analysis_revision() -> String {
     use std::hash::{BuildHasher, Hasher};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    // RandomState はプロセスごとに OS 乱数で初期化される（同一プロセス内でも鍵は毎回変わる）。
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut random = std::collections::hash_map::RandomState::new().build_hasher();
     random.write_u64(count);
@@ -818,6 +822,14 @@ fn photo_json(record: &PhotoRecord, thumb: &Path, overall: f64, sharpness: f64) 
     })
 }
 
+/// 走査・stat の失敗。開始時は「読めない」、終了時は「解析中に消えた・読めなくなった」の両方がありうる。
+fn scan_failed(error: std::io::Error) -> CoreImageError {
+    CoreImageError::new(
+        "SOURCE_SCAN_FAILED",
+        format!("現像元フォルダのファイルを読めません（削除・移動・権限の変更などを確認してください）: {error}"),
+    )
+}
+
 /// 解析を最後まで走らせ、`Analysis` JSON（`analysis_version` 3）を返す。
 pub fn build_analysis(
     root: &Path,
@@ -825,11 +837,20 @@ pub fn build_analysis(
     root_key: &str,
     progress: &Progress,
 ) -> Result<Value, CoreImageError> {
+    build_analysis_checked(root, thumbs_dir, root_key, progress, &|| {})
+}
+
+/// `before_verify` は終了時の入力照合の直前に呼ぶ（テストで解析中の入力変更を再現する）。
+fn build_analysis_checked(
+    root: &Path,
+    thumbs_dir: &Path,
+    root_key: &str,
+    progress: &Progress,
+    before_verify: &dyn Fn(),
+) -> Result<Value, CoreImageError> {
     progress.set_stage("scanning");
-    let scan_failed =
-        |e: std::io::Error| CoreImageError::new("SOURCE_SCAN_FAILED", format!("現像元フォルダを読めません: {e}"));
     let scan = scan_pairs(root).map_err(scan_failed)?;
-    // 読み込みより前に取る。解析中に入力が変わると次回の照合で外れ、再解析に倒れる。
+    // 読み込みより前に取り、終了時に取り直して比べる（解析中の入力変更を結果に混ぜない）。
     let source_id = source_fingerprint(root, &scan.names).map_err(scan_failed)?;
     progress.total.store(scan.jpgs.len(), Ordering::Relaxed);
     fs::create_dir_all(thumbs_dir).map_err(|e| {
@@ -900,6 +921,17 @@ pub fn build_analysis(
         }));
     }
 
+    // 解析中に入力が変わった（追加・削除・差し替え）なら、この結果は公開しない。
+    // 保存してもすぐ照合で外れて理由なく absent に戻るだけなので、理由つきで失敗させる。
+    before_verify();
+    let after = source_fingerprint(root, &scan_names(root).map_err(scan_failed)?).map_err(scan_failed)?;
+    if after != source_id {
+        return Err(CoreImageError::new(
+            "SOURCE_CHANGED",
+            "解析中に現像元フォルダの写真が追加・削除・変更されました。コピーや書き込みが終わってから解析し直してください。",
+        ));
+    }
+
     Ok(json!({
         "analysis_version": ANALYSIS_VERSION,
         "scored": true,
@@ -952,12 +984,37 @@ fn write_cache(path: &Path, payload: &Value) -> Result<(), CoreImageError> {
     fs::write(&temporary, text + "\n").and_then(|()| fs::rename(&temporary, path)).map_err(fail)
 }
 
-/// キャッシュが有効（版・入力指紋が一致し、世代があり、サムネイルが揃っている）なら内部キーを除いて返す。
-/// 指紋を取れない（stat 失敗）ときも無効扱い。
-pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
+/// 解析キャッシュの読み出し結果。
+pub(crate) enum CachedAnalysis {
+    /// 有効（版・入力指紋が一致し、世代があり、サムネイルが揃っている）。内部キーは除いてある。
+    Ready(Value),
+    /// キャッシュファイルが無い（未解析・フォルダ変更直後）。
+    Missing,
+    /// キャッシュはあるが今の入力に使えない（入力の変更・旧形式・壊れている・サムネイル欠け・
+    /// 走査や stat の失敗）。中身を当てにせず、再解析が必要。
+    Stale,
+}
+
+pub(crate) fn load_cached_analysis(app_data_dir: &Path, root: &Path) -> CachedAnalysis {
     let root_key = root_key_for(root);
-    let text = fs::read_to_string(cache_path(app_data_dir, &root_key)).ok()?;
-    let mut payload: Value = serde_json::from_str(&text).ok()?;
+    match fs::read_to_string(cache_path(app_data_dir, &root_key)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CachedAnalysis::Missing,
+        Err(_) => CachedAnalysis::Stale,
+        Ok(text) => validate_cached(&text, root).map_or(CachedAnalysis::Stale, CachedAnalysis::Ready),
+    }
+}
+
+/// キャッシュが有効なら内部キーを除いて返す（無い・使えないの区別が要らない呼び出し側用）。
+pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
+    match load_cached_analysis(app_data_dir, root) {
+        CachedAnalysis::Ready(payload) => Some(payload),
+        CachedAnalysis::Missing | CachedAnalysis::Stale => None,
+    }
+}
+
+/// 指紋を取れない（走査・stat の失敗）ときも無効扱い。
+fn validate_cached(text: &str, root: &Path) -> Option<Value> {
+    let mut payload: Value = serde_json::from_str(text).ok()?;
     let object = payload.as_object_mut()?;
     if object.get("analysis_version").and_then(Value::as_u64) != Some(u64::from(ANALYSIS_VERSION)) {
         return None;
@@ -1074,13 +1131,19 @@ pub async fn start_analysis(
     let data_dir = app_data_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let root = resolve_dir(&read_source_root(&data_dir)?);
+        if state.is_running() {
+            return Ok("already_running");
+        }
+        // キャッシュの照合は全対象ファイルを stat するので、ロックの外で行う（get_analysis の
+        // ポーリングを待たせない）。二重開始は下でロックを取り直して防ぐ。照合とロックの間に
+        // 別の解析が終わっても、ここでは再解析が 1 回余分に走るだけで結果は壊れない。
+        if !force && read_cached_analysis(&data_dir, &root).is_some() {
+            return Ok("ready");
+        }
         let progress = {
             let mut inner = state.lock();
             if inner.running.is_some() {
                 return Ok("already_running");
-            }
-            if !force && read_cached_analysis(&data_dir, &root).is_some() {
-                return Ok("ready");
             }
             let progress = Arc::new(Progress::default());
             progress.set_stage("scanning");
@@ -1100,7 +1163,8 @@ pub async fn start_analysis(
     .map_err(blocking_failed)?
 }
 
-fn run_analysis(data_dir: &Path, root: &Path, progress: &Progress) -> Result<(), CoreImageError> {
+/// 解析してキャッシュへ保存する（解析ジョブ本体。書き出しのテストからも使う）。
+pub(crate) fn run_analysis(data_dir: &Path, root: &Path, progress: &Progress) -> Result<(), CoreImageError> {
     let root_key = root_key_for(root);
     let payload = build_analysis(root, &thumbnails_dir(data_dir), &root_key, progress)?;
     write_cache(&cache_path(data_dir, &root_key), &payload)
@@ -1468,9 +1532,58 @@ mod tests {
 
     #[test]
     fn analysis_revision_is_unique() {
-        let revisions: std::collections::BTreeSet<String> = (0..64).map(|_| new_analysis_revision()).collect();
-        assert_eq!(revisions.len(), 64);
+        // 一意性は時刻 + PID + 連番で担う。同じナノ秒に並行して作っても連番で分かれる。
+        let revisions: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> =
+                (0..8).map(|_| scope.spawn(|| (0..256).map(|_| new_analysis_revision()).collect::<Vec<_>>())).collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        let unique: std::collections::BTreeSet<&String> = revisions.iter().collect();
+        assert_eq!(unique.len(), 8 * 256);
         assert!(revisions.iter().all(|r| r.len() == 32 && r.bytes().all(|b| b.is_ascii_hexdigit())));
+    }
+
+    #[test]
+    fn input_change_during_analysis_is_not_published() {
+        let dir = fs::canonicalize(temp_dir("during")).unwrap();
+        let root = dir.join("src");
+        fs::create_dir_all(&root).unwrap();
+        let thumbs = dir.join("thumbs");
+        let key = root_key_for(&root);
+        let reset = || {
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            for id in ["DSC00001", "DSC00002"] {
+                synthetic_jpeg(&root.join(format!("{id}.JPG")), 64, 48);
+                fs::write(root.join(format!("{id}.ARW")), b"raw").unwrap();
+            }
+        };
+        let run = |change: &dyn Fn()| {
+            reset();
+            build_analysis_checked(&root, &thumbs, &key, &Progress::default(), change)
+        };
+        assert!(run(&|| {}).is_ok());
+        // 追加・同名の差し替え・削除は入力変更（SOURCE_CHANGED）。
+        let changes: [&dyn Fn(); 3] = [
+            &|| fs::write(root.join("DSC00003.JPG"), b"x").unwrap(),
+            &|| synthetic_jpeg(&root.join("DSC00001.JPG"), 80, 48),
+            &|| fs::remove_file(root.join("DSC00002.ARW")).unwrap(),
+        ];
+        for change in changes {
+            assert_eq!(run(change).unwrap_err().code, "SOURCE_CHANGED");
+        }
+        // 読めなくなった（壊れたリンクへの置き換え・フォルダごと消えた）は SOURCE_SCAN_FAILED。
+        let unreadable: [&dyn Fn(); 2] = [
+            &|| {
+                fs::remove_file(root.join("DSC00001.JPG")).unwrap();
+                std::os::unix::fs::symlink(dir.join("missing"), root.join("DSC00001.JPG")).unwrap();
+            },
+            &|| fs::remove_dir_all(&root).unwrap(),
+        ];
+        for change in unreadable {
+            assert_eq!(run(change).unwrap_err().code, "SOURCE_SCAN_FAILED");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // --- デコード・サムネイル・EXIF（合成 JPEG） ---
