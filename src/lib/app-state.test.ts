@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptedMergeOf,
   activePreset,
+  effectiveViewingOf,
   currentMergeResultsOf,
   currentDevelopmentCandidates,
   currentDevelopmentCandidatesResponse,
@@ -553,18 +555,19 @@ describe("merge 系", () => {
     expect(next.mergePreviewResults).toEqual({});
   });
 
-  it("プレビュー合成は採用できず、本合成は採用できる", () => {
-    const previewOnly: State = {
-      ...withEngine,
-      mergePreviewResults: { 2: merged(["B1", "B2"]) },
-    };
+  it("プレビュー合成は採用できず、今の設定に合う本合成は採用できる", () => {
+    // グループ2を開き、プリセット・調整・フレーム選択が確定した状態（採用は選択中のグループだけ）。
+    const opened = run(withEngine, { type: "screen/operation", groupId: 2 });
+    const now = (ids: string[]): MergedResult => ({
+      ...merged(ids),
+      preset: opened.presetName,
+      adjustments: effectiveAdjustments(opened)!,
+    });
+    const previewOnly: State = { ...opened, mergePreviewResults: { 2: now(["B1", "B2", "B3"]) } };
     const rejected = reducer(previewOnly, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
     expect(rejected).toBe(previewOnly);
 
-    const fullReady: State = {
-      ...previewOnly,
-      mergeFullResults: { 2: merged(["B1", "B2"]) },
-    };
+    const fullReady: State = { ...previewOnly, mergeFullResults: { 2: now(["B1", "B2", "B3"]) } };
     const accepted = reducer(fullReady, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
     expect(accepted.accepted).toContainEqual({ kind: "merged", groupId: 2, leadCaptureId: "B1" });
   });
@@ -920,7 +923,7 @@ describe("currentMergeResultsOf / viewingCaptureOf", () => {
     expect(removed.accepted).toEqual([]);
   });
 
-  it("合成の採用ボタンの対象: 合う本合成、または採用済みの本合成だけ", () => {
+  it("合成の採用ボタンの対象: 今の設定に合う本合成だけ", () => {
     const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
     expect(mergedAcceptTargetOf(ready, bracket)).toBe("B1");
 
@@ -928,13 +931,143 @@ describe("currentMergeResultsOf / viewingCaptureOf", () => {
     const staleUnaccepted = reducer(ready, { type: "adjust/change", key: "contrast", value: 1.3 as never });
     expect(mergedAcceptTargetOf(staleUnaccepted, bracket)).toBeUndefined();
 
-    // 採用済みなら、合わなくなっても取り消しの対象になる。
+    // 採用済みなら、合わなくなっても取り消しの導線（acceptedMergeOf）は残る。
     const accepted = reducer(ready, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
     const staleAccepted = reducer(accepted, { type: "adjust/change", key: "contrast", value: 1.3 as never });
-    expect(mergedAcceptTargetOf(staleAccepted, bracket)).toBe("B1");
+
+    // 採用済みでも、合わなくなった本合成はこのボタンの宛先にしない（取り消しは専用の導線）。
+    expect(mergedAcceptTargetOf(staleAccepted, bracket)).toBeUndefined();
+    expect(acceptedMergeOf(staleAccepted, bracket)?.leadCaptureId).toBe("B1");
 
     // 本合成が無ければ対象なし。
     expect(mergedAcceptTargetOf(withResults(opened, { preview: ["B1", "B2", "B3"] }), bracket)).toBeUndefined();
+  });
+
+  describe("採用済みの旧本合成と、今表示している合成の分離", () => {
+    /** 全3枚の本合成を採用 → フレームを B2,B3 に変えて同じ設定の新しいプレビューを作った state。 */
+    function acceptedThenReselected(): State {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
+      const accepted = reducer(ready, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+      const reselected = select(accepted, ["B2", "B3"]);
+      return { ...reselected, mergePreviewResults: { 2: mergedNow(reselected, ["B2", "B3"]) } };
+    }
+
+    it("今のプレビューには旧本合成の採用が移らず、採用済みの旧成果物は別に引ける", () => {
+      const state = acceptedThenReselected();
+      const current = currentMergeResultsOf(state, bracket);
+      expect(current.full).toBeUndefined();
+      expect(current.shown).toBe(current.preview);
+      expect(current.shown?.capture_ids).toEqual(["B2", "B3"]);
+
+      const accepted = acceptedMergeOf(state, bracket);
+      expect(accepted?.isCurrent).toBe(false);
+      expect(accepted?.leadCaptureId).toBe("B1");
+      expect(accepted?.result).toBe(state.mergeFullResults[2]);
+      expect(accepted?.result?.frames).toBe(3);
+      // 書き出しは採用時のスナップショットのまま。
+      expect(mergedResultFor(state.mergeFullResults, bracket, "B1")).toBe(accepted?.result);
+      // 今のプレビューは採用ボタンの宛先にならない。
+      expect(mergedAcceptTargetOf(state, bracket)).toBeUndefined();
+    });
+
+    it("採用済みの本合成が今の設定に合っているときだけ isCurrent になる", () => {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
+      expect(acceptedMergeOf(ready, bracket)).toBeUndefined();
+      const accepted = reducer(ready, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+      expect(acceptedMergeOf(accepted, bracket)?.isCurrent).toBe(true);
+      const edited = reducer(accepted, { type: "adjust/change", key: "contrast", value: 1.3 as never });
+      expect(acceptedMergeOf(edited, bracket)?.isCurrent).toBe(false);
+      const reset = reducer(edited, { type: "adjust/reset" });
+      expect(acceptedMergeOf(reset, bracket)?.isCurrent).toBe(true);
+    });
+
+    it("成果物を引けなくなった採用は result なしで返り、取り消しだけできる", () => {
+      const state: State = {
+        ...withResults(opened, { full: ["B2", "B3"] }),
+        accepted: [{ kind: "merged", groupId: 2, leadCaptureId: "B1" }],
+      };
+      const accepted = acceptedMergeOf(state, bracket);
+      expect(accepted).toEqual({ leadCaptureId: "B1", result: undefined, isCurrent: false });
+      const removed = reducer(state, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+      expect(removed.accepted).toEqual([]);
+    });
+
+    it("旧本合成の採用は、今の設定に合わなくても取り消せる（専用導線の leadCaptureId）", () => {
+      const state = acceptedThenReselected();
+      const lead = acceptedMergeOf(state, bracket)!.leadCaptureId;
+      const removed = reducer(state, { type: "accept/merged", groupId: 2, leadCaptureId: lead });
+      expect(removed.accepted).toEqual([]);
+    });
+  });
+
+  describe("accept/merged の新規採用 reducer ガード", () => {
+    it("今の設定に合わなくなった未採用の本合成は、action を直接渡しても採用できない", () => {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
+      for (const stale of [
+        select(ready, ["B2", "B3"]),
+        reducer(ready, { type: "adjust/change", key: "contrast", value: 1.3 as never }),
+        reducer(ready, { type: "preset/change", presetName: "shadow_rescue" }),
+      ]) {
+        expect(reducer(stale, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" })).toBe(stale);
+      }
+    });
+
+    it("選択中でないグループ、先頭フレームの違う action は採用しない", () => {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
+      expect(reducer(ready, { type: "accept/merged", groupId: 2, leadCaptureId: "B2" })).toBe(ready);
+      const elsewhere = { ...ready, selectedGroupId: 1 };
+      expect(reducer(elsewhere, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" })).toBe(elsewhere);
+    });
+
+    it("合う本合成の新規採用は同じグループの古い合成採用を置き換える", () => {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"] });
+      const withOld: State = { ...ready, accepted: [{ kind: "merged", groupId: 2, leadCaptureId: "OLD" }] };
+      const next = reducer(withOld, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+      expect(next.accepted).toEqual([{ kind: "merged", groupId: 2, leadCaptureId: "B1" }]);
+    });
+  });
+
+  describe("古い recipe の adjustments が壊れていても落ちない", () => {
+    it.each([null, undefined, [], "x", {}])("adjustments = %j は合わない結果として扱う", (broken) => {
+      const ready = withResults(opened, { full: ["B1", "B2", "B3"], preview: ["B1", "B2", "B3"] });
+      const state: State = {
+        ...ready,
+        mergeFullResults: { 2: { ...ready.mergeFullResults[2], adjustments: broken as never } },
+        mergePreviewResults: { 2: { ...ready.mergePreviewResults[2], adjustments: broken as never } },
+      };
+      expect(() => currentMergeResultsOf(state, bracket)).not.toThrow();
+      const current = currentMergeResultsOf(state, bracket);
+      expect(current.full).toBeUndefined();
+      expect(current.preview).toBeUndefined();
+      expect(current.shown).toBeUndefined();
+      // null を「全項目が既定値の有効な調整」と推定して採用させない。
+      expect(reducer(state, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" })).toBe(state);
+      expect(() => acceptedMergeOf(state, bracket)).not.toThrow();
+    });
+  });
+
+  describe("effectiveViewingOf（合う合成が無いときは写真面にフォールバック）", () => {
+    it("merged カーソルでも合う合成が無ければ、今の選択の先頭フレームの写真を見ている扱いになる", () => {
+      expect(opened.viewing[2]).toEqual({ kind: "merged" });
+      expect(effectiveViewingOf(opened, bracket)).toEqual({ kind: "photo", captureId: "B1" });
+      const state = select(withResults(opened, { full: ["B1", "B2", "B3"] }), ["B2", "B3"]);
+      expect(effectiveViewingOf(state, bracket)).toEqual({ kind: "photo", captureId: "B2" });
+      // 実表示の写真 = viewingCaptureOf（SELECTED PHOTO / EXIF / 写真の採用先）と一致する。
+      expect(viewingCaptureOf(state, bracket)).toBe("B2");
+    });
+
+    it("合う合成（プレビューでも）があれば merged のまま。カーソル自体は書き換えない", () => {
+      const state = withResults(opened, { preview: ["B1", "B2", "B3"] });
+      expect(effectiveViewingOf(state, bracket)).toEqual({ kind: "merged" });
+      const stale = select(state, ["B2", "B3"]);
+      expect(stale.viewing[2]).toEqual({ kind: "merged" });
+      expect(effectiveViewingOf(stale, bracket)).toEqual({ kind: "photo", captureId: "B2" });
+    });
+
+    it("写真カーソルはそのまま", () => {
+      const state = reducer(opened, { type: "view/capture", groupId: 2, captureId: "B3" });
+      expect(effectiveViewingOf(state, bracket)).toEqual({ kind: "photo", captureId: "B3" });
+    });
   });
 });
 

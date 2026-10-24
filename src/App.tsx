@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   acceptedKey,
+  acceptedMergeOf,
   acceptedSummaryOf,
   activePreset,
   changedAdjustmentKeys,
   currentDevelopmentCandidatesResponse,
   developedGroupIds,
   effectiveAdjustments,
+  effectiveViewingOf,
   heroCaptureOf,
   initialState,
   isPhotoAccepted,
-  isMergedAccepted,
   isValidBatchName,
-  groupMergeResultOf,
   isBracketGroup,
   mergeBlockReason,
   currentMergeResultsOf,
@@ -23,7 +23,6 @@ import {
   reducer,
   selectedGroup,
   viewingCaptureOf,
-  viewingOf,
   visibleGroups,
   type DevelopMode,
   type PhotoExportVariant,
@@ -192,7 +191,8 @@ export default function Home() {
   // ---- 派生値 --------------------------------------------------------------
   const group = selectedGroup(state);
   // 表示カーソルは 1 本。合成を見ている間は「今の写真」も合成の先頭フレームになる。
-  const viewing = group ? viewingOf(state, group) : null;
+  // 画面に実際に出している面（合う合成結果が無ければ merged カーソルでも写真面）。
+  const viewing = group ? effectiveViewingOf(state, group) : null;
   const captureId = group ? viewingCaptureOf(state, group) : "";
   const adjustments = effectiveAdjustments(state);
   const mergeFrames = group ? mergeFramesOf(state, group) : [];
@@ -201,9 +201,12 @@ export default function Home() {
   const currentMerge = group ? currentMergeResultsOf(state, group) : {};
   const mergePreviewResult = currentMerge.preview;
   const mergeFullResult = currentMerge.full;
-  // 採用済みかどうかは採用時の成果物（グループの現在の本合成）で見る。現像パネルを触っただけで
-  // 採用が外れたように見せない。
-  const selectedMergeFull = group ? groupMergeResultOf(state.mergeFullResults, group) : undefined;
+  // 採用済みは採用時のスナップショットで見る（現像パネルを触っただけで採用が外れたようには
+  // 見せない）。ただし ✓ は **今表示している合成が採用そのもの** のときだけ。今の設定に
+  // 合わなくなった採用は別に「採用済み（以前の設定）」として扱い、今の合成へ移さない。
+  const acceptedMerge = group ? acceptedMergeOf(state, group) : undefined;
+  const mergedAccepted = Boolean(acceptedMerge?.isCurrent);
+  const previousAcceptedMerge = acceptedMerge && !acceptedMerge.isCurrent ? acceptedMerge : null;
   const groupMergeMode = group?.id === state.mergingGroupId ? state.mergeMode : null;
   const globalBusy = Boolean(state.developMode || state.mergeMode || state.developmentCandidatesBusy);
   const photo = photoOf(analysis, captureId);
@@ -720,11 +723,17 @@ export default function Home() {
               mergeBlockReason={mergeBlockReason(mergeFrames)}
               mergePreviewResult={mergePreviewResult}
               mergeFullResult={mergeFullResult}
-              mergedAccepted={selectedMergeFull ? isMergedAccepted(state, group.id, selectedMergeFull.capture_ids[0]) : false}
+              mergedAccepted={mergedAccepted}
+              previousAcceptedMerge={previousAcceptedMerge}
               onAcceptMerged={() => {
-                // 新規採用は今の設定に合う本合成だけ。採用済みの取り消しは採用時の成果物で行う。
+                // 宛先は今の設定に合う本合成だけ（無ければ何もしない）。
                 const leadCaptureId = mergedAcceptTargetOf(state, group);
                 if (leadCaptureId) dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId });
+              }}
+              onRemovePreviousAcceptedMerge={() => {
+                if (previousAcceptedMerge) {
+                  dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: previousAcceptedMerge.leadCaptureId });
+                }
               }}
               onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
               globalBusy={globalBusy}
