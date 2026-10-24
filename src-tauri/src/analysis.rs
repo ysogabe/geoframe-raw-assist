@@ -1427,11 +1427,10 @@ mod tests {
         let dir = fs::canonicalize(temp_dir("scan-fail")).unwrap();
         let root = dir.join("src");
         fs::create_dir_all(&root).unwrap();
-        // 表記違いの同 ID は両方とも指紋の対象（選ばれるのは従来どおり正規表記）。
+        // 走査失敗の検証用ペア。大文字小文字を区別しないFSでもJPEGを上書きしない。
         synthetic_jpeg(&root.join("DSC00001.JPG"), 64, 48);
-        fs::write(root.join("DSC00001.jpg"), b"variant").unwrap();
         fs::write(root.join("DSC00001.ARW"), b"raw").unwrap();
-        assert_eq!(scan_names(&root).unwrap(), ["DSC00001.ARW", "DSC00001.JPG", "DSC00001.jpg"]);
+        assert_eq!(scan_names(&root).unwrap(), ["DSC00001.ARW", "DSC00001.JPG"]);
         assert_eq!(scan_pairs(&root).unwrap().jpgs["DSC00001"], root.join("DSC00001.JPG"));
         // 空フォルダは成功（0 件）で、走査の失敗とは区別する。
         let empty = dir.join("empty");
