@@ -49,14 +49,18 @@ sys.meta_path.insert(0, _Block())
 
 #: 偽 Core Image CLI: --version / --capabilities に答え、リクエストの寸法で決まった画像を書く。
 FAKE_CLI = '''#!{python}
-import json, sys
+import json, os, sys
 import numpy as np
 from PIL import Image
+OLD = bool(os.environ.get("FAKE_CLI_OLD"))
 if "--version" in sys.argv:
-    print(json.dumps({{"version": "0.6.0"}})); sys.exit(0)
+    print(json.dumps({{"version": "0.6.0", "cli_version": "0.2.0" if OLD else "0.6.0"}})); sys.exit(0)
 if "--capabilities" in sys.argv:
-    print(json.dumps({{"adjustments": True}})); sys.exit(0)
+    print(json.dumps({{"adjustments": {{"supported": not OLD}}}})); sys.exit(0)
 req = json.loads(sys.stdin.read())
+fail = os.environ.get("FAKE_CLI_FAIL")
+if fail and fail in req["input"]:
+    print(json.dumps({{"ok": False, "error": {{"code": "render_failed", "message": "fake failure"}}}})); sys.exit(2)
 w, h = 150, 100
 if req["mode"] == "preview" and req.get("max_edge"):
     s = min(1.0, req["max_edge"] / max(w, h)); w, h = round(w * s), round(h * s)
@@ -64,7 +68,11 @@ y, x = np.indices((h, w))
 shift = int(req.get("adjustments", {{}}).get("exposure", 0) * 10)
 rgb = np.stack([(x * 255 // max(1, w - 1)), (y * 255 // max(1, h - 1)), np.full_like(x, 90 + shift)], axis=2)
 Image.fromarray(rgb.astype("uint8")).save(req["output"], quality=95)
-print(json.dumps({{"ok": True, "elapsed_ms": {{"total": 5, "decode": 1, "render_encode": 4}},
+if os.environ.get("FAKE_CLI_MOVE_SOURCE") and req["mode"] == "full":  # 描画後に現像元が消える（共有の切断・移動）状況の再現
+    os.rename(req["input"], req["input"] + ".moved")
+print(json.dumps({{"ok": True, "cli_version": "0.6.0", "macos_version": "fake-os", "decoder_version": req.get("decoder_version"),
+                  "input": req["input"], "output": req["output"], "width": w, "height": h,
+                  "elapsed_ms": {{"total": 5, "decode": 1, "render_encode": 4}},
                   "applied": {{"lens_correction_enabled": req["settings"].get("lens_correction")}}}}))
 '''
 
@@ -117,9 +125,9 @@ class PostRemovalWorkflowTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_script(self, name: str, *args: object, ok: bool = True) -> subprocess.CompletedProcess:
+    def run_script(self, name: str, *args: object, ok: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
         proc = subprocess.run([sys.executable, str(self.root / "scripts" / name), *map(str, args)],
-                              cwd=self.root, env=self.env, capture_output=True, text=True, timeout=300)
+                              cwd=self.root, env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=300)
         detail = f"{name} {args}\nstdout:\n{proc.stdout[-3000:]}\nstderr:\n{proc.stderr[-3000:]}"
         if ok:
             self.assertEqual(proc.returncode, 0, detail)
@@ -311,6 +319,194 @@ class PostRemovalWorkflowTest(unittest.TestCase):
         report = json.loads((out / "frozen_comparison.json").read_text())
         self.assertEqual(len(report["errors"]), 2)
         self.assertEqual(capture.read_text(), "[\"complete previous baseline\"]")
+
+    # --- 凍結画像ゼロからの CI 基準作成（compare_engines --frozen-bootstrap-ci, #57 PR A） ---------
+
+    def bootstrap(self, out: Path, *extra: object, ok: bool = True, env: dict | None = None,
+                  captures: tuple[str, ...] = ("DSC00001", "DSC00002"), source: Path | None = None):
+        return self.run_script("compare_engines.py", "--frozen-bootstrap-ci", "--source-root", source or self.source,
+                               "--captures", *captures, "--cli", self.cli, "--out", out, "--max-edge", "120", *extra,
+                               ok=ok, env=env)
+
+    @staticmethod
+    def tree(root: Path) -> dict[str, str]:
+        return {p.relative_to(root).as_posix(): _sha(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def test_bootstrap_creates_baseline_then_verifies_and_replays(self):
+        out = Path(self.tmp.name) / "bootstrap-ok" / "ci"
+        proc = self.bootstrap(out)
+        self.assertIn("自己照合 PASS", proc.stdout)
+        self.assertEqual([p.name for p in out.parent.iterdir()], ["ci"])  # 一時ディレクトリは残らない
+        entries = json.loads((out / "ci_frozen.json").read_text())
+        self.assertEqual([(e["capture_id"], e["mode"]) for e in entries],
+                         [("DSC00001", "preview"), ("DSC00001", "full"), ("DSC00002", "preview"), ("DSC00002", "full")])
+        presets = json.loads((REPO / "src-tauri/tests/fixtures/presets.json").read_text())["presets"]
+        neutral = next(p for p in presets if p["name"] == "neutral_recovery")["adjustments"]
+        for entry in entries:
+            request = entry["request"]
+            self.assertEqual((request["profile"], request["lens"], request["decoder_version"]), ("apple_default", True, "9"))
+            self.assertEqual(request["adjustments"], neutral)
+            self.assertEqual(len(request["adjustments"]), 9)
+            self.assertEqual(request.get("max_edge"), 120 if entry["mode"] == "preview" else None)
+            self.assertFalse(Path(entry["path"]).is_absolute())
+            self.assertEqual(entry["source"]["sha256"], _sha(self.source / f"{entry['capture_id']}.ARW"))
+            self.assertEqual(entry["source"]["file"], f"{entry['capture_id']}.ARW")
+        self.assertEqual(entries[0]["dimensions"], [120, 80])
+        self.assertEqual(entries[1]["dimensions"], [150, 100])
+        # 来歴・応答・マニフェストに絶対パス（一時ディレクトリ）を持ち込まない
+        provenance = json.loads((out / "ci_frozen_provenance.json").read_text())
+        self.assertEqual(provenance["cli"]["version"]["cli_version"], "0.6.0")
+        self.assertEqual(provenance["cli"]["sha256"], _sha(self.cli))
+        self.assertEqual(provenance["cli"]["file"], "fake-ci")
+        self.assertEqual(provenance["cli"]["response_versions"][0]["macos_version"], "fake-os")
+        self.assertEqual(provenance["requests"]["preview"]["max_edge"], 120)
+        for path in out.rglob("*.json"):
+            text = path.read_text()
+            self.assertNotIn(self.tmp.name, text, path.name)
+            self.assertNotIn("GPS", text.upper().replace("GPS_", ""), path.name)
+        # 自己完結: 照合 → 同じ現像元での再比較は完全一致（preview の長辺も request から再現）
+        self.run_script("compare_engines.py", "--frozen-manifest", out / "ci_frozen.json", "--frozen-root", out,
+                        "--frozen-verify-only", "--out", Path(self.tmp.name) / "bootstrap-verify")
+        replay_out = Path(self.tmp.name) / "bootstrap-replay"
+        before = self.tree(out)
+        self.run_script("compare_engines.py", "--frozen-manifest", out / "ci_frozen.json", "--frozen-root", out,
+                        "--source-root", self.source, "--cli", self.cli, "--out", replay_out)
+        replay = json.loads((replay_out / "frozen_comparison.json").read_text())
+        self.assertEqual(len(replay["rows"]), 4)
+        for row in replay["rows"]:
+            self.assertEqual((row["frozen_identical_fraction"], row["frozen_delta_e76"]), (1.0, 0.0))
+        self.assertEqual(self.tree(out), before)  # 基準は読むだけ
+
+    def test_bootstrap_accepts_existing_empty_directory_and_preset_choice(self):
+        out = Path(self.tmp.name) / "bootstrap-empty"
+        out.mkdir()
+        self.bootstrap(out, "--frozen-preset", "nightscape", captures=("DSC00002",))
+        entries = json.loads((out / "ci_frozen.json").read_text())
+        self.assertEqual(len(entries), 2)
+        presets = json.loads((REPO / "src-tauri/tests/fixtures/presets.json").read_text())["presets"]
+        night = next(p for p in presets if p["name"] == "nightscape")["adjustments"]
+        self.assertEqual(entries[0]["request"]["adjustments"], night)
+
+    def test_bootstrap_never_overwrites_or_uses_unsafe_outputs(self):
+        base = Path(self.tmp.name) / "bootstrap-unsafe"
+        base.mkdir()
+        # 空でない出力先（既存の基準）は一切変えずに拒否する
+        existing = base / "existing"
+        self.bootstrap(existing)
+        before = self.tree(existing)
+        proc = self.bootstrap(existing, ok=False)
+        self.assertIn("空ではありません", proc.stderr)
+        self.assertEqual(self.tree(existing), before)
+        stray = base / "stray"
+        stray.mkdir()
+        (stray / "keep.txt").write_text("keep")
+        self.bootstrap(stray, ok=False)
+        self.assertEqual(self.tree(stray), {"keep.txt": _sha(stray / "keep.txt")})
+        # ファイル、現像元と同じ・現像元の中・現像元を含む場所
+        (base / "file").write_text("x")
+        self.assertIn("ディレクトリではありません", self.bootstrap(base / "file", ok=False).stderr)
+        for label, target in (("same", self.source), ("inside", self.source / "out"), ("parent", self.source.parent)):
+            with self.subTest(source=label):
+                proc = self.bootstrap(target, ok=False)
+                self.assertTrue("重なります" in proc.stderr or "空ではありません" in proc.stderr, proc.stderr)
+        self.assertFalse((self.source / "out").exists())
+        self.assertEqual(sorted(p.name for p in self.source.iterdir()),
+                         ["DSC00001.ARW", "DSC00001.JPG", "DSC00002.ARW", "DSC00002.JPG"])
+        # Git 管理下（work/ 以外のリポジトリ内）は拒否、work/ 配下は許可
+        proc = self.bootstrap(self.root / "tests" / "ci-baseline", ok=False)
+        self.assertIn("Git 管理下", proc.stderr)
+        self.assertFalse((self.root / "tests" / "ci-baseline").exists())
+        self.bootstrap(self.root / "work" / "ci-baseline")
+        self.assertTrue((self.root / "work" / "ci-baseline" / "ci_frozen.json").is_file())
+
+    def test_bootstrap_rejects_bad_inputs_before_creating_anything(self):
+        base = Path(self.tmp.name) / "bootstrap-bad"
+        missing_arw = Path(self.tmp.name) / "raw-no-arw"
+        shutil.copytree(self.source, missing_arw)
+        (missing_arw / "DSC00002.ARW").unlink()
+        cases = {
+            "duplicate": (dict(captures=("DSC00001", "DSC00001")), None, "重複"),
+            "malformed-id": (dict(captures=("DSC1",)), None, "撮影IDの形式"),
+            "missing-arw": (dict(source=missing_arw), None, "ARW がありません"),
+            "old-cli": ({}, {"FAKE_CLI_OLD": "1"}, "未対応"),
+        }
+        for name, (kwargs, env, message) in cases.items():
+            with self.subTest(case=name):
+                out = base / name
+                proc = self.bootstrap(out, ok=False, env=env, **kwargs)
+                self.assertIn(message, proc.stderr)
+                self.assertFalse(out.exists())
+                self.assertEqual(list(base.glob(".*")) if base.exists() else [], [])  # 一時ディレクトリも作らない
+        self.assertFalse((base / "bad-preset").exists())
+        proc = self.bootstrap(base / "bad-preset", "--frozen-preset", "no_such_preset", ok=False)
+        self.assertIn("no_such_preset", proc.stderr)
+        self.assertFalse((base / "bad-preset").exists())
+
+    def test_bootstrap_render_failure_publishes_nothing(self):
+        base = Path(self.tmp.name) / "bootstrap-fail"
+        fresh = base / "fresh"
+        proc = self.bootstrap(fresh, ok=False, env={"FAKE_CLI_FAIL": "DSC00002"})
+        self.assertIn("DSC00002", proc.stderr)
+        self.assertFalse(fresh.exists())
+        leftovers = [p for p in base.iterdir()]
+        self.assertEqual(len(leftovers), 1)  # 診断用の一時ディレクトリだけ。マニフェストは無い
+        self.assertEqual(list(leftovers[0].rglob("ci_frozen.json")), [])
+        self.assertFalse(json.loads((leftovers[0] / "bootstrap_report.json").read_text())["ok"])
+        # 空の既存ディレクトリを指定した場合も空のまま
+        empty = Path(self.tmp.name) / "bootstrap-fail-empty"
+        empty.mkdir()
+        self.bootstrap(empty, ok=False, env={"FAKE_CLI_FAIL": "DSC00001"})
+        self.assertEqual(list(empty.iterdir()), [])
+        # 現像元が描画中に変わっても公開しない場合の前提: 失敗後に同じ名前で再試行できる
+        self.bootstrap(fresh)
+        self.assertTrue((fresh / "ci_frozen.json").is_file())
+
+    def test_bootstrap_source_lost_after_render_is_reported_not_traceback(self):
+        """描画後の ARW 再確認で OSError（移動・共有切断）になっても、成功扱いにせず report / log を残して失敗する。"""
+        base = Path(self.tmp.name) / "bootstrap-source-lost"
+        source = base / "raw"
+        shutil.copytree(self.source, source)
+        out = base / "ci"
+        proc = self.bootstrap(out, ok=False, source=source, captures=("DSC00001",), env={"FAKE_CLI_MOVE_SOURCE": "1"})
+        self.assertIn("再確認できません", proc.stderr)
+        self.assertFalse(out.exists())  # 基準は公開しない
+        leftovers = [p for p in base.iterdir() if p.name.startswith(".ci.bootstrap-")]
+        self.assertEqual(len(leftovers), 1)
+        staging = leftovers[0]
+        self.assertEqual(list(staging.rglob("ci_frozen.json")), [])
+        report = json.loads((staging / "bootstrap_report.json").read_text())
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("再確認できません" in e["error"] for e in report["errors"]))
+        self.assertIn("失敗", (staging / "run.log").read_text())
+
+    def test_bootstrap_rejects_incompatible_and_stray_options(self):
+        out = Path(self.tmp.name) / "bootstrap-options"
+        for extra in (("--frozen-manifest", self.root / "tests/fixtures/baseline/rawpy_images.json"),
+                      ("--frozen-root", self.root), ("--frozen-capture", out / "x.json"), ("--frozen-verify-only",),
+                      ("--select", "auto"), ("--full",), ("--full-limit", "5"), ("--full-limit", "0"),
+                      ("--full-ids", "DSC00001"), ("--no-lens",), ("--sharpness",), ("--dry-run",),
+                      ("--legacy-rawpy",), ("--adjustments",)):
+            with self.subTest(extra=extra):
+                proc = self.bootstrap(out, *extra, ok=False)
+                self.assertIn("併用できない", proc.stderr)
+                self.assertIn(extra[0], proc.stderr)
+                self.assertFalse(out.exists())
+        for args in (("--frozen-capture", out / "x.json"), ("--frozen-root", self.root), ("--frozen-preset", "nightscape")):
+            with self.subTest(stray=args[0]):
+                proc = self.run_script("compare_engines.py", "--source-root", self.source, "--captures", "DSC00001",
+                                       "--cli", self.cli, "--out", Path(self.tmp.name) / "stray-out", *args, ok=False)
+                self.assertIn("黙って無視しません", proc.stderr)
+        base, manifest = self.frozen_set("frozen-verify-capture")
+        proc = self.run_script("compare_engines.py", "--frozen-manifest", manifest, "--frozen-root", base,
+                               "--frozen-verify-only", "--frozen-capture", out / "x.json", ok=False)
+        self.assertIn("併用できません", proc.stderr)
+        for flag in ("--source-root", "--captures", "--out"):
+            args = {"--source-root": ["--captures", "DSC00001", "--out", out],
+                    "--captures": ["--source-root", self.source, "--out", out],
+                    "--out": ["--source-root", self.source, "--captures", "DSC00001"]}[flag]
+            proc = self.run_script("compare_engines.py", "--frozen-bootstrap-ci", "--cli", self.cli, *args, ok=False)
+            self.assertIn("が必要です", proc.stderr)
+        self.assertFalse(out.exists())
 
     # --- compare_engines の既定比較（rawpy 列なし）と旧経路の明示エラー --------------------
 
