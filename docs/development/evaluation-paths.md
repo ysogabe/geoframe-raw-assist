@@ -135,11 +135,11 @@ python scripts/compare_engines.py --frozen-bootstrap-ci --source-root "$RAW" --c
 - **安全規則**: `--out` は存在しないか空のディレクトリだけ（中身があれば何も変えずに拒否）。現像元・CLI と重なる場所、
   Git 管理下（`work/` 以外のリポジトリ内）も拒否する。描画は同じ親の一時ディレクトリ
   （`.<out名>.bootstrap-<時刻>-<pid>`）へ行い、全画像の描画・現像元不変の確認・マニフェストの自己照合（ハッシュ・寸法）に
-  成功したときだけ `--out` へ改名して公開する。1 件でも失敗すれば `--out` には何も作らず（終了コード 1）、
+  成功したときだけ `--out` へ改名して公開する（描画後の ARW 再確認が移動・共有切断などの OSError になった場合も、成功扱いにせず失敗として report / log に残す）。1 件でも失敗すれば `--out` には何も作らず（終了コード 1）、
   診断用に一時ディレクトリ（`bootstrap_report.json` あり・マニフェストなし）を残す。不要なら手で削除する。
   `--captures` の重複・不正 ID・ARW 欠落は描画前に拒否する。
 - **併用できないオプション**は黙って無視せずエラー: `--frozen-manifest` / `--frozen-root` / `--frozen-verify-only` /
-  `--frozen-capture` / `--select` / `--full` / `--no-lens` / 各評価モード / `--dry-run` / `--legacy-rawpy` など。
+  `--frozen-capture` / `--select` / `--full` / `--full-limit`（`5` や `0` を明示した場合も）/ `--full-ids` / `--no-lens` / 各評価モード / `--dry-run` / `--legacy-rawpy` など。
   `--source-root` / `--captures` / `--out` は必須（既定の出力先は使わない）。
 - 作成後は通常の経路で使う: `--frozen-manifest "$FROZEN_ROOT/ci_frozen.json" --frozen-root "$FROZEN_ROOT" --frozen-verify-only` で照合、
   `--source-root` と `--cli` を付けて別の `--out` へ再比較（preview の長辺は `request.max_edge` から再現。

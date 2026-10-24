@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   acceptedMergeOf,
   activePreset,
+  comparisonSurfaceOf,
   effectiveViewingOf,
   currentMergeResultsOf,
   currentDevelopmentCandidates,
@@ -1067,6 +1068,137 @@ describe("currentMergeResultsOf / viewingCaptureOf", () => {
     it("写真カーソルはそのまま", () => {
       const state = reducer(opened, { type: "view/capture", groupId: 2, captureId: "B3" });
       expect(effectiveViewingOf(state, bracket)).toEqual({ kind: "photo", captureId: "B3" });
+    });
+  });
+
+  describe("comparisonSurfaceOf（写真カーソルのまま合成へ黙って切り替えない）", () => {
+    const mergedShown = { id: "m" };
+    const developed = { id: "d" };
+
+    it("写真を見ている間は、写真が未現像でも合成を見せない", () => {
+      const surface = comparisonSurfaceOf({ kind: "photo", captureId: "B3" }, mergedShown, undefined);
+      expect(surface).toEqual({ showMerged: false, result: undefined, canToggle: false });
+    });
+
+    it("写真を見ていて現像済みなら現像結果。両方あれば切り替えタブを出す", () => {
+      const surface = comparisonSurfaceOf({ kind: "photo", captureId: "B3" }, mergedShown, developed);
+      expect(surface).toEqual({ showMerged: false, result: developed, canToggle: true });
+    });
+
+    it("合成を見ているときだけ合成を見せる", () => {
+      expect(comparisonSurfaceOf({ kind: "merged" }, mergedShown, developed).result).toBe(mergedShown);
+      expect(comparisonSurfaceOf({ kind: "merged" }, mergedShown, undefined).showMerged).toBe(true);
+    });
+
+    it("合成結果が無いときは merged カーソルでも現像結果（無ければ空）", () => {
+      expect(comparisonSurfaceOf({ kind: "merged" }, undefined, developed).result).toBe(developed);
+      expect(comparisonSurfaceOf({ kind: "merged" }, undefined, undefined).result).toBeUndefined();
+    });
+
+    it("effectiveViewingOf と組み合わせると、合う合成が無い間は SELECTED PHOTO の写真面になる", () => {
+      // 合成を見ている最中にフレームを選び直し、合う結果が無くなった: 面は写真 B2、合成は出ない。
+      const stale = select(withResults(opened, { full: ["B1", "B2", "B3"] }), ["B2", "B3"]);
+      const viewing = effectiveViewingOf(stale, bracket);
+      const shown = currentMergeResultsOf(stale, bracket).shown;
+      expect(comparisonSurfaceOf(viewing, shown, undefined).showMerged).toBe(false);
+      expect(viewing).toEqual({ kind: "photo", captureId: viewingCaptureOf(stale, bracket) });
+    });
+  });
+
+  describe("グループ移動から戻ったとき、保存済み合成の recipe を操作値へ復元する", () => {
+    /** グループ2で shadow_rescue + contrast 1.3 の本合成を作った state。 */
+    function madeWithNonDefaultRecipe(): State {
+      let state = reducer(opened, { type: "preset/change", presetName: "shadow_rescue" });
+      state = reducer(state, { type: "adjust/change", key: "contrast", value: 1.3 as never });
+      return { ...state, mergeFullResults: { 2: mergedNow(state, ["B1", "B2", "B3"]) } };
+    }
+    const roundTrip = (state: State): State =>
+      run(state, { type: "screen/operation", groupId: 1 }, { type: "screen/operation", groupId: 2 });
+
+    it("他グループを見て戻っても本合成は current のまま。overrides は既定との差分だけ", () => {
+      const back = roundTrip(madeWithNonDefaultRecipe());
+      expect(back.presetName).toBe("shadow_rescue");
+      expect(back.overrides).toEqual({ contrast: 1.3 });
+      const full = currentMergeResultsOf(back, bracket).full;
+      expect(full).toBe(back.mergeFullResults[2]);
+      expect(back.mergeFullResults[2].adjustments).toEqual(effectiveAdjustments(back));
+    });
+
+    it("既定と同じ recipe なら overrides は空（全キーで dirty 扱いにしない）", () => {
+      const state = run(opened, { type: "screen/operation", groupId: 2 });
+      const made = { ...state, mergeFullResults: { 2: mergedNow(state, ["B1", "B2", "B3"]) } };
+      const back = roundTrip(made);
+      expect(back.overrides).toEqual({});
+      expect(currentMergeResultsOf(back, bracket).full).toBeDefined();
+    });
+
+    it("復元後も採用は current のまま（isCurrent）", () => {
+      const made = madeWithNonDefaultRecipe();
+      const accepted = reducer(made, { type: "accept/merged", groupId: 2, leadCaptureId: "B1" });
+      expect(acceptedMergeOf(roundTrip(accepted), bracket)?.isCurrent).toBe(true);
+    });
+
+    it("プレビューだけでも復元する", () => {
+      const made = madeWithNonDefaultRecipe();
+      const previewOnly = { ...made, mergeFullResults: {}, mergePreviewResults: { 2: made.mergeFullResults[2] } };
+      const back = roundTrip(previewOnly);
+      expect(back.presetName).toBe("shadow_rescue");
+      expect(currentMergeResultsOf(back, bracket).preview).toBeDefined();
+    });
+
+    it("フレームの違う古い本合成より、現在のフレームに合う新しいプレビューの設定を復元する", () => {
+      const made = madeWithNonDefaultRecipe(); // full [B1,B2,B3] = shadow_rescue + contrast 1.3
+      const reselected = select({ ...made, presetName: "landscape_clear", overrides: {} }, ["B2", "B3"]);
+      const withPreview: State = { ...reselected, mergePreviewResults: { 2: mergedNow(reselected, ["B2", "B3"]) } };
+      const back = roundTrip(withPreview);
+      expect(back.presetName).toBe("landscape_clear");
+      expect(back.overrides).toEqual({});
+      expect(currentMergeResultsOf(back, bracket).preview).toBeDefined();
+    });
+
+    it("現在のフレームに合う結果が無ければ従来どおり既定へ戻る（未合成の初回も同じ）", () => {
+      const baseline = run(withEngine, { type: "screen/operation", groupId: 2 });
+      const frameMismatch = roundTrip(select(madeWithNonDefaultRecipe(), ["B2", "B3"]));
+      expect(frameMismatch.presetName).toBe(baseline.presetName);
+      expect(frameMismatch.overrides).toEqual({});
+      expect(baseline.overrides).toEqual({});
+    });
+
+    it.each([
+      ["未知のプリセット", { preset: "legacy_preset" as never }],
+      ["adjustments が null", { adjustments: null as never }],
+      ["キーが欠けた recipe", { adjustments: { exposure: 0 } as never }],
+      ["数値が文字列", { adjustments: { ...BASE_ADJ, contrast: "1.3" } as never }],
+      ["noise_reduction が未知", { adjustments: { ...BASE_ADJ, noise_reduction: "ultra" } as never }],
+      ["非有限の値", { adjustments: { ...BASE_ADJ, exposure: Number.NaN } as never }],
+    ])("復元できない legacy recipe（%s）は既定へ倒し、current と偽装しない", (_label, broken) => {
+      const made = madeWithNonDefaultRecipe();
+      const legacy = { ...made, mergeFullResults: { 2: { ...made.mergeFullResults[2], ...broken } } };
+      const baseline = run(withEngine, { type: "screen/operation", groupId: 2 });
+      const back = roundTrip(legacy);
+      expect(back.presetName).toBe(baseline.presetName);
+      expect(back.overrides).toEqual({});
+      expect(currentMergeResultsOf(back, bracket).full).toBeUndefined();
+    });
+  });
+
+  describe("成果物を引けない採用が複数あっても、順に取り消せる", () => {
+    it("先頭の採用を取り消すと次の採用が表示対象になり、最後は undefined", () => {
+      const base = withResults(opened, { full: ["B2", "B3"] });
+      const state: State = {
+        ...base,
+        accepted: [
+          { kind: "merged", groupId: 2, leadCaptureId: "X1" },
+          { kind: "merged", groupId: 2, leadCaptureId: "X2" },
+        ],
+      };
+      expect(acceptedMergeOf(state, bracket)).toEqual({ leadCaptureId: "X1", result: undefined, isCurrent: false });
+      const afterFirst = reducer(state, { type: "accept/merged", groupId: 2, leadCaptureId: "X1" });
+      expect(afterFirst.accepted).toEqual([{ kind: "merged", groupId: 2, leadCaptureId: "X2" }]);
+      expect(acceptedMergeOf(afterFirst, bracket)?.leadCaptureId).toBe("X2");
+      const afterSecond = reducer(afterFirst, { type: "accept/merged", groupId: 2, leadCaptureId: "X2" });
+      expect(afterSecond.accepted).toEqual([]);
+      expect(acceptedMergeOf(afterSecond, bracket)).toBeUndefined();
     });
   });
 });
