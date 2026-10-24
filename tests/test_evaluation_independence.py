@@ -68,6 +68,8 @@ y, x = np.indices((h, w))
 shift = int(req.get("adjustments", {{}}).get("exposure", 0) * 10)
 rgb = np.stack([(x * 255 // max(1, w - 1)), (y * 255 // max(1, h - 1)), np.full_like(x, 90 + shift)], axis=2)
 Image.fromarray(rgb.astype("uint8")).save(req["output"], quality=95)
+if os.environ.get("FAKE_CLI_MOVE_SOURCE") and req["mode"] == "full":  # 描画後に現像元が消える（共有の切断・移動）状況の再現
+    os.rename(req["input"], req["input"] + ".moved")
 print(json.dumps({{"ok": True, "cli_version": "0.6.0", "macos_version": "fake-os", "decoder_version": req.get("decoder_version"),
                   "input": req["input"], "output": req["output"], "width": w, "height": h,
                   "elapsed_ms": {{"total": 5, "decode": 1, "render_encode": 4}},
@@ -459,15 +461,35 @@ class PostRemovalWorkflowTest(unittest.TestCase):
         self.bootstrap(fresh)
         self.assertTrue((fresh / "ci_frozen.json").is_file())
 
+    def test_bootstrap_source_lost_after_render_is_reported_not_traceback(self):
+        """描画後の ARW 再確認で OSError（移動・共有切断）になっても、成功扱いにせず report / log を残して失敗する。"""
+        base = Path(self.tmp.name) / "bootstrap-source-lost"
+        source = base / "raw"
+        shutil.copytree(self.source, source)
+        out = base / "ci"
+        proc = self.bootstrap(out, ok=False, source=source, captures=("DSC00001",), env={"FAKE_CLI_MOVE_SOURCE": "1"})
+        self.assertIn("再確認できません", proc.stderr)
+        self.assertFalse(out.exists())  # 基準は公開しない
+        leftovers = [p for p in base.iterdir() if p.name.startswith(".ci.bootstrap-")]
+        self.assertEqual(len(leftovers), 1)
+        staging = leftovers[0]
+        self.assertEqual(list(staging.rglob("ci_frozen.json")), [])
+        report = json.loads((staging / "bootstrap_report.json").read_text())
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("再確認できません" in e["error"] for e in report["errors"]))
+        self.assertIn("失敗", (staging / "run.log").read_text())
+
     def test_bootstrap_rejects_incompatible_and_stray_options(self):
         out = Path(self.tmp.name) / "bootstrap-options"
         for extra in (("--frozen-manifest", self.root / "tests/fixtures/baseline/rawpy_images.json"),
                       ("--frozen-root", self.root), ("--frozen-capture", out / "x.json"), ("--frozen-verify-only",),
-                      ("--select", "auto"), ("--full",), ("--no-lens",), ("--sharpness",), ("--dry-run",),
+                      ("--select", "auto"), ("--full",), ("--full-limit", "5"), ("--full-limit", "0"),
+                      ("--full-ids", "DSC00001"), ("--no-lens",), ("--sharpness",), ("--dry-run",),
                       ("--legacy-rawpy",), ("--adjustments",)):
-            with self.subTest(extra=extra[0]):
+            with self.subTest(extra=extra):
                 proc = self.bootstrap(out, *extra, ok=False)
                 self.assertIn("併用できない", proc.stderr)
+                self.assertIn(extra[0], proc.stderr)
                 self.assertFalse(out.exists())
         for args in (("--frozen-capture", out / "x.json"), ("--frozen-root", self.root), ("--frozen-preset", "nightscape")):
             with self.subTest(stray=args[0]):

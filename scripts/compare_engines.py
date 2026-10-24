@@ -6387,7 +6387,8 @@ BOOTSTRAP_REPORT = "bootstrap_report.json"
 BOOTSTRAP_INCOMPATIBLE = (
     ("frozen_manifest", "--frozen-manifest"), ("frozen_root", "--frozen-root"),
     ("frozen_verify_only", "--frozen-verify-only"), ("frozen_capture", "--frozen-capture"),
-    ("select", "--select"), ("full", "--full"), ("full_ids", "--full-ids"), ("no_lens", "--no-lens"),
+    ("select", "--select"), ("full", "--full"), ("full_limit", "--full-limit"), ("full_ids", "--full-ids"),
+    ("no_lens", "--no-lens"),
     ("sharpness", "--sharpness"), ("night", "--night"), ("night_scales", "--night-scales"),
     ("bracket", "--bracket"), ("bracket_pairs", "--bracket-pairs"), ("highlight", "--highlight"),
     ("adjustments", "--adjustments"), ("diagnosis", "--diagnosis"), ("presets", "--presets"),
@@ -6503,7 +6504,12 @@ def bootstrap_ci_baseline(*, source_root: Path, captures: list[str], out: Path, 
         entries.append(entry)
     # 描画中に現像元が変わっていたら、来歴が嘘になるので失敗にする。
     for cid, info in sources_info.items():
-        if frozen.file_sha256(source_file(source_root, cid, "ARW")) != info["sha256"]:
+        try:
+            changed = frozen.file_sha256(source_file(source_root, cid, "ARW")) != info["sha256"]
+        except OSError as error:  # 移動・削除・共有の切断。成功扱いにせず、診断 report / log を残して失敗にする
+            errors.append({"capture_id": cid, "mode": "-", "error": f"描画後に現像元の ARW を再確認できません: {type(error).__name__}: {error}"})
+            continue
+        if changed:
             errors.append({"capture_id": cid, "mode": "-", "error": "描画中に現像元の ARW が変更されました"})
     if not errors and len(entries) != len(jobs):
         errors.append({"capture_id": "-", "mode": "-", "error": "描画できた画像数が要求と一致しません"})
@@ -6534,10 +6540,14 @@ def bootstrap_ci_baseline(*, source_root: Path, captures: list[str], out: Path, 
             manifest.unlink()
         else:
             report["verified"] = len(verified)
+    if not report["ok"]:  # run.log に失敗の理由と扱いを残してから書く
+        for e in report["errors"]:
+            ctx.say(f"[bootstrap] ERROR {e['capture_id']} {e['mode']}: {e['error']}")
+        ctx.say("[bootstrap] 失敗: 基準は公開しません（この一時ディレクトリに診断用の途中経過だけ残します）")
     (staging / BOOTSTRAP_REPORT).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (staging / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
     if not report["ok"]:
-        ctx.say(f"[bootstrap] 失敗: 基準は公開しません（途中経過は {staging} に残っています。不要なら削除してください）")
+        print(f"基準を公開しません。途中経過（不要なら削除）: {staging}", file=sys.stderr)
         print("\n".join(f"{e['capture_id']} {e['mode']}: {e['error']}" for e in report["errors"]), file=sys.stderr)
         return 1
     try:
@@ -6558,7 +6568,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-edge", type=int, default=None,
                         help="preview の長辺（既定 2400。--frozen-bootstrap-ci では既定 1600）")
     parser.add_argument("--full", action="store_true", help="フル解像度でも計測する")
-    parser.add_argument("--full-limit", type=int, default=5, help="--full で回すカット数（0 で全件）")
+    parser.add_argument("--full-limit", type=int, default=None, help="--full で回すカット数（既定 5、0 で全件）")
     parser.add_argument("--full-ids", nargs="*", help="--full で回すカットを明示する")
     parser.add_argument("--no-lens", action="store_true", help="Core Image + lens を省く")
     parser.add_argument(
@@ -6632,6 +6642,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     bootstrap_edge = args.max_edge if args.max_edge is not None else BOOTSTRAP_PREVIEW_EDGE
     args.max_edge = args.max_edge if args.max_edge is not None else 2400
+    bootstrap_conflicts = ([flag for dest, flag in BOOTSTRAP_INCOMPATIBLE if getattr(args, dest) is not None and getattr(args, dest) is not False]
+                           if args.frozen_bootstrap_ci else [])  # 明示された値（--full-limit 5 や 0 を含む）は拒否する
+    if args.full_limit is None:
+        args.full_limit = 5
 
     if args.worker_noop:
         worker_noop(args)
@@ -6641,9 +6655,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.frozen_bootstrap_ci:
-        conflicting = [flag for dest, flag in BOOTSTRAP_INCOMPATIBLE if getattr(args, dest)]
-        if conflicting:
-            raise SystemExit("--frozen-bootstrap-ci と併用できないオプションです（黙って無視しません）: " + ", ".join(conflicting))
+        if bootstrap_conflicts:
+            raise SystemExit("--frozen-bootstrap-ci と併用できないオプションです（黙って無視しません）: " + ", ".join(bootstrap_conflicts))
         if args.source_root is None or args.out is None or not args.captures:
             raise SystemExit("--frozen-bootstrap-ci には --source-root・--captures・--out（空か新規のディレクトリ）が必要です")
         raise SystemExit(bootstrap_ci_baseline(
