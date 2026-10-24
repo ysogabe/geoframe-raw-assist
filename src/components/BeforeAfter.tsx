@@ -7,6 +7,7 @@ import {
   lensFlagLabels,
   lensReasonLabel,
 } from "../lib/format";
+import { previewTiming } from "../lib/preview-timing";
 import { sourceJpgUrl } from "../lib/raw-api";
 import type { Adjustments, CaptureId, DevelopedResult, MergedResult } from "../lib/types";
 
@@ -119,6 +120,11 @@ export function BeforeAfter({
               src={result.output_url}
               alt={merged ? `${merged.frames}枚のブラケット合成後` : `${captureId} RAW現像後`}
               decoding="async"
+              onLoad={(event) => {
+                // 任意計測（既定 OFF）。待機中の計測が無ければ何もしない。
+                const img = event.currentTarget;
+                previewTiming.imageLoaded(result.output_url, () => img.decode());
+              }}
             />
             <span className="developed-label">原寸で見る</span>
           </button>
