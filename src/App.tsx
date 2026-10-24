@@ -130,6 +130,8 @@ export default function Home() {
   // useCallback なので、タイマー等からは最新の世代を ref で読む。フォルダ変更直後の
   // 呼び出し（applySourceFolder）は ref の同期を待たず、次の世代を明示的に渡す。
   const sourceGenerationRef = useRef(state.sourceFolderGeneration);
+  /** フォルダ変更の処理中（同期ガード。applySourceFolder 参照）。 */
+  const applyingSourceFolderRef = useRef(false);
   useEffect(() => {
     sourceGenerationRef.current = state.sourceFolderGeneration;
   }, [state.sourceFolderGeneration]);
@@ -419,7 +421,10 @@ export default function Home() {
 
   async function applySourceFolder(path: string) {
     const trimmed = path.trim();
-    if (!trimmed || state.sourceFolderBusy) return;
+    // state.sourceFolderBusy は再描画まで古い値のままなので、同じ描画のクロージャから
+    // 2 回呼ばれる（ダブルクリック等）と両方が通る。同期の ref で先に塞ぐ。
+    if (!trimmed || state.sourceFolderBusy || applyingSourceFolderRef.current) return;
+    applyingSourceFolderRef.current = true;
     dispatch({ type: "source/applying" });
     try {
       const info = await setSourceFolder(trimmed);
@@ -427,9 +432,10 @@ export default function Home() {
       // 新しいフォルダを解析し直す。前のフォルダの DSC02943 をそのまま持ち越すと
       // 新しいフォルダの別写真を指してしまうため、リセットは必須。
       const noPairs = info.pairs === 0;
-      // source/changed で reducer が進める世代と同じ値（sourceFolderBusy の間は他に進める経路が無い）。
+      // source/changed で reducer が進める世代と同じ値。採番は描画時点の state ではなく
+      // ref の現在値から行う（applyingSourceFolderRef の間は他に世代を進める経路が無い）。
       // 前のフォルダ向けに飛んでいる get_analysis の応答は、この値と一致せず捨てられる。
-      const generation = state.sourceFolderGeneration + 1;
+      const generation = sourceGenerationRef.current + 1;
       sourceGenerationRef.current = generation;
       dispatch({
         type: "source/changed",
@@ -451,6 +457,8 @@ export default function Home() {
       await beginAnalyze(true, generation);
     } catch (error) {
       dispatch({ type: "source/failed", message: sourceFolderFailureMessage(error) });
+    } finally {
+      applyingSourceFolderRef.current = false;
     }
   }
 

@@ -369,6 +369,10 @@ fn relative(path: &Path, base: &Path) -> String {
         .into_owned()
 }
 
+/// 解析キャッシュがあるのに今の現像元フォルダと一致しないときの書き出しエラー。
+pub(crate) const STALE_ANALYSIS_MESSAGE: &str =
+    "解析結果が現在の写真フォルダの内容と一致しません（写真の追加・削除・差し替えなど）。解析をやり直してから書き出してください。";
+
 pub(crate) fn export_batch(
     data: &Path,
     batch: &str,
@@ -386,7 +390,14 @@ pub(crate) fn export_batch(
         .map_err(io_error)?;
     // manifest の相対パス基準は、このバッチのディレクトリ。外部の元画像は絶対パス。
     let manifest_base = data.join("export").join(&batch);
-    let analysis = crate::analysis::read_cached_analysis(&data, &root).unwrap_or(Value::Null);
+    // 解析が無い（未解析）ときは group 無しで書き出す（camera_jpg 等は解析なしでも書き出せる）。
+    // 解析はあるのに今の写真と一致しない（差し替え・追加・削除・旧形式）ときは、古い
+    // group / was_recommended を黙って落とさず、コピーと manifest を作る前に止める（#32）。
+    let analysis = match crate::analysis::load_cached_analysis(&data, &root) {
+        crate::analysis::CachedAnalysis::Ready(analysis) => analysis,
+        crate::analysis::CachedAnalysis::Missing => Value::Null,
+        crate::analysis::CachedAnalysis::Stale => return Err(STALE_ANALYSIS_MESSAGE.into()),
+    };
     let mut copies = Vec::new();
     let mut manifest_items = Vec::new();
     let mut skipped = Vec::new();
@@ -1016,6 +1027,61 @@ mod tests {
         let mut item = f.item("camera_jpg");
         item.capture_id = "../evil".into();
         assert!(export_batch(&f.data, "batch", vec![item]).is_err());
+    }
+    fn real_jpeg(path: &Path, width: u32) {
+        let image = image::RgbImage::from_fn(width, 48, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 5) as u8, 90])
+        });
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+            .encode_image(&image)
+            .unwrap();
+        fs::write(path, out).unwrap();
+    }
+    fn manifest_group(result: &Value) -> Value {
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(result["manifest_path"].as_str().unwrap()).unwrap())
+                .unwrap();
+        manifest["items"][0]["group"].clone()
+    }
+    #[test]
+    fn stale_analysis_stops_export_but_missing_analysis_does_not() {
+        let f = Fixture::new();
+        // 未解析なら従来どおり group 無しで書き出せる。
+        assert_eq!(manifest_group(&f.run("camera_jpg").unwrap()), Value::Null);
+        // 解析が有効なら group と推薦の印が manifest に載る。
+        real_jpeg(&f.root.join("DSC00001.JPG"), 64);
+        crate::analysis::run_analysis(&f.data, &f.root, &crate::analysis::Progress::default())
+            .unwrap();
+        let group =
+            manifest_group(&export_batch(&f.data, "valid", vec![f.item("camera_jpg")]).unwrap());
+        assert_eq!(group["was_recommended"], json!(true));
+        assert!(group["id"].is_u64());
+        // 同名 JPG の修復・差し替え（サイズが変わる）で解析が古くなったら、コピーも manifest も作らず止める。
+        real_jpeg(&f.root.join("DSC00001.JPG"), 80);
+        let error = export_batch(&f.data, "stale", vec![f.item("camera_jpg")]).unwrap_err();
+        assert_eq!(error, STALE_ANALYSIS_MESSAGE);
+        assert!(!f.data.join("export/stale").exists());
+        // 壊れたキャッシュ・旧形式も「あるのに使えない」側。
+        let cache = fs::read_dir(f.data.join("analysis"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(&cache, "{").unwrap();
+        assert_eq!(
+            export_batch(&f.data, "broken", vec![f.item("camera_jpg")]).unwrap_err(),
+            STALE_ANALYSIS_MESSAGE
+        );
+        assert!(!f.data.join("export/broken").exists());
+        // 再解析すれば書き出せる。
+        crate::analysis::run_analysis(&f.data, &f.root, &crate::analysis::Progress::default())
+            .unwrap();
+        let group = manifest_group(
+            &export_batch(&f.data, "reanalyzed", vec![f.item("camera_jpg")]).unwrap(),
+        );
+        assert_eq!(group["was_recommended"], json!(true));
     }
     #[test]
     fn reveal_is_limited_to_export_tree() {
