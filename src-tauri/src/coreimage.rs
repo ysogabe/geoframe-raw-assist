@@ -1606,7 +1606,10 @@ pub(crate) fn develop_to_output_in_slot(
     _slot: &SlotGuard<'_>,
 ) -> Result<Value, CoreImageError> {
     let mut request = base_request(input, mode, adjustments);
-    request.insert("output".into(), json!(output));
+    request.insert(
+        "output".into(),
+        Value::String(output.to_string_lossy().into_owned()),
+    );
     let request = Value::Object(request);
     let body = request.to_string();
     let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;

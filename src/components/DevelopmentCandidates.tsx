@@ -30,6 +30,26 @@ function metric(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? percent(value) : "—";
 }
 
+function diagnosticReason(reason: string | null): string {
+  const messages: Record<string, string> = {
+    native_roi_incomplete: "一部の原寸ROIを診断できませんでした。",
+    no_eligible_natural_proxy_tile: "条件に合う領域が見つかりませんでした。",
+    no_eligible_rois: "診断できる領域が見つかりませんでした。",
+    natural_full_unavailable: "基準画像の原寸診断を利用できません。",
+    roi_measurement_incomplete: "一部の領域に欠測または失敗があります。",
+    roi_measurement_failed: "領域の計測に失敗しました。",
+    SIDECAR_TIMEOUT: "原寸現像が制限時間を超えました。",
+    DECODE_FAILED: "RAWの読み込みに失敗しました。",
+    RENDER_FAILED: "原寸現像に失敗しました。",
+    NATIVE_ROI_SETTINGS_INVALID: "原寸診断の設定を確認できませんでした。",
+    NATIVE_ROI_SCRATCH_FAILED: "原寸診断の一時出力先を作成できませんでした。",
+    NATIVE_ROI_IMAGE_READ_FAILED: "原寸診断画像を読み込めませんでした。",
+    NATIVE_ROI_DIMENSIONS_MISMATCH: "基準画像と候補の寸法が一致しません。",
+    NATIVE_ROI_CROP_FAILED: "原寸ROIを切り出せませんでした。",
+  };
+  return reason && Object.hasOwn(messages, reason) ? messages[reason] : "診断を完了できませんでした。";
+}
+
 function CandidateMetrics({ values }: { values: DevelopmentCandidateMetrics }) {
   return (
     <dl className="development-candidate-metrics">
@@ -92,17 +112,17 @@ export function DevelopmentCandidates({
         最終候補の原寸ROIも診断する（時間がかかります・採否は変わりません）
       </label>
       {busy && progress && <p role="status">{progress.stage === "native_roi" ? "探索完了・原寸ROI" : progress.stage === "done" ? "完了" : "代理画像を探索中"} {progress.completed}/{progress.total}</p>}
-      {diagnostic && <details>
+      {diagnostic && diagnostic.status !== "not_run" && <details>
         <summary>原寸ROI診断: {{ not_run: "未実行", missing: "欠測", failed: "失敗", complete: "完了（画質合格の判定なし）" }[diagnostic.status]}</summary>
-        <p>{diagnostic.reason ?? "naturalとの同一ROI比較を記録しました。"} / 原寸現像{diagnostic.renders}回 / {(diagnostic.elapsed_ms.total / 1000).toFixed(1)}秒</p>
-        {diagnostic.rois.filter((roi) => roi.status === "missing").map((roi) => <p key={roi.name}>{roi.name}: 欠測（{roi.reason}）</p>)}
+        <p>{diagnostic.reason || diagnostic.status !== "complete" ? diagnosticReason(diagnostic.reason) : "naturalとの同一ROI比較を記録しました。"} / 原寸現像{diagnostic.renders}回 / {(diagnostic.elapsed_ms.total / 1000).toFixed(1)}秒</p>
+        {diagnostic.rois.filter((roi) => roi.status === "missing").map((roi) => <p key={roi.name}>{roi.name}: 欠測（{diagnosticReason(roi.reason)}）</p>)}
         {diagnostic.sets.map((set) => <div key={set.candidate_ids.join(",")}>
           <strong>{set.candidate_ids.map(candidateStyleLabel).join(" / ")}</strong>
-          {set.reason && <p>{set.reason}</p>}
+          {set.reason && <p>{diagnosticReason(set.reason)}</p>}
           {set.rois.map((roi) => <p key={roi.name}>
             {roi.name} {roi.pixels?.join(", ")}：{roi.absolute && roi.delta_vs_natural
               ? `細部 ${roi.absolute.detail.toFixed(6)} (Δ${roi.delta_vs_natural.detail.toFixed(6)}) / ノイズ ${roi.absolute.noise_flat.toFixed(6)} (Δ${roi.delta_vs_natural.noise_flat.toFixed(6)}) / ハロー ${roi.absolute.halo.toFixed(6)} (Δ${roi.delta_vs_natural.halo.toFixed(6)})`
-              : roi.reason}
+              : diagnosticReason(roi.reason)}
           </p>)}
         </div>)}
       </details>}

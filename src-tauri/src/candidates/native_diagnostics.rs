@@ -119,6 +119,9 @@ pub(super) fn diagnose(
                 FULL_TIMEOUT,
                 slot,
             );
+            // A running single-shot full render cannot be interrupted. Discard a stale
+            // result immediately after it exits, before decoding the JPEG or measuring ROIs.
+            ensure_current()?;
             let render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
             let crop_started = Instant::now();
             let cropped = rendered.and_then(|_| {
@@ -213,6 +216,7 @@ pub(super) fn diagnose(
                     set["metrics_ms"] = json!(metrics_started.elapsed().as_secs_f64() * 1000.0);
                 }
             }
+            ensure_current()?;
             set["render_ms"] = json!(render_ms);
             set["crop_ms"] = json!(crop_ms);
         }
@@ -436,31 +440,75 @@ printf '{"ok":true,"output":"%s","width":64,"height":48}\n' "$output"
         assert!(slot.acquire().is_ok());
     }
     #[test]
-    fn stale_during_full_discards_result_and_cleans_scratch() {
-        let fixture = Fixture::new(COPY);
-        let scratch = ScratchParent::for_directory(&fixture.0.join("scratch")).unwrap();
+    fn non_utf8_output_returns_cli_error_without_path_serialization_panic() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let fixture = Fixture::new("#!/bin/sh\nprintf '{\"ok\":false,\"error\":{\"code\":\"RENDER_FAILED\",\"message\":\"mock\"}}\\n'\nexit 1\n");
+        let output = fixture
+            .0
+            .join(OsString::from_vec(b"nonutf-\xff.jpg".to_vec()));
         let slot = DevelopSlot::new(0);
         let guard = slot.acquire().unwrap();
-        let mut checks = 0;
-        let err = diagnose(
-            &fixture.proxy(),
-            &candidates(),
+        let error = coreimage::develop_to_output_in_slot(
             &fixture.0.join("cli"),
             &fixture.0.join("input.ARW"),
-            &scratch,
+            &output,
+            DevelopMode::Full,
+            Some(&candidates()[0]["adjustments"]),
+            Duration::from_secs(5),
             &guard,
-            || {
-                checks += 1;
-                if checks > 1 {
-                    Err(CoreImageError::new("CANDIDATES_STALE", "stale"))
-                } else {
-                    Ok(())
-                }
-            },
-            |_, _, _| {},
         )
         .unwrap_err();
-        assert_eq!(err.code, "CANDIDATES_STALE");
-        assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+        assert_eq!(error.code, "RENDER_FAILED");
+    }
+    #[test]
+    fn stale_after_full_or_measurement_stops_before_next_render_and_cleans_up() {
+        for stale_check in [2, 3] {
+            // Invalid JPEG at check 2 proves stale escapes before image::open and is
+            // not converted into an ordinary diagnostic failure.
+            let program = if stale_check == 2 {
+                COPY.replace(
+                    "cp \"$base/source.jpg\" \"$output\" || exit 7",
+                    "printf 'invalid JPEG' > \"$output\"",
+                )
+            } else {
+                COPY.to_string()
+            };
+            let fixture = Fixture::new(&program);
+            let scratch = ScratchParent::for_directory(&fixture.0.join("scratch")).unwrap();
+            let slot = DevelopSlot::new(0);
+            let mut checks = 0;
+            let mut progress = Vec::new();
+            let result = {
+                let guard = slot.acquire().unwrap();
+                diagnose(
+                    &fixture.proxy(),
+                    &candidates(),
+                    &fixture.0.join("cli"),
+                    &fixture.0.join("input.ARW"),
+                    &scratch,
+                    &guard,
+                    || {
+                        checks += 1;
+                        if checks == stale_check {
+                            Err(CoreImageError::new("CANDIDATES_STALE", "stale"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |_, done, _| progress.push(done),
+                )
+            };
+            assert_eq!(result.unwrap_err().code, "CANDIDATES_STALE");
+            assert_eq!(
+                fs::read_to_string(fixture.0.join("requests"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+            assert_eq!(progress, vec![0]);
+            assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+            assert!(slot.acquire().is_ok());
+        }
     }
 }
