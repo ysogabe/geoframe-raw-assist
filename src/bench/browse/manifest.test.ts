@@ -5,7 +5,9 @@ import {
   generateSyntheticManifest,
   isRelativeThumbUrl,
   manifestStats,
+  MAX_GROUPS,
   manifestToAnalysis,
+  parseSyntheticQuery,
   resolveThumbUrl,
   validateManifest,
 } from "./manifest";
@@ -103,6 +105,50 @@ describe("generateSyntheticManifest", () => {
     const unique = manifestStats(synthetic({ groupCount: 50, thumbPoolSize: 1_000_000 }));
     expect(unique.unique_thumb_ratio).toBe(1);
     expect(unique.duplicate_group_signature_ratio).toBe(0);
+  });
+});
+
+describe("合成入力の上限と厳密検査", () => {
+  const base = { id: "syn", groupCount: 10, seed: 1, thumbPoolSize: 4, thumbPrefix: "syn/thumbs" };
+
+  it("100 万グループ・0・小数・NaN・Infinity を配列を作る前に拒否する", () => {
+    for (const groupCount of [1_000_000, MAX_GROUPS + 1, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => generateSyntheticManifest({ ...base, groupCount }), String(groupCount)).toThrow("groupCount");
+    }
+    expect(generateSyntheticManifest({ ...base, groupCount: 5000 }).groups).toHaveLength(5000);
+  });
+
+  it("NaN/小数の seed・不正な pool・絶対パスの thumbPrefix を拒否する", () => {
+    expect(() => generateSyntheticManifest({ ...base, seed: Number.NaN })).toThrow("seed");
+    expect(() => generateSyntheticManifest({ ...base, seed: 1.5 })).toThrow("seed");
+    expect(() => generateSyntheticManifest({ ...base, thumbPoolSize: 0 })).toThrow("thumbPoolSize");
+    expect(() => generateSyntheticManifest({ ...base, thumbPoolSize: Number.NaN })).toThrow("thumbPoolSize");
+    expect(() => generateSyntheticManifest({ ...base, thumbPrefix: "/Users/me/thumbs" })).toThrow("thumbPrefix");
+    expect(() => generateSyntheticManifest({ ...base, thumbPrefix: "../x" })).toThrow("thumbPrefix");
+    expect(() => generateSyntheticManifest({ ...base, id: "bad id/../" })).toThrow("id");
+  });
+
+  it("クエリ文字列を厳密に解釈する", () => {
+    const parse = (query: string) => parseSyntheticQuery(new URLSearchParams(query));
+    expect(parse("synthetic=1000&pool=64&thumbs=synthetic/thumbs")).toMatchObject({ groupCount: 1000, thumbPoolSize: 64, seed: 1 });
+    expect(parse("synthetic=5000&thumbs=s/t&seed=-3&pool=8")).toMatchObject({ groupCount: 5000, seed: -3, thumbPoolSize: 8 });
+    for (const bad of [
+      "synthetic=1000000&thumbs=s/t",
+      `synthetic=${MAX_GROUPS + 1}&thumbs=s/t`,
+      "synthetic=NaN&thumbs=s/t",
+      "synthetic=&thumbs=s/t",
+      "synthetic=1e3&thumbs=s/t",
+      "synthetic=10.5&thumbs=s/t",
+      "synthetic=0&thumbs=s/t",
+      "synthetic=-5&thumbs=s/t",
+      "synthetic=10&seed=NaN&thumbs=s/t",
+      "synthetic=10&pool=0&thumbs=s/t",
+      "synthetic=10&thumbs=/abs/thumbs",
+      "synthetic=10",
+      "synthetic=99999999999999999999&thumbs=s/t",
+    ]) {
+      expect(() => parse(bad), bad).toThrow();
+    }
   });
 });
 

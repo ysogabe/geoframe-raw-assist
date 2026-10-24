@@ -26,8 +26,12 @@ URL クエリ（どちらか必須。`dataset.kind` の宣言が無ければ読�
 | manifest | `?manifest=smb451/manifest.json`（`bench-fixtures/smb451/manifest.json`。サムネは manifest と同じディレクトリ基準） |
 | 合成（ページ内で決定論的に生成） | `?synthetic=1000&pool=64&thumbs=synthetic/thumbs&seed=1`（`bench-fixtures/synthetic/thumbs/`） |
 
-`BENCH_THUMB_CACHE=max-age`（既定）/`no-cache`/`no-store` でサムネ配信ヘッダを変え、manifest 応答の `x-bench-thumb-cache` として報告に記録する
-（合成をページ内生成したときは null）。cold を測るならブラウザのキャッシュを空にして `no-store`、warm なら `max-age`。
+合成の入力は厳密に検査する: `synthetic` は 1〜20000 の整数、`pool` は 1 以上の整数、`seed` は整数（`1e3`・空文字・NaN・小数・負のグループ数は拒否）、`thumbs` は相対ディレクトリ。
+生成した manifest も manifest 経路と同じ検証を通す。写真数が 100000 を超える指定も拒否する。
+
+`BENCH_THUMB_CACHE=max-age`（既定）/`no-cache`/`no-store` でサムネ配信ヘッダを変える。ページは起動時に**計測に使うサムネ 1 枚へ HEAD**を投げ、`x-bench-thumb-cache` を
+`environment.thumb_cache_policy`（`thumb_cache_policy_source: "head_probe"`）に記録する（manifest 経路でも合成でも同じ）。取れなければ `thumb_cache_policy` は null、
+`thumb_cache_policy_source: "unobservable"` と `thumb_cache_policy_note`（理由）が入り、**キャッシュ方針は不明**として読む。cold を測るならブラウザのキャッシュを空にして `no-store`、warm なら `max-age`。
 
 ブラウザ自動化（Playwright 等）からの呼び出し:
 
@@ -41,6 +45,8 @@ const report = await page.evaluate(() => window.__browseBench.runAll({ steps: 40
 
 `__browseBench`: `ready`・`error`・`scenarios()`・`defaults()`・`manifest()`・`run(id, opts)`・`runAll(opts)`・`report(notes)`・`clear()`・`exportJson(notes)`・`download(notes)`。
 `opts`: `steps`(既定 40)・`mountRepeats`(5)・`scrollSpeed`(2400px/s)・`maxScrollMs`(15000)・`settleMs`(3000)。**同じ page で走らせた結果は累積**し、`clear()` で空にする。
+`run`/`runAll` の**同時起動は拒否**する（実行中の `clear()` も拒否）。失敗したシナリオがあると報告は `run_status: "incomplete"`、`failures[]` に理由が残り、
+`scenarios[]` には失敗前に完了した分だけが入る（`clear()` まで incomplete のまま。部分結果を成功した報告として読まない）。
 
 ## 2. 入力 manifest
 
@@ -86,9 +92,11 @@ strip 系シナリオ（`select_group_strip`・`accept_toggle_strip`・`scroll_s
 | `return_to_list` | 操作画面 → 一覧へ戻る（`GroupList` を remount）を繰り返す | to_commit / to_frame、サムネが静まるまで |
 | `scroll_strip` | 帯を横に最後まで scrollLeft で送る | rAF の gap、longtask |
 
-報告 JSON（`geoframe.browse-bench.report/1`）は: `environment`（UA・DPR・viewport・React ビルド種別・Tauri か・longtask 対応・サムネ配信ヘッダ）、`boot`（エントリ評価開始→最初のコミット/2 回目 rAF）、
+報告 JSON（`geoframe.browse-bench.report/1`）は: `environment`（UA・DPR・viewport・React ビルド種別・Tauri か・longtask 対応・サムネ配信ヘッダ）、`boot`（下記）、`run_status`・`failures`、
 `representativeness`、`scenarios[]`（`params`・`operations`・`to_commit_ms`・`to_frame_ms`・`frame_gaps`・`profiler`・`dom_before/after`・`images`・`long_tasks`・`warnings`・`raw`）、`limitations`。
 
+- `boot`: `to_first_commit_ms` / `to_first_frame_ms` は **React の render 開始（`createRoot().render()` の直前）** を起点にし、manifest の fetch・検証・Analysis 変換・HEAD 確認は含まない。
+  `pre_render_ms`（エントリ評価開始 → render 開始、上記を含む）と、fetch/検証を含む全体値 `from_entry_to_first_commit_ms` / `from_entry_to_first_frame_ms` を別名で残す。`mount_actual_ms` は root Profiler の mount の actualDuration。
 - `to_commit_ms`: 操作開始 → 最初のコミット（React Profiler の commitTime）。`to_frame_ms`: 操作開始 → その後 2 回目の `requestAnimationFrame`（**paint の代理観測**で、実際の合成完了ではない）。
 - 画像: `<img>` の load/error と Resource Timing（`transferSize===0 && decodedBodySize>0` はキャッシュ由来と**推定**するだけ）。**画像デコード時間は直接測っていない**。
 
@@ -110,9 +118,18 @@ strip 系シナリオ（`select_group_strip`・`accept_toggle_strip`・`scroll_s
    画像同一性（同じ画像が多数の `<img>` に出る）のため、デコード結果の共有も実運用より有利に働きうる。
 4. **React ビルド**: dev ビルド（`bench:browse:dev`）は本番より遅い。通常は `bench:browse:prod`（`environment.react_build` = `production-profiling`）で測る。profiling ビルドは本番とほぼ同じだが完全には同一ではない。
 5. 同期コミットの測定は Profiler の commitTime に依存する。Profiler が効かない本番ビルド（profiling に差し替えていない）では `to_commit_ms` が null になる。
-6. `reset()` の後に画像が静まるまで最大 2 秒待つ。前シナリオの読み込みは混ざらない設計だが、極端に遅いサムネ配信では混ざりうる。
+6. 画像が『静まった』の判定は、load/error が 200ms 来ず、**かつ要求済みで未完了の `<img>` が 0** のとき（遅い要求の最中に quiet だけで抜けない）。lazy の未要求は
+   `currentSrc` とビューポート ±3000px で除外する近似で、ブラウザの実際の先読み幅とは一致しない。`reset()`・setup・各シナリオの待ちが timeout したら `settled=false` として
+   `warnings` に未完了枚数を残す（『前のシナリオの読み込みが混入しうる』も明記）。未完了を settled と見なして次へ進むことはしない。
 7. 1 回目の `mount_list` はサムネが cold の可能性がある。`raw.to_frame_ms` の並び順で cold と warm を読み分ける（`warnings` に注意書きがある）。
-8. `acceptedSummaryOf` が 1 カードごとに `analysis.groups.find` する O(n²) の構造は現行コードのまま計測に含まれる（5000 グループでは顕著に出うる）。変更はしていない。
+8. **操作の種類**: 採用トグルと『戻る』は DOM のクリックではなく **reducer への直接 dispatch**（グループ選択と一覧カードを開く操作だけが実 `onClick`）。操作回数がグループ数を超えると同じグループを繰り返しトグルするため、
+   採用の**追加と取消が混ざる**グループを開く/選ぶ操作でクリック対象（一覧カード・帯のカード）が DOM に無ければ**例外で失敗**する（黙って state だけ進めるフォールバックはしない）。
+   （グループ数 < steps のとき `warnings` に出る。グループ数 ≥ steps ならすべて追加）。取消側の再描画コストは追加と同じとは限らない。
+9. **Profiler の合計と操作別の値**: `profiler.*.commits/actual_total_ms` には観測窓の中の準備操作（`mount_list` の unmount、`return_to_list` の openGroup など）のコミットも入る。
+   `to_commit_ms`/`to_frame_ms` は測定対象の操作 1 回ぶんだけ。両者を混ぜて『操作 1 回の費用』と読まない（strip 系の初回 mount は観測前の setup に移してある）。
+10. **smooth scroll の重なり**: `GroupStrip` は選択変更のたびに選択カードへ smooth scroll する（`prefers-reduced-motion` でなければ）。`select_group_strip` では前の操作の smooth scroll が次の操作に重なる。
+    本番の ←→ 連打と同じ挙動込みの値で、reduced motion には固定していない（`environment.prefers_reduced_motion` を確認）。
+11. `acceptedSummaryOf` が 1 カードごとに `analysis.groups.find` する O(n²) の構造は現行コードのまま計測に含まれる（5000 グループでは顕著に出うる）。変更はしていない。
 
 ## 5. 報告のひな形（親が埋める）
 

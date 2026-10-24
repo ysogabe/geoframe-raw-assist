@@ -6,6 +6,7 @@ import type { ProfilerOnRenderCallback } from "react";
 import type { BenchControls } from "./harness";
 import type { DomCounts, ImageEvent, ProfilerRecord, ResourceSample } from "./metrics";
 import type { BenchDriver, Observed } from "./scenarios";
+import { isPendingImage, waitUntilSettled } from "./settle";
 
 export type ProfilerSink = { onRender: ProfilerOnRenderCallback; records: ProfilerRecord[]; enabled: boolean };
 
@@ -91,18 +92,19 @@ export function createBrowserDriver(options: {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
       await nextFrame();
       await nextFrame();
-      // 前のシナリオの読み込みが次の観測に混ざらないよう、画像が静かになるまで待つ。
-      await driver.waitImagesSettled(2000, 150);
+      // 前のシナリオの読み込みが次の観測に混ざらないよう、要求済みの画像が全部終わって静かになるまで待つ。
+      return driver.waitImagesSettled(2000, 150);
     },
 
     openGroup(groupId) {
       const index = options.groupIds.indexOf(groupId);
       const stripCard = clickables(`.group-strip-track li[data-group-id="${groupId}"] button`)[0];
       const listCard = clickables(".group-card")[index];
-      // 実ハンドラ(onClick → onOpenGroup / onSelectGroup)を通す。見つからなければ状態だけ進める。
+      // 実ハンドラ(onClick → onOpenGroup / onSelectGroup)を通す。対象が無いのに state だけ進めると
+      // 「クリックの費用」を測っていないのに測ったように見えるので、黙ってフォールバックせず失敗にする。
       const target = stripCard ?? listCard;
-      if (target) target.click();
-      else controls.dispatch({ type: "screen/operation", groupId });
+      if (!target) throw new Error(`グループ ${groupId} のクリック対象(一覧カードか帯のカード)が DOM に無い`);
+      target.click();
     },
 
     backToList() {
@@ -168,14 +170,25 @@ export function createBrowserDriver(options: {
       return result;
     },
 
-    async waitImagesSettled(timeoutMs, quietMs) {
-      const begin = performance.now();
-      for (;;) {
-        await sleep(Math.min(50, quietMs));
-        const now = performance.now();
-        if (now - Math.max(lastImageEventAt, begin) >= quietMs) return { waited_ms: now - begin, settled: true };
-        if (now - begin >= timeoutMs) return { waited_ms: now - begin, settled: false };
-      }
+    waitImagesSettled(timeoutMs, quietMs) {
+      return waitUntilSettled(
+        {
+          now: () => performance.now(),
+          sleep,
+          lastImageEventAt: () => lastImageEventAt,
+          pendingCount: () => {
+            const viewport = { width: window.innerWidth, height: window.innerHeight };
+            return Array.from(root()?.querySelectorAll("img") ?? []).filter((img) =>
+              isPendingImage(
+                { complete: img.complete, currentSrc: img.currentSrc, lazy: img.loading === "lazy", rect: img.getBoundingClientRect() },
+                viewport,
+              ),
+            ).length;
+          },
+        },
+        timeoutMs,
+        quietMs,
+      );
     },
   };
   return driver;
