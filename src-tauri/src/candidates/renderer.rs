@@ -25,6 +25,7 @@ pub fn error(message: impl Into<String>) -> CoreImageError {
 
 /// Canonical scratch parent. Application calls obtain this only through the app-data validator;
 /// standalone renderer tests and benchmarks may explicitly construct a regular directory.
+#[derive(Clone)]
 pub(super) struct ScratchParent(PathBuf);
 impl ScratchParent {
     pub(super) fn for_app_data(app_data_dir: &Path) -> Result<Self, CoreImageError> {
@@ -45,9 +46,9 @@ impl ScratchParent {
 }
 
 /// この実行が新規作成した一時ディレクトリだけを回収する（成功・エラー・panic 共通）。
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 impl Scratch {
-    fn new(parent: &ScratchParent) -> Result<Self, CoreImageError> {
+    pub(super) fn new(parent: &ScratchParent) -> Result<Self, CoreImageError> {
         loop {
             let path = parent.0.join(format!(
                 "pso-{}-{}",

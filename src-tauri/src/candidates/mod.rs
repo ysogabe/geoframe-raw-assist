@@ -3,6 +3,9 @@
 pub(crate) mod command;
 mod pso;
 mod renderer;
+mod roi;
+mod native_diagnostics;
+mod request_identity;
 
 mod image_ops;
 pub mod metrics;

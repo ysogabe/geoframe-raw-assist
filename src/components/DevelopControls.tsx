@@ -1,7 +1,7 @@
 import { DevelopmentCandidates } from "./DevelopmentCandidates";
 import type { DevelopMode, EngineStatus } from "../lib/app-state";
 import { NOISE_REDUCTION_LABELS, SLIDER_SPECS } from "../lib/format";
-import type { Adjustments, DevelopmentCandidate, DevelopmentCandidatesResponse, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
+import type { Adjustments, DevelopmentCandidate, DevelopmentCandidatesResponse, DevelopmentCandidatesProgress, NoiseReduction, PresetInfo, PresetName } from "../lib/types";
 
 type DevelopControlsProps = {
   engineStatus: EngineStatus;
@@ -23,7 +23,8 @@ type DevelopControlsProps = {
   candidatesResponse: DevelopmentCandidatesResponse | null;
   candidatesBusy: boolean;
   candidatesError: string;
-  onGenerateCandidates: () => void;
+  candidatesProgress?: DevelopmentCandidatesProgress | null;
+  onGenerateCandidates: (nativeRoiDiagnostics: boolean) => void;
   onApplyCandidate: (candidate: DevelopmentCandidate) => void;
   onDevelop: (mode: DevelopMode) => void;
   developMode: DevelopMode | null;
@@ -48,6 +49,7 @@ export function DevelopControls({
   candidatesResponse,
   candidatesBusy,
   candidatesError,
+  candidatesProgress,
   onGenerateCandidates,
   onApplyCandidate,
   onDevelop,
@@ -147,6 +149,8 @@ export function DevelopControls({
           starScene={candidatesResponse?.star_scene ?? null}
           busy={candidatesBusy}
           error={candidatesError}
+          progress={candidatesProgress}
+          diagnostic={candidatesResponse?.native_roi_diagnostics}
           disabled={disabled || developMode !== null || mergeBusy}
           onGenerate={onGenerateCandidates}
           onApply={onApplyCandidate}
