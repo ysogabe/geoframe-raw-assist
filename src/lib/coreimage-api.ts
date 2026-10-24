@@ -54,6 +54,15 @@ export function engineInfoLabel(info: Pick<EngineInfo, "cli_version" | "macos_ve
   return `Core Image ${info.cli_version} / macOS ${info.macos_version}`;
 }
 
+/** 計測コードの例外を握りつぶす（計測は製品の結果に影響させない）。 */
+function bestEffort<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
 /** 選択中カットを Core Image でプレビュー現像する。失敗時は CoreImageError を throw する。 */
 export async function developPreviewCoreImage(
   captureId: CaptureId,
@@ -62,21 +71,25 @@ export async function developPreviewCoreImage(
   timing?: { handlerEntryMs?: number },
 ): Promise<CoreImagePreviewResult> {
   // 任意計測（既定 OFF。preview-timing.ts）。OFF のとき timer は null で、以下は invoke だけになる。
-  const timer = previewTiming.begin({ captureId, handlerEntryMs: timing?.handlerEntryMs });
+  // 計測は best effort: 計測側の例外で、成功した invoke の結果や本来の invoke エラーを変えない。
+  const timer = bestEffort(() => previewTiming.begin({ captureId, handlerEntryMs: timing?.handlerEntryMs }));
+  let result: CoreImagePreviewResult;
   try {
-    const result = await invoke<CoreImagePreviewResult>("develop_preview_coreimage", { captureId, adjustments });
+    result = await invoke<CoreImagePreviewResult>("develop_preview_coreimage", { captureId, adjustments });
+  } catch (error) {
+    bestEffort(() => timer?.invokeFailed(coreImageErrorOf(error)?.code ?? "UNKNOWN"));
+    throw error;
+  }
+  bestEffort(() =>
     timer?.invokeReturned({
       displayUrl: convertFileSrc(result.output_path),
       cacheHit: result.cache_hit,
       elapsed: result.elapsed_ms,
       width: result.width,
       height: result.height,
-    });
-    return result;
-  } catch (error) {
-    timer?.invokeFailed(coreImageErrorOf(error)?.code ?? "UNKNOWN");
-    throw error;
-  }
+    }),
+  );
+  return result;
 }
 
 /** 選択中カットを原寸現像する。max_edge は付けず CLI の full を使う。 */

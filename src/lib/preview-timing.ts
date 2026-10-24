@@ -112,16 +112,21 @@ export function createPreviewTimingRecorder(deps: PreviewTimingDeps) {
 
   function finish(id: string, context: PreviewTimingContext, preInvoke: number | null, row: Rest) {
     const fromHandler = preInvoke !== null;
-    deps.sink({
-      request_id: id,
-      capture_id: context.captureId,
-      origin: fromHandler ? "button_handler" : "api_call",
-      kind: fromHandler ? "manual_preview_button_to_image" : "api_call_to_image",
-      pre_invoke_ms: preInvoke,
-      paint_proxy: PAINT_PROXY_NOTE,
-      origin_to_raf_ms: null,
-      ...row,
-    });
+    // sink（console / バッファ）の失敗も計測の外に出さない。
+    try {
+      deps.sink({
+        request_id: id,
+        capture_id: context.captureId,
+        origin: fromHandler ? "button_handler" : "api_call",
+        kind: fromHandler ? "manual_preview_button_to_image" : "api_call_to_image",
+        pre_invoke_ms: preInvoke,
+        paint_proxy: PAINT_PROXY_NOTE,
+        origin_to_raf_ms: null,
+        ...row,
+      });
+    } catch {
+      // 計測は best effort
+    }
   }
 
   function rowBase(outcome: PreviewInvokeOutcome | null, invokeWall: number) {
@@ -194,7 +199,13 @@ export function createPreviewTimingRecorder(deps: PreviewTimingDeps) {
     deps.clearTimer(current.entry.timer);
     const { id, entry } = current;
     const tLoad = deps.now();
-    void decode().then(
+    let decoded: Promise<void>;
+    try {
+      decoded = decode();
+    } catch (error) {
+      decoded = Promise.reject(error);
+    }
+    void decoded.then(
       () => {
         const tDecode = deps.now();
         deps.requestFrame(() => {
@@ -225,7 +236,16 @@ export function createPreviewTimingRecorder(deps: PreviewTimingDeps) {
     );
   }
 
-  return { begin, imageLoaded, now: deps.now };
+  /** ハンドラ入口の時刻。取得に失敗しても製品の処理を止めない（undefined = 起点なし）。 */
+  function now(): number | undefined {
+    try {
+      return deps.now();
+    } catch {
+      return undefined;
+    }
+  }
+
+  return { begin, imageLoaded, now };
 }
 
 declare global {

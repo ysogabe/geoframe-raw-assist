@@ -802,6 +802,7 @@ if check_tiff "$req"; then cp "$BASE" "$out"; ok "$out" ""; else bad "tiff contr
         // 公開 JSON に一時ディレクトリのパスや画素列を出さない。定義は JPEG と別単位・閾値未定義を明記。
         let text = report.to_string();
         assert!(!text.contains(&std::env::temp_dir().to_string_lossy().into_owned()), "path leaked");
+        assert!(!text.contains("sha8"), "source path hash must not be recorded");
         assert!(report["definitions"]["not_a_quality_threshold"].as_str().unwrap().contains("閾値は未定義"));
         assert!(report["definitions"]["separate_from_jpeg"].as_str().unwrap().contains("別単位"));
         // 既定では TIFF を残さない

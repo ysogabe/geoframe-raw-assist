@@ -396,16 +396,27 @@ fn probe_rss(ctx: &Ctx<'_>) -> Value {
     let output = out_path(ctx, "rss_probe", 0);
     let body = request_body(ctx.input, &ctx.series.steps[0], &output);
     let sidecar = ctx.cfg.sidecar.to_string_lossy().into_owned();
-    match run_sidecar(Path::new("/usr/bin/time"), &["-l", &sidecar], Some(body.as_bytes()), ctx.cfg.timeout) {
+    let result = run_sidecar(Path::new("/usr/bin/time"), &["-l", &sidecar], Some(body.as_bytes()), ctx.cfg.timeout);
+    let value = match result {
         Ok(out) => {
-            let mut v = parse_time_l(&out.stderr);
-            v["measured"] = json!(v["max_resident_set_bytes"].is_u64());
-            v["note"] = json!("単発 1 リクエストの別走行（計時対象外）。1 プロセス 1 リクエストのピーク");
-            let _ = fs::remove_file(&output);
-            v
+            // 即時失敗した CLI の小さな RSS を測定値にしない。子の終了状態・応答の ok=true・出力画像の存在を確かめる。
+            let succeeded = out.status.success()
+                && parse_response(&out).is_ok_and(|r| r.get("ok") == Some(&Value::Bool(true)))
+                && output.is_file();
+            if succeeded {
+                let mut v = parse_time_l(&out.stderr);
+                v["measured"] = json!(v["max_resident_set_bytes"].is_u64());
+                v["note"] = json!("単発 1 リクエストの別走行（計時対象外）。1 プロセス 1 リクエストのピーク");
+                v
+            } else {
+                json!({"measured": false,
+                    "reason": "probe run did not succeed (exit status / ok=true / output image); RSS discarded"})
+            }
         }
         Err(e) => json!({"measured": false, "reason": e.code}),
-    }
+    };
+    let _ = fs::remove_file(&output);
+    value
 }
 
 fn run_single_cli(ctx: &Ctx<'_>) -> MethodRun {
@@ -520,7 +531,10 @@ fn run_rust_develop(ctx: &Ctx<'_>, want_miss: bool, want_hit: bool) -> (Option<M
                             }
                             hit.last_outputs.insert(step, PathBuf::from(r.output_path));
                         }
-                        Err(e) => rec.error_code = Some(rep_is_error(&e)),
+                        Err(e) => {
+                            hit.note_error(&e.code);
+                            rec.error_code = Some(rep_is_error(&e));
+                        }
                     }
                     hit.recs.push(rec);
                 }
@@ -817,8 +831,6 @@ fn filesystem_evidence(path: &Path, label: &str) -> Value {
     let mount = Command::new("/sbin/mount").output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
     let detected = mount.as_deref().and_then(|m| mount_fstype(m, &canonical));
-    let path_digest: String = Sha256::digest(canonical.to_string_lossy().as_bytes())
-        .iter().take(4).map(|b| format!("{b:02x}")).collect();
     let (fstype, is_network, root) = match &detected {
         Some((t, root)) => (Some(t.clone()), Some(is_network_fstype(t)), Some(*root)),
         None => (None, None, None),
@@ -833,8 +845,7 @@ fn filesystem_evidence(path: &Path, label: &str) -> Value {
         "detected_is_network": is_network,
         "mount_point_is_root": root,
         "label_mismatch_warning": mismatch.unwrap_or(false),
-        "source_path_sha8": path_digest,
-        "note": "fstype は mount 出力の最長一致。デバイス名・マウントパスは私的情報を含みうるので記録しない",
+        "note": "fstype は mount 出力の最長一致。デバイス名・マウントパス・素材パスのハッシュは私的情報から推測できるので記録しない",
     })
 }
 
@@ -1036,6 +1047,11 @@ mod tests {
         assert_eq!(t, "apfs");
         let evidence = filesystem_evidence(Path::new("/"), "local");
         assert!(!evidence.to_string().contains("alice"));
+        // 素材パスから推測できるハッシュ等も記録しない（キーは固定の集合だけ）。
+        let mut keys: Vec<&str> = evidence.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["detected_fstype", "detected_is_network", "label_mismatch_warning",
+            "mount_point_is_root", "note", "user_label"]);
     }
 
     #[test]
@@ -1157,6 +1173,7 @@ ok "$out" ""
         let text = report.to_string();
         // 私的な絶対パス（一時ディレクトリ）が JSON に漏れていない。
         assert!(!text.contains(&std::env::temp_dir().to_string_lossy().into_owned()), "path leaked");
+        assert!(!text.contains("sha8"), "source path hash must not be recorded");
         for series in ["t_decode", "t_post"] {
             for name in ALL_METHODS {
                 let m = method(&report, series, name);
@@ -1229,6 +1246,41 @@ ok "$out" ""
         assert_eq!(method(&report, "t_err", "batch_stateless")["restarts"], json!(1));
         assert_eq!(method(&report, "t_err", "batch_decode_render")["restarts"], json!(1));
         assert_eq!(method(&report, "t_err", "single_cli")["restarts"], json!(0));
+    }
+
+    fn probe_ctx<'a>(cfg: &'a BenchConfig, series: &'a Series, input: &'a Path, dir: &Path) -> Ctx<'a> {
+        Ctx { cfg, capture_id: "DSC00001", input, series, images_dir: dir.join("images"), app_data_root: dir.join("app") }
+    }
+
+    #[test]
+    fn rss_probe_reports_only_for_a_successful_probe_run() {
+        let (dir, mut cfg) = fake_setup("rss");
+        cfg.rss_probe = true;
+        fs::create_dir_all(dir.path().join("images")).unwrap();
+        let input = cfg.source_root.join("DSC00001.ARW");
+        // 成功する CLI: 最大 RSS が測定値になる。
+        let ok_series = numeric_series("rss_ok", SeriesClass::DecodeChanging, "exposure", &[0.0]);
+        let ok = probe_rss(&probe_ctx(&cfg, &ok_series, &input, dir.path()));
+        assert_eq!(ok["measured"], json!(true), "{ok}");
+        assert!(ok["max_resident_set_bytes"].as_u64().unwrap() > 0);
+        // 即時失敗する CLI（構造化エラー + 終了コード 1）: 小さな RSS を測定値にしない。
+        let bad_series = numeric_series("rss_bad", SeriesClass::DecodeChanging, "exposure", &[1.5]);
+        let bad = probe_rss(&probe_ctx(&cfg, &bad_series, &input, dir.path()));
+        assert_eq!(bad["measured"], json!(false), "{bad}");
+        assert!(bad.get("max_resident_set_bytes").is_none() && bad.get("peak_memory_footprint_bytes").is_none());
+        assert!(bad["reason"].as_str().unwrap().contains("did not succeed"));
+        // ok=true を返すが画像を書かない CLI も測定値にしない。
+        let silent = dir.path().join("silent-cli");
+        fs::write(&silent, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"x\"}'\n").unwrap();
+        fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut silent_cfg = fake_setup("rss-silent").1;
+        silent_cfg.sidecar = silent;
+        silent_cfg.rss_probe = true;
+        let none = probe_rss(&probe_ctx(&silent_cfg, &ok_series, &input, dir.path()));
+        assert_eq!(none["measured"], json!(false), "{none}");
+        // 無効化時は測らない。
+        cfg.rss_probe = false;
+        assert_eq!(probe_rss(&probe_ctx(&cfg, &ok_series, &input, dir.path()))["measured"], json!(false));
     }
 
     /// 実素材ベンチ（親が実行）。手順: docs/reports/coreimage-preview-transport-bench.md
