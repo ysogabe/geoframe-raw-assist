@@ -17,7 +17,7 @@ const eslintConfig = defineConfig([
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
   },
-  globalIgnores(["dist/**", "src-tauri/target/**"]),
+  globalIgnores(["dist/**", "dist-bench/**","src-tauri/target/**"]),
 ]);
 
 export default eslintConfig;

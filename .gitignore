@@ -21,6 +21,9 @@ yarn-error.log*
 
 # typescript
 /dist/
+/dist-bench/
+# 閲覧ベンチ(#141)の fixture(manifest + 生成済みサムネ)。写真・個人 EXIF は git に入れない。
+/bench-fixtures/
 /outputs/
 /work/
 /sample/
