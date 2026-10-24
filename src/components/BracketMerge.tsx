@@ -1,5 +1,6 @@
 import type { RefObject } from "react";
 import {
+  acceptedMergeLabel,
   type AcceptedMergeView,
   MERGE_MAX_FRAMES,
   MERGE_MIN_FRAMES,
@@ -165,9 +166,7 @@ export function BracketMerge({
           <button type="button" className="accept-toggle on" aria-pressed="true" onClick={onRemovePreviousAccepted}>
             以前の設定の採用を外す
           </button>
-          <small>
-            採用済み（以前の設定{previousAccepted.result ? `、${previousAccepted.result.frames}枚` : "、成果物なし"}）
-          </small>
+          <small>{acceptedMergeLabel(previousAccepted)}</small>
         </div>
       )}
 
