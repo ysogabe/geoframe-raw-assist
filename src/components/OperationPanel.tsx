@@ -1,5 +1,5 @@
 import { useRef, type RefObject } from "react";
-import type { AcceptedMergeView, DevelopMode, EngineStatus, ViewerGallery, ViewerSource, ViewingItem } from "../lib/app-state";
+import { acceptedMergeLabel, comparisonSurfaceOf, type AcceptedMergeView, type DevelopMode, type EngineStatus, type ViewerGallery, type ViewerSource, type ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -168,10 +168,9 @@ export function OperationPanel({
   // App 側で「今の選択・プリセット・調整に合う結果」だけに絞って渡している。
   // 本合成があればそれを、無ければプレビューを見せる。
   const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
-  const canToggleComparison = Boolean(developResult && mergedResult);
   const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
-  const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
-  const result = showMerged ? mergedResult : developResult;
+  // 合成を見せるのは viewing が merged のときだけ（写真が未現像でも合成へ黙って切り替えない）。
+  const { showMerged, result, canToggle: canToggleComparison } = comparisonSurfaceOf(viewing, mergedResult, developResult);
 
   /**
    * 原寸ビューアの送り輪を組み立てる。**グループを跨いだ全写真**を一覧と同じ並び順で並べ、
@@ -281,9 +280,7 @@ export function OperationPanel({
                   {previousAcceptedMerge.result ? <img src={previousAcceptedMerge.result.output_url} alt="以前の設定で採用した合成" decoding="async" /> :
                     <span className="shot-well"><b aria-hidden="true">▤</b><em>成果物なし</em></span>}
                 </button>
-                <span className="merged-tag">
-                  採用済み（以前の設定{previousAcceptedMerge.result ? `、${previousAcceptedMerge.result.frames}枚` : ""}）
-                </span>
+                <span className="merged-tag">{acceptedMergeLabel(previousAcceptedMerge)}</span>
                 <button type="button" className="shot-accept" aria-pressed="true"
                   aria-label="以前の設定で採用した合成の採用を外す"
                   onClick={onRemovePreviousAcceptedMerge}><span aria-hidden="true">✓</span></button>

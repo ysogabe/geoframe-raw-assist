@@ -593,12 +593,17 @@ export function reducer(state: State, action: Action): State {
     case "screen/operation": {
       // グループ切替とプリセット/スライダーの初期化は 1 アクションで行う（effect 内での setState を避ける）。
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);
+      // 合成済みのグループへ戻るときは、その合成を作ったプリセット・調整を操作値へ復元する。
+      // 毎回推薦プリセット + 空の overrides へ戻すと、非既定の recipe で作った結果が
+      // 他グループを見て戻っただけで「今の設定に合わない」扱いになる。復元できなければ
+      // （未合成の初回・フレーム違い・古い recipe）従来どおり推薦プリセットから始める。
+      const restored = group ? restoredMergeRecipeOf(state, group) : null;
       return {
         ...state,
         screen: "operation",
         selectedGroupId: action.groupId,
-        presetName: suggestPreset(state.presets, group),
-        overrides: {},
+        presetName: restored?.presetName ?? suggestPreset(state.presets, group),
+        overrides: restored?.overrides ?? {},
         // 別グループ・別プリセットの候補を持ち越さない。生成中（busy）の応答は
         // captureId を残して受け取るが、表示・適用時に capture_id / preset を照合する。
         ...clearedCandidateResult(),
@@ -1107,6 +1112,89 @@ export function currentMergeResultsOf(
   const preview = pick(state.mergePreviewResults);
   const full = pick(state.mergeFullResults);
   return { preview, full, shown: full ?? preview };
+}
+
+const ADJUSTMENT_NUMERIC_KEYS: (keyof Adjustments)[] = [
+  "exposure",
+  "wb_temp",
+  "shadow_lift",
+  "highlight_recovery",
+  "brightness",
+  "contrast",
+  "saturation",
+  "sharpness",
+];
+const NOISE_REDUCTION_VALUES: readonly string[] = ["off", "light", "full"];
+
+/** 9 キーすべてが揃い、数値キーが有限数・noise_reduction が既知の値である recipe か。 */
+function isCompleteRecipe(value: unknown): value is Adjustments {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recipe = value as Record<string, unknown>;
+  return (
+    ADJUSTMENT_NUMERIC_KEYS.every((key) => typeof recipe[key] === "number" && Number.isFinite(recipe[key])) &&
+    typeof recipe.noise_reduction === "string" &&
+    NOISE_REDUCTION_VALUES.includes(recipe.noise_reduction)
+  );
+}
+
+/**
+ * そのグループの保存済み合成結果から復元できる操作値（プリセット + 既定との差分）。無ければ null。
+ *
+ * 対象は **現在のフレーム集合に合う** 結果だけで、本合成を優先し、無い（または復元できない）ときだけ
+ * プレビューを使う。フレームの違う古い本合成を優先すると、今のフレームで作った新しい
+ * プレビューの設定を消してしまうため。プリセットが一覧に無い・recipe が 9 キー揃っていない
+ * 古い結果は復元せず（null）、呼び出し側が従来の既定へ倒す。
+ *
+ * overrides は **プリセット既定と違うキーだけ**。全キーを入れると、既定と同じ値まで「変更あり」
+ * 扱いになり、グループ移動の確認ダイアログが人工的に出る。復元後の操作値は
+ * resolveAdjustments の結果が結果の recipe と全キー一致するので、共通 selector
+ * （isMergeResultCurrent）をそのまま満たす。結果を current と偽装して返すのではない。
+ */
+function restoredMergeRecipeOf(
+  state: State,
+  group: GroupInfo,
+): { presetName: PresetName; overrides: Partial<Adjustments> } | null {
+  const frames = mergeFramesOf(state, group);
+  for (const results of [state.mergeFullResults, state.mergePreviewResults]) {
+    const result = groupMergeResultOf(results, group);
+    if (!result) continue;
+    if (result.capture_ids.length !== frames.length || !frames.every((id) => result.capture_ids.includes(id))) {
+      continue;
+    }
+    const preset = presetFor(state.presets, result.preset);
+    if (!preset || !isCompleteRecipe(result.adjustments)) continue;
+    const overrides: Partial<Adjustments> = {};
+    for (const key of [...ADJUSTMENT_NUMERIC_KEYS, "noise_reduction" as const]) {
+      if (result.adjustments[key] !== preset.adjustments[key]) Object.assign(overrides, { [key]: result.adjustments[key] });
+    }
+    return { presetName: preset.name, overrides };
+  }
+  return null;
+}
+
+/**
+ * 比較エリアに出す面。**カーソルが merged のときだけ** 合成を見せる。
+ *
+ * 写真を見ているのに、その写真が未現像だからと合成へ黙って切り替えると、SELECTED PHOTO・EXIF・
+ * 写真の採用先は写真のまま、比較エリアだけ合成になる。写真が未現像なら比較エリアは空にし、
+ * 面の切り替え（タブ）は現像結果と合成結果が両方あるときだけ出す。
+ */
+export function comparisonSurfaceOf<M, D>(
+  viewing: ViewingItem,
+  mergedResult: M | undefined,
+  developResult: D | undefined,
+): { showMerged: boolean; result: M | D | undefined; canToggle: boolean } {
+  const showMerged = viewing.kind === "merged" && mergedResult !== undefined;
+  return {
+    showMerged,
+    result: showMerged ? mergedResult : developResult,
+    canToggle: developResult !== undefined && mergedResult !== undefined,
+  };
+}
+
+/** 採用済みの合成の表示ラベル（タイルと合成パネルで同じ短い表現にそろえる）。 */
+export function acceptedMergeLabel(view: AcceptedMergeView): string {
+  return `採用済み（以前の設定、${view.result ? `${view.result.frames}枚` : "成果物なし"}）`;
 }
 
 /**
