@@ -665,9 +665,13 @@ export function reducer(state: State, action: Action): State {
         };
       }
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);
-      // 新規採用は、現在のグループに属する本合成だけ許可する。プレビュー結果や
-      // 別グループ/古いcapture IDを action から直接渡しても書き出し対象にしない。
-      if (!group || !mergedResultFor(state.mergeFullResults, group, action.leadCaptureId)) return state;
+      // 新規採用は、選択中のグループの **今の合成設定に合う本合成** だけ許可する。
+      // プレビュー結果・別グループ・古い capture ID に加えて、フレーム選択/プリセット/調整が
+      // 変わって合わなくなった古い本合成も、action を直接渡されて書き出し対象にしない
+      // （UI のボタンが無効でも reducer 単体で守る。取り消しは上の already 分岐が先に通す）。
+      if (!group || state.selectedGroupId !== group.id) return state;
+      const full = currentMergeResultsOf(state, group).full;
+      if (!full || full.capture_ids[0] !== action.leadCaptureId) return state;
       // 新規採用は **同じグループの古い合成採用を置き換える**（増やさない）。
       //
       // 置き換えないと孤児が残る: グループGでリード=Xの合成を採用したあと、フレームを
@@ -1003,12 +1007,34 @@ export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
   // 先頭フレームは **今の選択・プリセット・調整に合う合成結果** から取る。raw な本合成を
   // 優先すると、フレームを選び直して新しいプレビューを作ったあとも古い本合成の先頭を
   // 返し、画面に出ている合成と SELECTED PHOTO / EXIF / 写真の採用先が別の写真になる。
-  // 合う結果が無いときは今の選択の先頭フレームを見る。
+  // 合う結果が無いときは今の選択の先頭フレームを見る。frames は選択順、合成結果の
+  // capture_ids はサーバが昇順に正規化したものなので、選択順が昇順でないと合成結果が
+  // 合っている間と合っていない間で先頭が入れ替わりうる。これは「合っていない間は
+  // 今の選択の先頭を写真として見せる」という明示的な表示上のフォールバックで、
+  // effectiveViewingOf が写真面として扱う。採用の宛先（mergedAcceptTargetOf）は
+  // 合成結果の先頭だけを使うので、このフォールバックが採用先を動かすことはない。
   const shown = currentMergeResultsOf(state, group).shown;
   const lead = [shown?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
     (captureId) => captureId !== undefined && group.capture_ids.includes(captureId),
   );
   return lead ?? group.recommended_capture_id;
+}
+
+/**
+ * 実際に画面へ出している面。
+ *
+ * 保存されたカーソルが merged でも、今の設定に合う合成結果が無ければ画面に出るのは
+ * viewingCaptureOf が返す写真（今の選択の先頭フレーム）になる。カーソルのまま渡すと、
+ * 表示は写真なのに合成タイルが「表示中」のままで、実際に出ている写真のタイルに印が付かない。
+ * 表示・SELECTED PHOTO・EXIF・採用先は、この関数が返す面に揃える。
+ * 保存されたカーソル自体は書き換えない（合成結果が合い直せば merged の表示へ戻る）。
+ */
+export function effectiveViewingOf(state: State, group: GroupInfo): ViewingItem {
+  const viewing = viewingOf(state, group);
+  if (viewing.kind === "merged" && !currentMergeResultsOf(state, group).shown) {
+    return { kind: "photo", captureId: viewingCaptureOf(state, group) };
+  }
+  return viewing;
 }
 
 /**
@@ -1050,9 +1076,12 @@ export function isMergeResultCurrent(state: State, group: GroupInfo, result: Mer
   if (state.selectedGroupId !== group.id) return true;
   const adjustments = effectiveAdjustments(state);
   if (!adjustments || result.preset !== state.presetName) return false;
-  return (Object.keys(adjustments) as (keyof Adjustments)[]).every(
-    (key) => result.adjustments[key] === adjustments[key],
-  );
+  // 古い recipe 由来の結果は adjustments が null / undefined / 配列などで来うる。
+  // 照合できない結果を「合っている」とは推定せず、落とさずに合わないものとして扱う。
+  const recipe: unknown = result.adjustments;
+  if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return false;
+  const recorded = recipe as Partial<Adjustments>;
+  return (Object.keys(adjustments) as (keyof Adjustments)[]).every((key) => recorded[key] === adjustments[key]);
 }
 
 /**
@@ -1081,19 +1110,51 @@ export function currentMergeResultsOf(
 }
 
 /**
- * 合成の採用ボタンが操作する先頭フレーム。操作できないなら undefined。
+ * 合成タイルの採用ボタン（新規採用・取り消し）が操作する先頭フレーム。操作できないなら undefined。
  *
- * - 新規採用: 今の設定に合う本合成だけ。
- * - 取り消し: 今の設定に合わなくなっていても、**すでに採用済み**のグループの本合成なら対象にする。
- *
- * 合わなくなった本合成が未採用のままなら、どちらにも当たらず undefined（採用できない）。
+ * 宛先は **今の設定に合う本合成だけ**。合わなくなった本合成は、未採用なら新規採用させず、
+ * 採用済みでもこのボタンの宛先にしない（現在の画像と別物の採用を、同じボタンで外すと
+ * 何をトグルしているか分からなくなる）。採用済みの古い成果物の取り消しは
+ * acceptedMergeOf の leadCaptureId を使う専用の導線が持つ。
  */
 export function mergedAcceptTargetOf(state: State, group: GroupInfo): CaptureId | undefined {
-  const current = currentMergeResultsOf(state, group).full;
-  if (current) return current.capture_ids[0];
-  const accepted = groupMergeResultOf(state.mergeFullResults, group);
-  const lead = accepted?.capture_ids[0];
-  return lead !== undefined && isMergedAccepted(state, group.id, lead) ? lead : undefined;
+  return currentMergeResultsOf(state, group).full?.capture_ids[0];
+}
+
+/** 採用済みの合成（採用時のスナップショット）と、今の合成設定との関係。 */
+export type AcceptedMergeView = {
+  /** accept/merged で取り消すときの先頭フレーム。 */
+  leadCaptureId: CaptureId;
+  /** 採用した成果物。再合成などで引けなくなっていれば undefined（取り消しだけできる）。 */
+  result: MergedResult | undefined;
+  /** 採用した成果物が、今の選択・プリセット・調整に合う本合成そのものか。 */
+  isCurrent: boolean;
+};
+
+/**
+ * そのグループで採用済みの合成。無ければ undefined。
+ *
+ * currentMergeResultsOf は **今の設定に合うものだけ** を返し、こちらは **採用時のスナップショット**
+ * を返す。両者を黙って入れ替えない: 採用が今の画像と別物のとき（isCurrent が false）は、
+ * ✓ を今表示している合成に付けず、「採用済み（以前の設定）」として別に見せる。
+ * 引き直しは mergedResultFor と同じ（グループの現在の本合成の先頭フレームが一致するか）。
+ * 再結合で同じグループに採用が複数同居するときは、成果物を引けるものを優先する。
+ */
+export function acceptedMergeOf(state: State, group: GroupInfo): AcceptedMergeView | undefined {
+  const items = state.accepted.filter(
+    (item): item is AcceptedMerged => item.kind === "merged" && item.groupId === group.id,
+  );
+  if (items.length === 0) return undefined;
+  const currentFull = currentMergeResultsOf(state, group).full;
+  const resolved = items
+    .map((item) => ({ item, result: mergedResultFor(state.mergeFullResults, group, item.leadCaptureId) }))
+    .find((entry) => entry.result !== undefined);
+  if (!resolved) return { leadCaptureId: items[0].leadCaptureId, result: undefined, isCurrent: false };
+  return {
+    leadCaptureId: resolved.item.leadCaptureId,
+    result: resolved.result,
+    isCurrent: resolved.result === currentFull,
+  };
 }
 
 /**
