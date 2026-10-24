@@ -373,6 +373,49 @@ export type DevelopmentCandidate = {
   reasons: string[];
 };
 
+/** 原寸ROIの観測値。完了は画質の合格・採用を意味しない。 */
+export type NativeRoiStatus = "not_run" | "missing" | "failed" | "complete";
+export type NativeRoiMetrics = { detail: number; noise_flat: number; halo: number };
+export type NativeRoiDiagnostic = {
+  status: NativeRoiStatus;
+  reason: string | null;
+  rois: { name: string; status: "selected" | "missing"; normalized: number[] | null; reason: string | null }[];
+  unique_settings: number;
+  renders: number;
+  elapsed_ms: { total: number };
+  sets: {
+    candidate_ids: DevelopmentCandidateStyle[];
+    adjustments: Adjustments;
+    status: Exclude<NativeRoiStatus, "not_run">;
+    reason: string | null;
+    dimensions?: [number, number];
+    total_ms: number;
+    render_ms?: number;
+    crop_ms?: number;
+    metrics_ms?: number;
+    rois: {
+      name: string;
+      normalized: number[];
+      status: "complete" | "failed";
+      reason: string | null;
+      /** x, y, width, height (原寸画素)。 */
+      pixels?: [number, number, number, number];
+      absolute?: NativeRoiMetrics;
+      delta_vs_natural?: NativeRoiMetrics;
+      bands?: { band_px: number; band_matched: number; band_matched_sigma: number; grad_mean: number; mean_luma: number };
+      bands_delta_vs_natural?: { band_px: number; band_matched: number };
+    }[];
+  }[];
+};
+
+export type DevelopmentCandidatesProgress = {
+  capture_id: CaptureId;
+  preset: PresetName;
+  stage: string;
+  completed: number;
+  total: number;
+};
+
 export type DevelopmentCandidatesRequest = {
   capture_id: CaptureId;
   preset: PresetName;
@@ -380,6 +423,8 @@ export type DevelopmentCandidatesRequest = {
   seed?: number;
   /** 32〜512。省略時48。 */
   budget?: number;
+  /** 明示ONだけ原寸ROIを観測する。既定OFF、候補採否に影響しない。 */
+  native_roi_diagnostics?: boolean;
 };
 
 export type DevelopmentCandidatesResponse = {
@@ -401,6 +446,7 @@ export type DevelopmentCandidatesResponse = {
   };
   elapsed_ms: { total: number; decode: number; render: number };
   star_scene: StarSceneInfo;
+  native_roi_diagnostics: NativeRoiDiagnostic;
   candidates: DevelopmentCandidate[];
   /** 基準より白飛び・黒つぶれ等が悪化したため返さなかった候補と、その理由。 */
   rejected: { id: DevelopmentCandidateStyle; reason: string }[];

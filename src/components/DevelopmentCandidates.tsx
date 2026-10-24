@@ -1,6 +1,9 @@
+import { useState } from "react";
 import { candidateStyleLabel, summarizeStarScene } from "../lib/candidate-view";
 import type {
   DevelopmentCandidate,
+  DevelopmentCandidatesProgress,
+  NativeRoiDiagnostic,
   DevelopmentCandidateMetrics,
   DevelopmentCandidateStyle,
   StarSceneInfo,
@@ -13,7 +16,9 @@ type DevelopmentCandidatesProps = {
   busy: boolean;
   error: string;
   disabled: boolean;
-  onGenerate: () => void;
+  progress?: DevelopmentCandidatesProgress | null;
+  diagnostic?: NativeRoiDiagnostic;
+  onGenerate: (nativeRoiDiagnostics: boolean) => void;
   onApply: (candidate: DevelopmentCandidate) => void;
 };
 
@@ -59,9 +64,12 @@ export function DevelopmentCandidates({
   busy,
   error,
   disabled,
+  progress,
+  diagnostic,
   onGenerate,
   onApply,
 }: DevelopmentCandidatesProps) {
+  const [nativeRoi, setNativeRoi] = useState(false);
   return (
     <section className="development-candidates" aria-labelledby="development-candidates-title">
       <div className="development-candidates-head">
@@ -72,13 +80,32 @@ export function DevelopmentCandidates({
         <button
           type="button"
           className="secondary-action candidate-generate"
-          onClick={onGenerate}
+          onClick={() => onGenerate(nativeRoi)}
           disabled={disabled || busy}
           aria-busy={busy}
         >
-          {busy ? "候補を探索中…" : candidates.length > 0 ? "候補を作り直す" : "自動候補を作る"}
+          {busy ? (progress?.stage === "native_roi" ? "原寸ROIを診断中…" : "候補を探索中…") : candidates.length > 0 ? "候補を作り直す" : "自動候補を作る"}
         </button>
       </div>
+      <label>
+        <input type="checkbox" checked={nativeRoi} onChange={(event) => setNativeRoi(event.target.checked)} disabled={disabled || busy} />
+        最終候補の原寸ROIも診断する（時間がかかります・採否は変わりません）
+      </label>
+      {busy && progress && <p role="status">{progress.stage === "native_roi" ? "探索完了・原寸ROI" : progress.stage === "done" ? "完了" : "代理画像を探索中"} {progress.completed}/{progress.total}</p>}
+      {diagnostic && <details>
+        <summary>原寸ROI診断: {{ not_run: "未実行", missing: "欠測", failed: "失敗", complete: "完了（画質合格の判定なし）" }[diagnostic.status]}</summary>
+        <p>{diagnostic.reason ?? "naturalとの同一ROI比較を記録しました。"} / 原寸現像{diagnostic.renders}回 / {(diagnostic.elapsed_ms.total / 1000).toFixed(1)}秒</p>
+        {diagnostic.rois.filter((roi) => roi.status === "missing").map((roi) => <p key={roi.name}>{roi.name}: 欠測（{roi.reason}）</p>)}
+        {diagnostic.sets.map((set) => <div key={set.candidate_ids.join(",")}>
+          <strong>{set.candidate_ids.map(candidateStyleLabel).join(" / ")}</strong>
+          {set.reason && <p>{set.reason}</p>}
+          {set.rois.map((roi) => <p key={roi.name}>
+            {roi.name} {roi.pixels?.join(", ")}：{roi.absolute && roi.delta_vs_natural
+              ? `細部 ${roi.absolute.detail.toFixed(6)} (Δ${roi.delta_vs_natural.detail.toFixed(6)}) / ノイズ ${roi.absolute.noise_flat.toFixed(6)} (Δ${roi.delta_vs_natural.noise_flat.toFixed(6)}) / ハロー ${roi.absolute.halo.toFixed(6)} (Δ${roi.delta_vs_natural.halo.toFixed(6)})`
+              : roi.reason}
+          </p>)}
+        </div>)}
+      </details>}
       {error && <p className="candidate-error" role="alert">{error}</p>}
       {candidates.length > 0 && (
         <div className="development-candidate-list">

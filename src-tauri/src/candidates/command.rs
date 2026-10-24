@@ -1,7 +1,8 @@
 use super::{
     image_ops::{gaussian, std},
-    pso,
+    native_diagnostics, pso,
     renderer::{error, Evaluator, Renderer, ScratchParent, MAX_EDGE},
+    request_identity::RequestIdentity,
     selection::{guard_failure, reasons, score},
     stars::{detect_star_scene, ExifHints},
     RgbImage,
@@ -128,6 +129,7 @@ pub(super) fn exif_hints(root: &Path, capture: &str) -> ExifHints {
     }
 }
 /// アプリと手動 release テストが共有する本番経路。scratch はアプリ専用の一時出力親。
+#[cfg(test)]
 pub(super) fn generate(
     root: &Path,
     sidecar: &Path,
@@ -138,12 +140,45 @@ pub(super) fn generate(
     budget: Option<usize>,
     mut progress: impl FnMut(&str, usize, usize),
 ) -> Result<Value, CoreImageError> {
+    let input = coreimage::resolve_arw(root, capture)?;
+    let slot = coreimage::DevelopSlot::new(0);
+    let guard = slot.acquire()?;
+    generate_in_slot(
+        root,
+        sidecar,
+        &input,
+        scratch,
+        capture,
+        preset,
+        seed,
+        budget,
+        false,
+        &guard,
+        || Ok(()),
+        &mut progress,
+    )
+}
+
+fn generate_in_slot(
+    root: &Path,
+    sidecar: &Path,
+    input: &Path,
+    scratch: ScratchParent,
+    capture: &str,
+    preset: &str,
+    seed: Option<u32>,
+    budget: Option<usize>,
+    native_roi: bool,
+    slot: &coreimage::SlotGuard<'_>,
+    mut ensure_current: impl FnMut() -> Result<(), CoreImageError>,
+    mut progress: impl FnMut(&str, usize, usize),
+) -> Result<Value, CoreImageError> {
     let started = Instant::now();
     let (base, seed, budget) = request(capture, preset, seed, budget)?;
-    let input = coreimage::resolve_arw(root, capture)?;
+    ensure_current()?;
     let exif = exif_hints(root, capture);
     progress("decode", 0, 1);
-    let renderer = Renderer::new_with_scratch_parent(sidecar, &input, scratch)?;
+    let renderer = Renderer::new_with_scratch_parent(sidecar, input, scratch.clone())?;
     let mut evaluator = Evaluator::new(renderer, &base, exif)?;
     let star = detect_star_scene(&evaluator.image, &exif);
     evaluator.enable_stars(&base, star.is_star_scene)?;
@@ -211,10 +246,30 @@ pub(super) fn generate(
     let decode_ms = evaluator.renderer.decode_ms;
     let render_ms = evaluator.renderer.render_ms;
     evaluator.renderer.finish()?;
+    ensure_current()?;
+    let native_roi_diagnostics = if native_roi {
+        match native_diagnostics::diagnose(
+            &evaluator.image,
+            &candidates,
+            sidecar,
+            input,
+            &scratch,
+            slot,
+            &mut ensure_current,
+            &mut progress,
+        ) {
+            Ok(d) => d,
+            Err(e) if e.code == "CANDIDATES_STALE" => return Err(e),
+            Err(e) => native_diagnostics::failed(&e.code),
+        }
+    } else {
+        native_diagnostics::not_run()
+    };
+    ensure_current()?;
     let elapsed_ms = json!({"total":started.elapsed().as_secs_f64()*1000.0,"decode":decode_ms,"render":render_ms});
     progress("done", estimated, estimated);
     Ok(
-        json!({"capture_id":capture,"preset":preset,"seed":seed,"budget":budget,"proxy":proxy,"star_scene":star,"candidates":candidates,"rejected":rejected,"elapsed_ms":elapsed_ms}),
+        json!({"capture_id":capture,"preset":preset,"seed":seed,"budget":budget,"proxy":proxy,"star_scene":star,"candidates":candidates,"rejected":rejected,"elapsed_ms":elapsed_ms,"native_roi_diagnostics":native_roi_diagnostics}),
     )
 }
 
@@ -225,6 +280,7 @@ pub async fn generate_development_candidates(
     preset: String,
     seed: Option<u32>,
     budget: Option<usize>,
+    native_roi_diagnostics: Option<bool>,
 ) -> Result<Value, CoreImageError> {
     request(&capture_id, &preset, seed, budget)?;
     let data = app
@@ -232,14 +288,20 @@ pub async fn generate_development_candidates(
         .app_data_dir()
         .map_err(|e| error(e.to_string()))?;
     let sidecar = coreimage::sidecar_path()?;
-    tauri::async_runtime::spawn_blocking(move|| {
-        // プレビュー・原寸現像と同じ実行枠を取り、CLI は1本だけ起動する。
-        let _slot=coreimage::DEVELOP_SLOT.acquire()?;
-        let root=coreimage::read_source_root(&data)?;
+    // Resolve before queueing. A later folder change must never redirect this request.
+    let identity = RequestIdentity::start(&data, &sidecar, &capture_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let slot = coreimage::DEVELOP_SLOT.acquire()?;
+        identity.ensure_current()?;
         let scratch = ScratchParent::for_app_data(&data)?;
-        generate(&root,&sidecar,scratch,&capture_id,&preset,seed,budget,|stage,completed,total| {
-            let _=app.emit("development-candidates-progress",json!({"capture_id":capture_id,"preset":preset,"stage":stage,"completed":completed,"total":total}));
-        })
+        generate_in_slot(&identity.root, &identity.sidecar, &identity.input, scratch,
+            &capture_id, &preset, seed, budget, native_roi_diagnostics.unwrap_or(false), &slot,
+            || identity.ensure_current(),
+            |stage,completed,total| {
+                if identity.ensure_current().is_ok() {
+                    let _=app.emit("development-candidates-progress",json!({"capture_id":capture_id,"preset":preset,"stage":stage,"completed":completed,"total":total}));
+                }
+            })
     }).await.map_err(|e|error(format!("候補生成スレッドが異常終了しました: {e}")))?
 }
 

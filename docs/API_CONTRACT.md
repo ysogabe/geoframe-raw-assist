@@ -119,7 +119,7 @@ Rust が先に弾くので `INPUT_NOT_FOUND` / `INVALID_REQUEST` は通常届か
 | 1.7 | `develop_preview_coreimage` | `{ captureId, adjustments }` | `CoreImagePreviewResult` | `CoreImageError` | `coreimage.rs` |
 | 1.8 | `develop_full_coreimage` | `{ captureId, adjustments, preset }` | `DevelopedResult` | `CoreImageError` | `coreimage.rs` |
 | 1.9 | `merge_bracket` | `{ captureIds, preset, adjustments, preview, force }` | `MergedResult` | `CoreImageError` | `bracket.rs` |
-| 1.10 | `generate_development_candidates` | `{ captureId, preset, seed?, budget? }` | `DevelopmentCandidatesResponse` | `CoreImageError` | `candidates/command.rs` |
+| 1.10 | `generate_development_candidates` | `{ captureId, preset, seed?, budget?, nativeRoiDiagnostics? }` | `DevelopmentCandidatesResponse` | `CoreImageError` | `candidates/command.rs` |
 | 1.11 | `export_selection` | `{ batchName, items }` | `ExportResponse` | `string` | `export.rs` |
 | 1.12 | `reveal_export` | `{ path }` | なし | `string` | `export.rs` |
 | 1.13 | `import_to_photos` | `{ batchName, album? }` | `ImportToPhotosResponse` | `string` | `photos_import.rs` |
@@ -303,15 +303,18 @@ MergedResult = {
 
 1 枚の RAW について、スタイル別の現像候補（`Adjustments`）を多目的 PSO で探す。
 
-- 引数: `captureId`、`preset`、`seed?: number`（u32）、`budget?: number`。フロント（`App.tsx`）は `captureId` と `preset` だけ送る。
+- 引数: `captureId`、`preset`、`seed?: number`（u32）、`budget?: number`、`nativeRoiDiagnostics?: boolean`（省略時false）。
   - `budget` 既定 48、範囲 32〜512（外れは `INVALID_BUDGET`）。
   - `seed` 既定 = SHA-256(`"{capture_id}:{preset}"`) の先頭 4 バイト（big-endian）。
+- `nativeRoiDiagnostics: true` は探索終了後、naturalと最終候補だけを原寸ROIで診断する明示opt-in。
+  候補ID・adjustments・proxy metrics・スコア・閾値・順位・採否は変えない。sharpness上限1.6、seed/budgetも維持。
 - 評価は長辺 **640 px の代理画像**（`renderer.rs: MAX_EDGE`。プレビューの 2400 とは別）で行う。
   CLI は `--batch` セッション（要求ごとに 60 秒のタイムアウト。全体の締め切りは無い）。
 - スタイル: `natural`（プリセット値そのもの・最適化しない）と `social` は常に。`stars`（星空と判定）、
   `foreground`（暗部画素の比率が大きい）、`low_noise`（ISO ≥ 1600 などノイズが多い）は条件付き。
 - 進捗イベント: `development-candidates-progress` を emit
-  `{ capture_id, preset, stage: "decode" | <style id> | "done", completed, total }`（現行フロントは listen していない）。
+  `{ capture_id, preset, stage: "decode" | <style id> | "native_roi" | "done", completed, total }`。
+  フロントは探索と原寸診断の両方を待って表示する。native_roiのcompleted/totalは原寸設定数、探索の単位とは別。
 - ファイル: `$APPDATA/coreimage/candidates/pso-<pid>-<n>/`（0700）を scratch に使い、終了時（成功・失敗・panic）に消す。結果のキャッシュは無い。
 
 ```
@@ -324,7 +327,8 @@ DevelopmentCandidatesResponse = {
                 star_halo, star_color_saturation },
   candidates: [{ id, label, description, adjustments /* 9 キー全量 */, metrics, score /* 0..100 */, reasons: string[] /* ≤4 */ }],
   rejected: [{ id, reason }],
-  elapsed_ms: { total, decode, render }
+  elapsed_ms: { total /* 原寸診断を含む */, decode /* 代理のみ */, render /* 代理のみ */ },
+  native_roi_diagnostics: NativeRoiDiagnostic
 }
 ```
 
@@ -335,6 +339,40 @@ DevelopmentCandidatesResponse = {
 - `candidates` は `natural` が先頭、以降はスタイル順。乱数列の Python 実装との一致は求めない（ADR 0003 §4）。
 - エラー: `INVALID_CAPTURE_ID` `INVALID_BUDGET` `UNKNOWN_PRESET` `SOURCE_ROOT_*` `ARW_NOT_FOUND` `OUTPUT_DIR_FAILED`
   `BUSY` `CANDIDATES_FAILED` `SIDECAR_*`（`SIDECAR_SESSION_CLOSED` を含む）、Rust の `--batch` セッションが出す `INVALID_REQUEST`、CLI 由来（`HANDLE_NOT_FOUND` を含む）。
+
+原寸診断の独立フィールド（完了は画質合格や検証済み採用を意味しない）:
+
+```ts
+NativeRoiDiagnostic = {
+  status: "not_run" | "missing" | "failed" | "complete",
+  reason: string | null,
+  unique_settings: number, renders: number,
+  elapsed_ms: { total: number },
+  rois: [{ name: "center" | "detail" | "flat_dark" | "flat_mid",
+           status: "selected" | "missing", normalized: [x0,y0,x1,y1] | null, reason: string | null }],
+  sets: [{ candidate_ids: string[], adjustments /* 原寸用に正規化したコピー */,
+           status: "missing" | "failed" | "complete", reason: string | null,
+           dimensions?: [width,height], total_ms, render_ms?, crop_ms?, metrics_ms?,
+           rois: [{ name, normalized, status: "complete" | "failed", reason,
+                    pixels?: [x,y,width,height], absolute?: { detail, noise_flat, halo },
+                    delta_vs_natural?: { detail, noise_flat, halo },
+                    bands?: { grad_mean, band_px, band_matched, band_matched_sigma, mean_luma },
+                    bands_delta_vs_natural?: { band_px, band_matched } }] }]
+}
+```
+
+- OFFは `not_run / opt_in_disabled`、空rois/sets・0回。ONでも欠測・失敗を成功や合格へ変換しない。
+  一部ROIを選べない場合は `missing` と理由を返す。原寸CLIエラー/タイムアウトは `failed` とコードを記録し、既存候補は返す。
+  natural原寸が失敗した場合、後続は `missing / natural_full_unavailable`、Δを捏造しない。
+- naturalの640代理から決定的に選んだ4種の正規化座標を全設定で共有する。選べないROIの代替はしない。
+  `band_px` のσ=1.1px、`band_matched` のσ=1.1×原寸長辺/640。星の指標は従来の640全体のみ。
+- 原寸設定は正規化後に重複排除し、naturalを含め最大5設定。CLIは本現像と同じdecoder 9/profile/lens/JPEG品質で
+  順次full描画（各180秒上限）する。JPEG全体は一時的にu8で読み、floatはROIのみ保持する。
+  scratch内のJPEGを設定ごとに削除し、終了時に専用ディレクトリも回収する。通常/採用済みの出力とキャッシュは触らない。
+- プロキシbatch終了後も同じ実行枠を保持した内部処理を使い、枠を二重取得しない。CLI同時1本を保つ。
+- 待ち開始前にsourceRoot/RAW/CLIを固定し、設定ファイル・RAW・CLIの同一性と最新要求を最後まで確認する。
+  フォルダ切替・同名差替え・再要求で古くなった処理は `CANDIDATES_STALE` でrejectし、旧結果は公開しない。
+  UIもsource世代と要求番号で古い完了を破棄する。原寸診断はFFI正式採用を前提にしない。
 
 ### 1.11 `export_selection`
 
