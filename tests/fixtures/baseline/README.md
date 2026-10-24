@@ -51,6 +51,9 @@ PATH="$PWD/work/python314-bin:$PATH" .venv/bin/python scripts/freeze_baseline.py
 - `provenance.json` は入力ファイル名と sha256、依存バージョン、OS、生成秒数を記録。
   `analysis._source_signature` は元の絶対ルートとファイル名から計算されるため、
   別のルートへコピーすれば署名とサムネ接頭辞は変わる。移植時は同じルートで比較する。
+  現行の Rust 解析は `_source_signature` の代わりに入力指紋 `_source_fingerprint`（サイズ・mtime を含む）と
+  公開フィールド `source_id`・`analysis_revision` を出す（#32。docs/API_CONTRACT.md §3）。
+  `analysis.json` は当時の形のまま凍結し、これらを後から書き足さない。
 
 ## 7 件の状態とファイル
 

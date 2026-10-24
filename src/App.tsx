@@ -122,16 +122,27 @@ export default function Home() {
   }, []);
 
   // ---- 解析状況の取得と 1 秒ポーリング ------------------------------------
-  const pollAnalysis = useCallback(async () => {
+  // 応答には「リクエストを出した時点の」フォルダ世代を添え、フォルダ変更を跨いで遅れて
+  // 届いた前のフォルダの応答を reducer で捨てる（#5）。pollAnalysis は依存なしの
+  // useCallback なので、タイマー等からは最新の世代を ref で読む。フォルダ変更直後の
+  // 呼び出し（applySourceFolder）は ref の同期を待たず、次の世代を明示的に渡す。
+  const sourceGenerationRef = useRef(state.sourceFolderGeneration);
+  /** フォルダ変更の処理中（同期ガード。applySourceFolder 参照）。 */
+  const applyingSourceFolderRef = useRef(false);
+  useEffect(() => {
+    sourceGenerationRef.current = state.sourceFolderGeneration;
+  }, [state.sourceFolderGeneration]);
+
+  const pollAnalysis = useCallback(async (generation: number = sourceGenerationRef.current) => {
     try {
       const response = await getAnalysis();
-      dispatch({ type: "analysis/status", response });
+      dispatch({ type: "analysis/status", response, generation });
     } catch (error) {
       if (isSourceRootNotConfigured(error)) {
-        dispatch({ type: "analysis/unconfigured" });
+        dispatch({ type: "analysis/unconfigured", generation });
         return;
       }
-      dispatch({ type: "analysis/error", message: messageOf(error, "解析状況を取得できませんでした。") });
+      dispatch({ type: "analysis/error", message: messageOf(error, "解析状況を取得できませんでした。"), generation });
     }
   }, []);
 
@@ -373,19 +384,20 @@ export default function Home() {
     scrollToTop();
   }
 
-  async function beginAnalyze(force = false) {
+  /** `generation` は解析を求めたフォルダの世代（省略時は今の世代）。 */
+  async function beginAnalyze(force = false, generation = state.sourceFolderGeneration) {
     dispatch({ type: "analysis/requested" });
     try {
       const response = await startAnalyze(force);
       if (response.status === "ready") {
-        await pollAnalysis();
+        await pollAnalysis(generation);
       }
     } catch (error) {
       if (isSourceRootNotConfigured(error)) {
-        dispatch({ type: "analysis/unconfigured" });
+        dispatch({ type: "analysis/unconfigured", generation });
         return;
       }
-      dispatch({ type: "analysis/error", message: messageOf(error, "解析を開始できませんでした。") });
+      dispatch({ type: "analysis/error", message: messageOf(error, "解析を開始できませんでした。"), generation });
     }
   }
 
@@ -406,7 +418,10 @@ export default function Home() {
 
   async function applySourceFolder(path: string) {
     const trimmed = path.trim();
-    if (!trimmed || state.sourceFolderBusy) return;
+    // state.sourceFolderBusy は再描画まで古い値のままなので、同じ描画のクロージャから
+    // 2 回呼ばれる（ダブルクリック等）と両方が通る。同期の ref で先に塞ぐ。
+    if (!trimmed || state.sourceFolderBusy || applyingSourceFolderRef.current) return;
+    applyingSourceFolderRef.current = true;
     dispatch({ type: "source/applying" });
     try {
       const info = await setSourceFolder(trimmed);
@@ -414,6 +429,11 @@ export default function Home() {
       // 新しいフォルダを解析し直す。前のフォルダの DSC02943 をそのまま持ち越すと
       // 新しいフォルダの別写真を指してしまうため、リセットは必須。
       const noPairs = info.pairs === 0;
+      // source/changed で reducer が進める世代と同じ値。採番は描画時点の state ではなく
+      // ref の現在値から行う（applyingSourceFolderRef の間は他に世代を進める経路が無い）。
+      // 前のフォルダ向けに飛んでいる get_analysis の応答は、この値と一致せず捨てられる。
+      const generation = sourceGenerationRef.current + 1;
+      sourceGenerationRef.current = generation;
       dispatch({
         type: "source/changed",
         info,
@@ -428,12 +448,14 @@ export default function Home() {
         // しながら選び直せない状態になってしまう。フォルダ変更時点で エンジン側の
         // 解析キャッシュは無効化済み（get_analysis は absent に戻る）なので、
         // 状態を取り直すだけにして、再解析は AnalysisGate の「解析を開始」に委ねる。
-        await pollAnalysis();
+        await pollAnalysis(generation);
         return;
       }
-      await beginAnalyze(true);
+      await beginAnalyze(true, generation);
     } catch (error) {
       dispatch({ type: "source/failed", message: sourceFolderFailureMessage(error) });
+    } finally {
+      applyingSourceFolderRef.current = false;
     }
   }
 

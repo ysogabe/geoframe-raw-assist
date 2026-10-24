@@ -751,7 +751,7 @@ describe("フォルダ未設定（analysis/unconfigured。#110）", () => {
       analyzeRequested: true,
       analysisError: "x",
     };
-    const next = reducer(before, { type: "analysis/unconfigured" });
+    const next = reducer(before, { type: "analysis/unconfigured", generation: 0 });
     expect(next.analysisState).toBe("unconfigured");
     expect(next.analysis).toBeNull();
     expect(next.analysisProgress).toBeNull();
@@ -760,7 +760,7 @@ describe("フォルダ未設定（analysis/unconfigured。#110）", () => {
   });
 
   it("フォルダを設定すると（source/changed）未設定から抜け、解析を開始できる", () => {
-    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured" });
+    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured", generation: 0 });
     const changed = reducer(unconfigured, { type: "source/changed", info: folder("/photos"), message: "変更" });
     expect(changed.analysisState).toBe("unknown");
     expect(changed.sourceFolder?.path).toBe("/photos");
@@ -769,13 +769,18 @@ describe("フォルダ未設定（analysis/unconfigured。#110）", () => {
   });
 
   it("再取得で absent / ready が返れば未設定から戻り、absent の error を保持する", () => {
-    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured" });
-    const absent = reducer(unconfigured, { type: "analysis/status", response: { status: "absent", error: "失敗" } });
+    const unconfigured = reducer(withEngine, { type: "analysis/unconfigured", generation: 0 });
+    const absent = reducer(unconfigured, {
+      type: "analysis/status",
+      response: { status: "absent", error: "失敗" },
+      generation: 0,
+    });
     expect(absent.analysisState).toBe("absent");
     expect(absent.analysisError).toBe("失敗");
     const ready = reducer(unconfigured, {
       type: "analysis/status",
       response: { status: "ready", analysis: { ...analysisOf([]), scored: false } },
+      generation: 0,
     });
     expect(ready.analysisState).toBe("ready");
     expect(ready.analysis?.scored).toBe(false);
@@ -1253,5 +1258,72 @@ describe("currentMergeResultsOf / viewingCaptureOf", () => {
       expect(afterSecond.accepted).toEqual([]);
       expect(acceptedMergeOf(afterSecond, bracket)).toBeUndefined();
     });
+  });
+});
+
+describe("解析の世代と遅れて届く応答（#3 B1・#32・#5）", () => {
+  // 同じ撮影ID A1 が、同じ秒の再解析で group 1 → group 2 へ移る。
+  const first: Analysis = { ...analysisOf([group(1, ["A1"])]), analysis_revision: "rev-1", source_id: "src-1" };
+  const second: Analysis = {
+    ...analysisOf([group(2, ["A1"])]),
+    analysis_revision: "rev-2",
+    source_id: "src-1",
+  };
+  const ready = (analysis: Analysis, generation = 0): Action => ({
+    type: "analysis/status",
+    response: { status: "ready", analysis },
+    generation,
+  });
+  const acceptedOnFirst: State = {
+    ...reducer(withEngine, ready(first)),
+    accepted: [{ kind: "photo", groupId: 1, captureId: "A1", variant: "camera_jpg" }] as State["accepted"],
+  };
+
+  it("generated_at が同じでも analysis_revision が変われば採用を結び直す", () => {
+    expect(first.generated_at).toBe(second.generated_at);
+    const next = reducer(acceptedOnFirst, ready(second));
+    expect(next.analysis).toBe(second);
+    expect(next.accepted).toEqual([{ kind: "photo", groupId: 2, captureId: "A1", variant: "camera_jpg" }]);
+  });
+
+  it("同じ世代の繰り返しポーリングでは採用配列の同一性を保つ", () => {
+    const again = reducer(acceptedOnFirst, ready({ ...first, groups: [...first.groups] }));
+    expect(again.accepted).toBe(acceptedOnFirst.accepted);
+  });
+
+  it("世代を持たない解析（v2）は generated_at で比べる", () => {
+    const legacy = (groups: GroupInfo[], at: string): Analysis =>
+      ({ generated_at: at, groups, photos: {} }) as unknown as Analysis;
+    const base: State = {
+      ...reducer(withEngine, ready(legacy([group(1, ["A1"])], "t0"))),
+      accepted: [{ kind: "photo", groupId: 1, captureId: "A1", variant: "camera_jpg" }] as State["accepted"],
+    };
+    expect(reducer(base, ready(legacy([group(2, ["A1"])], "t0"))).accepted[0]).toMatchObject({ groupId: 1 });
+    expect(reducer(base, ready(legacy([group(2, ["A1"])], "t1"))).accepted[0]).toMatchObject({ groupId: 2 });
+  });
+
+  it("フォルダ変更を跨いで遅れて届いた前のフォルダの応答は捨てる", () => {
+    // 制御した応答順: 前フォルダ向けの get_analysis（世代 0）が、変更（世代 1）の後に届く。
+    const changed = reducer(acceptedOnFirst, { type: "source/changed", info: folder("/other"), message: "" });
+    expect(changed.sourceFolderGeneration).toBe(1);
+    const requested = reducer(changed, { type: "analysis/requested" });
+    const stale: Action[] = [
+      ready(first, 0),
+      { type: "analysis/status", response: { status: "absent" }, generation: 0 },
+      { type: "analysis/unconfigured", generation: 0 },
+      { type: "analysis/error", message: "古い失敗", generation: 0 },
+    ];
+    for (const action of stale) {
+      expect(reducer(requested, action)).toBe(requested);
+    }
+    // 新しいフォルダ向けの応答は通る。
+    const other: Analysis = { ...analysisOf([group(1, ["A1"])]), analysis_revision: "rev-9", source_id: "src-9" };
+    const fresh = reducer(requested, ready(other, 1));
+    expect(fresh.analysisState).toBe("ready");
+    expect(fresh.analysis).toBe(other);
+    expect(fresh.accepted).toEqual([]);
+    expect(reducer(requested, { type: "analysis/error", message: "新しい失敗", generation: 1 }).analysisError).toBe(
+      "新しい失敗",
+    );
   });
 });
