@@ -2,7 +2,7 @@
 
 「プレビュー現像」ボタンの 1 回分（2400px JPEG）を、**同じ RAW・同じ調整列・同じ出力設定**で単発 CLI と既存 `--batch`
 に流して比べる。Swift ライブラリ（FFI/XPC）の PoC に進むかを、**輸送層に削れる余地があるか**で判断するための基盤。
-**この文書は手順と解釈の枠組みで、結果（数値）はまだ無い。** 実測は親が実素材で行い、結果は別途記録する。
+この文書は手順と解釈の枠組みを記す。[実2枚・ローカル/SMBの結果](coreimage-preview-transport-results-2026-10-24.md)と数値アーカイブを別記した。
 
 - 対象外: FFI/XPC/SwiftUI、本番バックエンドの切替、画質閾値の確定。Rust の本番現像・候補・キャッシュは変更しない。
 - 実装: `src-tauri/src/coreimage/transport_bench.rs`（test 専用。`coreimage.rs` に `#[cfg(test)] mod` を 1 つ足しただけ）、
@@ -60,9 +60,10 @@ Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurem
 
 1 回の実行 = 撮影 ID × 系列 × 方式。各（方式, 系列）で **cold 1 反復 + warm N 反復**（`WARM`、既定 3）を、全ステップ順に再生する。
 
-- **cold**: その方式×系列の最初の反復。batch は新規プロセス/セッション（起動時間は `session_start_ms` に別記）。
+- **cold**: その方式×系列の最初の反復。batch は新規プロセス/セッション。`session_start_ms` はspawn呼び出しだけの時間でreadyを待たない。
+  プロセス起動・Core Image初期化はcold先頭要求のwallに含む。
   **OS のファイルキャッシュ・GPU 状態の cold は保証しない**（SMB の初回読み込みが cold に混ざるかは未制御）。単発は毎回新規プロセスなので、
-  cold/warm の差は OS キャッシュ等の差だけを表す。
+  cold/warm の差には OS キャッシュ等が影響する。方式の実行順は固定なので、coldを方式間の公平な比較には使わない。
 - **warm**: 同じ方式×系列の 2 回目以降（batch は同じセッション）。`rust_develop_cache_hit` は常に warm。
 - **p50/p95**: 最近順位法。`small_sample`（n < 20）の p95 は実質 max で、率として読まない。
 - **要求単位 wall** と **系列単位 wall**（1 反復の全ステップ wall の合計。全ステップ成功の反復のみ。cold は n=1）を別に出す。
@@ -85,7 +86,7 @@ Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurem
 
 **訂正（初回報告）**: 初回の報告に「decode は半精度のため JPEG で 1 階調以内」と書いたが、これは断定できない。README の既知の差は
 **640px TIFF16 sRGB の最大 34〜81/65535**（8bit の 0.1〜0.3 段）で、JPEG の差とは**単位が違う**（JPEG は 8bit 化・DCT 量子化・色変換を挟む）。
-親のローカル実測（2 撮影 ID × 2 系列、warm 3）では、`batch_decode_render` の JPEG が single に対して非一致（max 8〜10/255、mean 約 0.29）、
+親のローカル実測（2 撮影 ID × 2 系列、warm 3）では、`batch_decode_render` の JPEG が single に対して非一致（最大11/255（条件別の詳細は結果報告を参照））、
 `batch_stateless` はバイト一致だった。この JPEG の差が既知の半精度差の増幅なのか別要因なのかは、JPEG だけからは言えない。
 → §10 の可逆（TIFF16）対照で、8bit に落とさず 16bit のまま比べる。いずれも品質閾値ではなく記録。
 
@@ -180,7 +181,7 @@ localStorage.removeItem("geoframe.previewTiming");      // OFF（既定）
 
 ## 9. 結果の解釈（FFI 判断への入口）
 
-実測後に埋める。判断の材料は次の順に読む。
+実測結果は別報告を参照。判断の材料は次の順に読む。
 
 1. `single_cli` の `transport_overhead_ms`（warm）と `cli_total_ms` の比。overhead が cli の数 % なら、輸送層（プロセス起動/JSON/ポーリング）を
    削っても E2E はほとんど動かない。`ci_timing_ms` の `render` が支配的なら Core Image 本体の問題で FFI では縮まない。
@@ -189,14 +190,9 @@ localStorage.removeItem("geoframe.previewTiming");      // OFF（既定）
 4. `rust_develop_cache_hit` は輸送ではなく Rust キャッシュの下限として別枠で読む。
 5. SMB とローカルの差（`STORAGE_LABEL` 違いの 2 実行）。
 
-| 項目 | 結果 |
-|---|---|
-| ローカル / SMB 各方式の p50/p95 | 未測定 |
-| `transport_overhead_ms` の割合 | 未測定 |
-| `batch_decode_render` の RGB maxdiff | 未測定 |
-| ピーク RSS | 未測定 |
-| Stage1 の ボタン→rAF（`origin_to_raf_ms`） | 未測定 |
-| FFI PoC への進否 | 未判断 |
+各方式のp50/p95、RGB差、資源値は[結果と数値アーカイブ](coreimage-preview-transport-results-2026-10-24.md)を参照。
+Stage1のボタン→rAFは実アプリ起動の承認待ちで未測定。FFIは現時点で保留。
+
 
 ## 10. 可逆（TIFF16）対照：JPEG の差の由来を切り分ける
 
@@ -207,11 +203,7 @@ JPEG ベンチの `batch_decode_render` の差が、decode op の半精度保持
   `output_color_space: srgb`（JPEG と同じ sRGB 域）だけ（tiff16 に `jpeg_quality` は送れない）。
 - 比べる組（基準 = 単発 CLI の 1 回目）:
 
-| pair | 意味 |
-|---|---|
-| `single_repeat` | 単発 CLI の 2 回目 vs 1 回目。**決定性の対照**。0 でなければ他の差を解釈できない |
-| `batch_stateless` | batch の `op` 無し現像 vs 単発。輸送だけの対照（同じ経路なので画素一致の見込み） |
-| `batch_decode_render` | `op: decode` → `op: render` vs 単発。RGBAh（半精度）保持由来の差が出る組。`decode_reused` も記録 |
+[2400px TIFF16の実測結果](coreimage-preview-transport-results-2026-10-24.md#tiff16の追加対照)を参照。repeat/statelessは今回の20条件で一致、decode/render最大96/65535。品質合否は未定義。
 
 - 比較は **16bit のまま**（8bit に量子化しない）。非圧縮・16bit・RGB・strip の TIFF だけを読む自前の最小リーダー
   （`image` クレートに tiff が無く、依存は足さない）。読めない構造（LZW・BigTIFF・8bit・アルファ付き・タイル）は推測せず
@@ -224,7 +216,7 @@ JPEG ベンチの `batch_decode_render` の差が、decode op の半精度保持
 - **RGBAh レイヤ差・TIFF 差を品質閾値にしない。** JPEG の差と直接比較しない（単位が違う）。既知の 640px の差（最大 34〜81/65535）は
   参考で、本対照は 2400px。
 - 既定の系列は `decode_exposure`（decode 段）と `post_shadow_lift`（後段）の 2 つ（各 5 ステップ）。`SERIES` で上書き可。
-  FFI は現時点で保留（単発 stateless の輸送差は数 ms。ライフサイクル/E2E 条件を揃えてから再検討）。
+  FFI は現時点で保留（batch stateless の残りのoverheadは数 ms。ライフサイクル/E2E 条件を揃えてから再検討）。
 
 実行（親が実 CLI で。環境変数は §7 と同じ）:
 
@@ -255,3 +247,5 @@ fake CLI の契約テスト（実 CLI 不要）: `cargo test --manifest-path src
 | `batch_stateless` の差 | 未測定 |
 | `batch_decode_render` の 16bit 差（max/mean/ヒストグラム） | 未測定 |
 | JPEG 差との関係（半精度由来か増幅か） | 未判断 |
+
+UIの欠測には、比較が合成面のまま・別の結果へ差し替わった場合も含まれる。実測時はstatus別件数を併記する。

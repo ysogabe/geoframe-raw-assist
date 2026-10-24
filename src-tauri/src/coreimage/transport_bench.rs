@@ -785,7 +785,8 @@ fn definitions() -> Value {
     json!({
         "wall": "Rust プロセス内 Instant。React / Tauri IPC / WebView 表示は含まない。E2E の代用にしない",
         "transport_overhead_ms": "wall − CLI 応答の elapsed_ms.total（decode+render 方式は両方の和）。プロセス起動・JSON・待ち・ファイル書き込み・(rust_develop は解決/鍵/来歴/prune)を含む",
-        "cold": "その方式×系列の最初の反復（batch は新規プロセス/セッション、単発は最初の系列走行）。OS ファイルキャッシュ・GPU 状態の cold は保証しない",
+        "cold": "その方式×系列の最初の反復。batch の起動・初期化は先頭要求の wall に含む。固定順で実行し、OS/GPU の cold は保証しないため方式間 cold 比較には使わない",
+        "session_start_ms": "spawn 呼び出しだけの時間。ready/初期化を待たず、それらは cold 先頭要求の wall に含む",
         "warm": "同じ方式×系列の 2 回目以降の反復（batch は同じセッション、OS ファイルキャッシュは温まっている可能性）",
         "series_wall": "1 反復の全ステップの wall 合計（全ステップ成功の反復のみ）。cold は n=1",
         "percentiles": "最近順位法。n < 20 は small_sample=true で p95 は実質 max",
