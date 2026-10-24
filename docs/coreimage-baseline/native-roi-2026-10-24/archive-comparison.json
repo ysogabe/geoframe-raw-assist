@@ -1,0 +1,107 @@
+{
+  "archive_cases": 11,
+  "compared_cases": 11,
+  "cases": [
+    {
+      "capture_id": "DSC07402",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07404",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07405",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07407",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07408",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07412",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07415",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07416",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07419",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07422",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    },
+    {
+      "capture_id": "DSC07423",
+      "preset": "nightscape",
+      "candidates": 4,
+      "rois": 16,
+      "numeric_fields": 208,
+      "max_abs_difference": 0.0,
+      "mismatches": []
+    }
+  ],
+  "mismatches": 0,
+  "comparison_precision": 1e-06
+}
