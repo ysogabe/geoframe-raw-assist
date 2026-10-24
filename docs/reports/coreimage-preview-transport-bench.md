@@ -27,13 +27,16 @@
 | method | 内容 | ラベル |
 |---|---|---|
 | `single_cli` | 既存 `run_sidecar`（本番と同じ起動・待ち方）で単発 CLI。リクエスト JSON は `batch_stateless` と同一 | 輸送比較 |
-| `rust_develop_miss` | 既存 `coreimage::develop()`（解決・キャッシュ鍵・CLI・来歴書き込み・prune）。反復ごとに空の app_data | 輸送比較（アプリ全体） |
+| `rust_develop_miss` | 既存 `coreimage::develop()`（解決・キャッシュ鍵・CLI・来歴書き込み・prune）。反復ごとに空の app_data | アプリ全体（**純粋な輸送比較ではない**。下の注） |
 | `rust_develop_cache_hit` | 同じ app_data で `develop()` を再度。**CLI を呼ばない完成 JPEG のキャッシュヒット** | **輸送比較ではない**（別集計。cli_total は null） |
 | `batch_stateless` | 既存 `BatchSession` に `op` 無しの現像行（毎回デコード） | 輸送比較 |
 | `batch_decode_render` | `op: decode` → `op: render`。後段だけの系列ではハンドルを再利用し、反復の先頭で解放 | 輸送比較 |
 
 全方式で、`mode: preview`・`max_edge: 2400`・`format: jpeg`・`decoder_version: 9`・`apple_default`・レンズ補正 ON、
 `jpeg_quality` は**送らない**（CLI 既定 0.92 = 本番 Rust と同じ）、`adjustments` は `normalize_adjustments` 済みの 9 キー全量。
+**`rust_develop_miss` は他方式と同じ純粋な輸送ではない。** 各反復で新しい app_data を作るため、warm 反復の先頭ステップにも
+config.json の作成・出力ディレクトリの用意・初回の prune といった「その app_data での初回の仕事」が入る（2 ステップ目以降には入らない）。
+アプリ全体の wall として読み、`single_cli` との差を純粋な「アプリ層の上乗せ」とは断定しない。
 Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurement_label` で別物と明示し、輸送の統計に混ぜない。
 
 ## 3. 調整列（固定）
@@ -55,6 +58,11 @@ Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurem
 | `post_sharpness_gt1` | post_only | 1.05 / 1.15 / 1.25 / 1.35 / 1.45（USM 増分だけが後段） |
 
 分類の正しさ（decode_changing は decode key が毎ステップ異なり、post_only は全ステップで同一）は通常のテストが検査する。
+
+注: ベンチの decode key は、既存の `Renderer::key` と同じ**保守的な個別キー**（`exposure`・`highlight_recovery`・`wb_temp`・`min(sharpness,1)`・
+`noise_reduction`）で、Swift 側の「hr を足した実効 exposure」での結合より厳しい（実効値が同じになる別々の exposure/hr の組でも別キーとして
+再デコードする）。今回の系列は `highlight_recovery` を動かす系列以外では hr を固定し、`decode_highlight_recovery` 系列は各ステップで別キーが
+正しいので、**結果は変わらない**。hr と exposure を同時に動かす系列を足すときは、この差を考慮する。
 
 ## 4. 反復・cold / warm・統計
 
@@ -96,7 +104,7 @@ Rust の完成 JPEG キャッシュ（`rust_develop_cache_hit`）は、`measurem
 ローカルと SMB の比較は、同じ ARW をローカルへコピーしたフォルダと SMB 上のフォルダを `SOURCE_ROOT` だけ替えて 2 回実行する。
 
 JSON の `environment.storage` に、ユーザー付与の `user_label`（必須。例 `local` / `smb-backup`）と、`/sbin/mount` の最長一致から得た
-`detected_fstype` / `detected_is_network`、ラベルと食い違うときの `label_mismatch_warning`、パスの短いハッシュを残す。
+`detected_fstype` / `detected_is_network`、ラベルと食い違うときの `label_mismatch_warning` を残す。素材パスから推測できるハッシュは残さない。
 デバイス名（`user@host`）・マウントパス・ARW パスは記録しない。
 
 ## 7. 実行コマンド（親が実行）

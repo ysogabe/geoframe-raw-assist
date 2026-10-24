@@ -187,4 +187,39 @@ describe("preview-timing", () => {
     expect(h.rows[0].capture_id).toBe("DSC01234");
     expect(Object.keys(h.rows[0]).some((k) => /url|path/i.test(k))).toBe(false);
   });
+
+  it("sink / decode / 時計が throw しても、計測の外に例外を出さない", async () => {
+    let clock = 0;
+    const frames: (() => void)[] = [];
+    const recorder = createPreviewTimingRecorder({
+      enabled: () => true,
+      now: () => clock,
+      requestFrame: (cb) => frames.push(cb),
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+      newId: () => "id",
+      sink: () => {
+        throw new Error("sink exploded");
+      },
+    });
+    recorder.begin(CTX)!.invokeReturned(OUTCOME);
+    expect(() => recorder.imageLoaded(OUTCOME.displayUrl, () => { throw new Error("decode exploded"); })).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    clock += 1;
+    expect(frames).toEqual([]); // decode が失敗したので rAF には進まない
+
+    const brokenClock = createPreviewTimingRecorder({
+      enabled: () => true,
+      now: () => {
+        throw new Error("no performance");
+      },
+      requestFrame: () => undefined,
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+      newId: () => "id",
+      sink: () => undefined,
+    });
+    expect(brokenClock.now()).toBeUndefined();
+  });
 });
