@@ -80,7 +80,8 @@ export function BracketMerge({
 
       <p className="bracket-lead">
         露出を変えて撮った{MERGE_MIN_FRAMES}〜{MERGE_MAX_FRAMES}枚を合成し、白飛びと黒つぶれを同時に抑えます。
-        現像プリセット「{presetLabel}」と右の現像パラメータをそのまま使います。
+        現像プリセット「{presetLabel}」と右のパラメータのうち、色温度・暗部の持ち上げ・明るさ・コントラスト・彩度・
+        シャープネス・ノイズ低減を反映します。露出とハイライト回復は合成には反映されません。
       </p>
 
       {multiScene && (

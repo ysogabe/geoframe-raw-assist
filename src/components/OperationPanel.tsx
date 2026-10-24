@@ -156,12 +156,9 @@ export function OperationPanel({
   const mergePanelRef = useRef<HTMLElement>(null);
   const unscored = analysis.scored === false;
   const developResult = fullResult ?? previewResult;
-  const mergeFullMatchesSelection = mergeFullResult !== undefined &&
-    mergeFrames.length === mergeFullResult.capture_ids.length &&
-    mergeFrames.every((id) => mergeFullResult.capture_ids.includes(id));
-  const mergedResult = isBracket
-    ? mergeFullMatchesSelection ? mergeFullResult : (mergePreviewResult ?? mergeFullResult)
-    : undefined;
+  // App 側で「今の選択・プリセット・調整に合う結果」だけに絞って渡している。
+  // 本合成があればそれを、無ければプレビューを見せる。
+  const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
   const canToggleComparison = Boolean(developResult && mergedResult);
   const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
   const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);

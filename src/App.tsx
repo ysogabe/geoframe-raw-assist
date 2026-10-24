@@ -15,7 +15,9 @@ import {
   groupMergeResultOf,
   isBracketGroup,
   mergeBlockReason,
+  currentMergeResultsOf,
   mergeFramesOf,
+  mergedAcceptTargetOf,
   mergedResultFor,
   photoOf,
   reducer,
@@ -183,17 +185,14 @@ export default function Home() {
   const captureId = group ? viewingCaptureOf(state, group) : "";
   const adjustments = effectiveAdjustments(state);
   const mergeFrames = group ? mergeFramesOf(state, group) : [];
-  const sameMergeInputs = (result: ReturnType<typeof groupMergeResultOf>) => Boolean(
-    result && adjustments &&
-    result.capture_ids.length === mergeFrames.length &&
-    mergeFrames.every((id) => result.capture_ids.includes(id)) &&
-    result.preset === state.presetName &&
-    (Object.keys(adjustments) as (keyof Adjustments)[]).every((key) => result.adjustments[key] === adjustments[key]),
-  );
-  const selectedMergePreview = group ? groupMergeResultOf(state.mergePreviewResults, group) : undefined;
+  // 画面に出す合成結果は「今の選択・プリセット・調整に合うもの」だけ。表示、SELECTED PHOTO、
+  // 写真の採用先（captureId）は同じ currentMergeResultsOf から決まる。
+  const currentMerge = group ? currentMergeResultsOf(state, group) : {};
+  const mergePreviewResult = currentMerge.preview;
+  const mergeFullResult = currentMerge.full;
+  // 採用済みかどうかは採用時の成果物（グループの現在の本合成）で見る。現像パネルを触っただけで
+  // 採用が外れたように見せない。
   const selectedMergeFull = group ? groupMergeResultOf(state.mergeFullResults, group) : undefined;
-  const mergePreviewResult = sameMergeInputs(selectedMergePreview) ? selectedMergePreview : undefined;
-  const mergeFullResult = sameMergeInputs(selectedMergeFull) ? selectedMergeFull : undefined;
   const groupMergeMode = group?.id === state.mergingGroupId ? state.mergeMode : null;
   const globalBusy = Boolean(state.developMode || state.mergeMode || state.developmentCandidatesBusy);
   const photo = photoOf(analysis, captureId);
@@ -700,8 +699,9 @@ export default function Home() {
               mergeFullResult={mergeFullResult}
               mergedAccepted={selectedMergeFull ? isMergedAccepted(state, group.id, selectedMergeFull.capture_ids[0]) : false}
               onAcceptMerged={() => {
-                const merged = groupMergeResultOf(state.mergeFullResults, group);
-                if (merged) dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId: merged.capture_ids[0] });
+                // 新規採用は今の設定に合う本合成だけ。採用済みの取り消しは採用時の成果物で行う。
+                const leadCaptureId = mergedAcceptTargetOf(state, group);
+                if (leadCaptureId) dispatch({ type: "accept/merged", groupId: group.id, leadCaptureId });
               }}
               onViewMerged={() => dispatch({ type: "view/merged", groupId: group.id })}
               globalBusy={globalBusy}

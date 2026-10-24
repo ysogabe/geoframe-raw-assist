@@ -982,8 +982,13 @@ export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
   // そのまま残っていることがある。ここで返した撮影IDは「この写真を採用」の宛先に
   // なるので、グループに属さないIDを返すとそのグループの採用として別の写真が
   // 記録されてしまう。必ずグループ内に絞ってから返す。
-  const merged = state.mergeFullResults[group.id] ?? state.mergePreviewResults[group.id];
-  const lead = [merged?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
+  //
+  // 先頭フレームは **今の選択・プリセット・調整に合う合成結果** から取る。raw な本合成を
+  // 優先すると、フレームを選び直して新しいプレビューを作ったあとも古い本合成の先頭を
+  // 返し、画面に出ている合成と SELECTED PHOTO / EXIF / 写真の採用先が別の写真になる。
+  // 合う結果が無いときは今の選択の先頭フレームを見る。
+  const shown = currentMergeResultsOf(state, group).shown;
+  const lead = [shown?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
     (captureId) => captureId !== undefined && group.capture_ids.includes(captureId),
   );
   return lead ?? group.recommended_capture_id;
@@ -1007,6 +1012,71 @@ export function groupMergeResultOf(
   const merged = results[group.id];
   if (!merged) return undefined;
   return merged.capture_ids.every((captureId) => group.capture_ids.includes(captureId)) ? merged : undefined;
+}
+
+/**
+ * その合成結果が「今の合成設定で作ったもの」か。
+ *
+ * 照合するのはフレームの集合・プリセット・調整値の全量。いずれかが違えば、画面に出すと
+ * 今の設定と別の画像を「合成結果」として見せることになる。
+ *
+ * プリセットと調整値（state.presetName / overrides）は **選択中のグループの操作内容** なので、
+ * 選択中でないグループ（一覧カードの代表写真など）には当てはめられない。そちらはフレームの
+ * 集合だけを照合する。調整値がまだ取れていない（プリセット未取得）選択中グループは、
+ * 照合できないので合わないものとして扱う。
+ */
+export function isMergeResultCurrent(state: State, group: GroupInfo, result: MergedResult): boolean {
+  const frames = mergeFramesOf(state, group);
+  if (result.capture_ids.length !== frames.length || !frames.every((id) => result.capture_ids.includes(id))) {
+    return false;
+  }
+  if (state.selectedGroupId !== group.id) return true;
+  const adjustments = effectiveAdjustments(state);
+  if (!adjustments || result.preset !== state.presetName) return false;
+  return (Object.keys(adjustments) as (keyof Adjustments)[]).every(
+    (key) => result.adjustments[key] === adjustments[key],
+  );
+}
+
+/**
+ * そのグループで「今の合成設定に合う」合成結果。
+ *
+ * - `full` / `preview`: groupMergeResultOf の関門（全フレームがグループ内）に加えて
+ *   isMergeResultCurrent を通ったものだけ。
+ * - `shown`: 画面に出す1枚。本合成が合っていればそれ、無ければ合っているプレビュー。
+ *
+ * 表示・SELECTED PHOTO/EXIF・写真の採用先・合成の採用ボタンの有効判定は、すべてこの値を
+ * 見る。**採用済みの成果物の引き直し（mergedResultFor）はここを通さない**: 採用は
+ * 採用した時点の成果物のスナップショットで、あとから現像パネルを触っただけで書き出し対象
+ * から外れてはいけないため。
+ */
+export function currentMergeResultsOf(
+  state: State,
+  group: GroupInfo,
+): { preview?: MergedResult; full?: MergedResult; shown?: MergedResult } {
+  const pick = (results: Record<number, MergedResult>) => {
+    const result = groupMergeResultOf(results, group);
+    return result && isMergeResultCurrent(state, group, result) ? result : undefined;
+  };
+  const preview = pick(state.mergePreviewResults);
+  const full = pick(state.mergeFullResults);
+  return { preview, full, shown: full ?? preview };
+}
+
+/**
+ * 合成の採用ボタンが操作する先頭フレーム。操作できないなら undefined。
+ *
+ * - 新規採用: 今の設定に合う本合成だけ。
+ * - 取り消し: 今の設定に合わなくなっていても、**すでに採用済み**のグループの本合成なら対象にする。
+ *
+ * 合わなくなった本合成が未採用のままなら、どちらにも当たらず undefined（採用できない）。
+ */
+export function mergedAcceptTargetOf(state: State, group: GroupInfo): CaptureId | undefined {
+  const current = currentMergeResultsOf(state, group).full;
+  if (current) return current.capture_ids[0];
+  const accepted = groupMergeResultOf(state.mergeFullResults, group);
+  const lead = accepted?.capture_ids[0];
+  return lead !== undefined && isMergedAccepted(state, group.id, lead) ? lead : undefined;
 }
 
 /**
