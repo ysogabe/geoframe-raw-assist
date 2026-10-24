@@ -86,7 +86,8 @@ Rust が生成する code:
 | `CACHE_IO_FAILED` | 合成の古いキャッシュを置き換え・検査できない | merge |
 | `PROVENANCE_WRITE_FAILED` | 現像の来歴 JSON を書けない | develop 系 |
 | `THUMBNAIL_FAILED` / `CACHE_WRITE_FAILED` | 解析中のサムネイル・解析キャッシュの書き込み失敗（**`get_analysis` の `error` に message だけが載る**。§1.1） | start_analysis（非同期） |
-| `SOURCE_SCAN_FAILED` | 解析開始時に現像元フォルダを走査できない（消えた・ディレクトリでない・権限・列挙の途中失敗）か、対象ファイルのサイズ・mtime を取れない（壊れたシンボリックリンク等。§3 の入力指紋）。空フォルダは失敗ではない。`error` の扱いは上と同じ | start_analysis（非同期） |
+| `SOURCE_SCAN_FAILED` | 解析の開始時または終了時の照合で、現像元フォルダを走査できない（消えた・ディレクトリでない・権限・列挙の途中失敗）か、対象ファイルのサイズ・mtime を取れない（壊れたシンボリックリンク等。§3 の入力指紋）。解析中に読めなくなった場合も含む。空フォルダは失敗ではない。`error` の扱いは上と同じ | start_analysis（非同期） |
+| `SOURCE_CHANGED` | 解析中に対象ファイルが追加・削除・変更された（終了時の入力指紋が開始時と違う。§3）。結果はキャッシュに保存しない。`error` の扱いは上と同じ | start_analysis（非同期） |
 | `CANDIDATES_FAILED` | 候補生成の scratch・代理画像・CLI 異常終了・スレッド異常 | candidates |
 | `BUSY` | §0.4 の待ち上限超過 | develop 系、merge、candidates |
 | `SIDECAR_NOT_FOUND` | 実行ファイルの隣に `geoframe-ci-develop` が無い（`npm run build:coreimage` 未実行） | engine_info、develop 系、merge、candidates |
@@ -149,9 +150,12 @@ AnalysisStatus =
 - 引数 `force`（省略時 `false`）。戻り値は即時:
   - `"already_running"` … 解析中。
   - `"ready"` … `force=false` で有効なキャッシュがある（再解析しない）。
+  - キャッシュの照合（全対象ファイルの stat）はジョブ状態のロックの外で行い、開始の直前にロックを取り直して
+    二重開始を防ぐ。照合とロックの間に別の解析が終わった場合は、解析が 1 回余分に走るだけ。
   - `"started"` … バックグラウンド（`spawn_blocking`、最大 6 ワーカー）で解析を開始。直前の `error` を消す。
     完了した解析は入力が前回と同じでも新しい `analysis_revision` を持つ（`force=true` の再解析を見分けるため）。
-- 解析中の失敗（`THUMBNAIL_FAILED`、`CACHE_WRITE_FAILED`）は `get_analysis` の `{status:"absent", error}` で見える。
+- 解析中の失敗（`THUMBNAIL_FAILED`、`CACHE_WRITE_FAILED`、`SOURCE_SCAN_FAILED`、`SOURCE_CHANGED`）は
+  `get_analysis` の `{status:"absent", error}` で見える。
   デコードできない JPG は黙って飛ばす。
 - 対象ファイルは現像元フォルダ直下の `^DSC\d{5}\.(ARW|JPG)$`（拡張子は大小無視）。
 - エラー: `SOURCE_ROOT_NOT_CONFIGURED`、`APP_DATA_DIR_UNAVAILABLE`、`INTERNAL_ERROR`。
@@ -391,6 +395,11 @@ NativeRoiDiagnostic = {
     `capture_id` と一致・ファイル名の ID/枚数/プリセット/ハッシュ・`output_size` と `output_sha256` の一致を検証する。
     **`merged` の `capture_id` は合成の先頭（最小）ID を渡す**。
 - 元ファイルが無いものはエラーにせず `skipped` に入れる。出力名の重複も `skipped`。
+- manifest の `group` は解析キャッシュ（§3）から引く。キャッシュが**無い**（未解析・フォルダ変更直後）なら
+  `group: null` のまま書き出す。キャッシュは**あるのに今の写真と一致しない・読めない**（写真の追加・削除・
+  差し替え、旧形式、壊れている、サムネイル欠け）なら、コピーと manifest を作る前に
+  「解析結果が現在の写真フォルダの内容と一致しません（…）。解析をやり直してから書き出してください。」で止める
+  （古い group / was_recommended を黙って落とさないため。#32）。
 - 書き出し全体をプロセス内 mutex で直列化。一時ファイル `.export-<pid>-<n>.tmp` → rename。
 
 ```
@@ -517,14 +526,19 @@ GroupInfo = {
 ```
 
 - `close_call` は confidence < 0.6 のとき付く。
-- **`analysis_revision`（解析の世代）**: 解析が完了するたびに新しく作る一意値（時刻・プロセス ID・連番・
-  プロセスごとの乱数鍵の SHA-1 先頭 32 桁）。入力からは導かないので、同じ入力・同じ秒の強制再解析でも変わり、
+- **`analysis_revision`（解析の世代）**: 解析が完了するたびに新しく作る一意値（ナノ秒の現在時刻・プロセス ID・
+  プロセス内の連番と、std `RandomState` の値の SHA-1 先頭 32 桁）。一意性を担うのは時刻 + PID + 連番の組で
+  （同じプロセス内では連番が必ず違い、再起動後は時刻か PID が違う）、`RandomState` は推測しにくくするための補助
+  （鍵はスレッドごとに 1 度だけ乱数で初期化され以後は増分されるだけで、呼び出しごとの新しい乱数ではない）。
+  入力からは導かないので、同じ入力・同じ秒の強制再解析でも変わり、
   キャッシュに保存されるので同じ解析の再取得では変わらない。フロントは採用（accepted）の結び直しを
   この値の変化で判定する（#3 B1）。値が無い v2（Python）の解析だけ `generated_at` で代用する。
 - **`source_id`（入力の識別子）**: 入力指紋 v2。現像元フォルダの解決済みパスと、対象ファイル
   （`^DSC\d{5}\.(ARW|JPG)$`、拡張子の大小無視。表記違いの同 ID も別エントリとして全部）の
   **実名・バイト数・mtime（ナノ秒）** を実名の辞書順に並べた SHA-1。入力が変わらなければ再解析しても同じ値。
-  解析の**読み込み前**（scanning）に取るので、解析中に入力が変わると次の照合で外れて再解析に倒れる。
+  解析の**読み込み前**（scanning）に取り、終了時に走査し直して比べる。違えば `SOURCE_CHANGED`、
+  読めなくなっていれば `SOURCE_SCAN_FAILED` で失敗し、結果をキャッシュに保存しない
+  （終了時の照合より後の変更は、次の `get_analysis` の照合で外れる）。
   中身はハッシュしない（ポーリングごとに 24MP の JPG/ARW を読まないため。照合は stat のみ）。
 - **stat 方式の検出限界**: サイズと mtime を保ったままの差し替え（`cp -p`、`rsync -t`、mtime を戻すツール等）は
   検出しない。FAT32 の mtime は 2 秒、exFAT は 10ms 単位なので、その粒度内でサイズも同じ書き換えは見逃しうる。
@@ -537,6 +551,9 @@ GroupInfo = {
   無効なキャッシュは削除せず「無い」扱い（再解析でサムネイルも作り直す）。
   旧形式（`_source_signature` = パスと名前一覧のみ）のキャッシュは `_source_fingerprint` を持たないので、
   更新後の初回に一度だけ無効になる。`analysis_version` は 3 のまま（公開の形は追加フィールドのみ）。
+- 今回の範囲外: `source_id` が変わっても、現像・合成キャッシュ（§4 `coreimage/`。こちらは元 ARW の
+  サイズ・mtime を別途キーに含む）の一括削除や、選択グループ等の state の再結合はしない。
+  フロントが採用を結び直す契機は `analysis_revision` の変化だけ。
 - `tests/fixtures/baseline/analysis.json` は旧形式の凍結記録で、`analysis_revision`・`source_id` を持たない。
   現行契約に合わせて書き換えない（基準比較は採点値・グループ・推薦・`summary` だけを見る）。
 
