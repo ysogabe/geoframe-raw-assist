@@ -45,7 +45,8 @@ Core Image を描画するモードは CLI（`npm run build:coreimage` →
 |---|---|---|
 | `--frozen-manifest M --frozen-root R --frozen-verify-only` | 既定 | 凍結物の照合だけ（CLI・現像元不要）。`<out>/frozen_verification.json` |
 | `--frozen-manifest M --frozen-root R --source-root RAW` | 既定 | 照合後、同じ撮影 ID・mode を現在の CI で描画し、凍結画像と同寸で比較（ΔE76・RGB MAE・輝度差・完全一致画素率・各画像の指標）。`frozen_comparison.{json,csv}`、`sheets/<id>_<mode>_<NN>_frozen.jpg`（`NN` はマニフェストの行番号。CI 出力は `coreimage/<mode>/<id>_<mode>_frozen<NN>*.jpg`。同じ撮影 ID・mode の行が複数あっても上書きしない） |
-| 上 + `--frozen-capture FILE` | 既定 | 今回の CI 出力を同じ形式のマニフェストとして書く（凍結ルートは `--out`）。**描画エラーが 1 件でもあれば書かない**（既存の完全な基準を部分結果で置き換えない） |
+| 上 + `--frozen-capture FILE` | 既定 | 今回の CI 出力を同じ形式のマニフェストとして書く（凍結ルートは `--out`）。**描画エラーが 1 件でもあれば書かない**（既存の完全な基準を部分結果で置き換えない）。`--frozen-manifest`（比較）と一緒にだけ使える: 単独、`--frozen-verify-only` との併用、`--frozen-root` / `--frozen-preset` だけの指定は黙って無視せずエラーにする |
+| `--frozen-bootstrap-ci --source-root RAW --captures ID... --out ROOT` | 既定 | **凍結画像がゼロでも**現在の CI 出力から基準を新規作成する（下の「CI 基準の新規作成」）。`ROOT/ci_frozen.json` と来歴を書く |
 | `--captures` / `--select auto`（無指定） | 既定 | camera / coreimage / coreimage_lens の比較 |
 | `--sharpness` / `--night` / `--highlight` / `--presets` / `--diagnosis` | 既定 | CI 系の列だけで実行。rawpy 列・rawpy 後段仕上げ（`*_usm`）は `skipped: legacy_rawpy`、`--diagnosis` の CFA 飽和（センサー段の帰属）は計測しない |
 | `--adjustments --dry-run` | 既定 | リクエストの契約検査だけ |
@@ -107,6 +108,46 @@ python scripts/evaluate_raw.py --source-root "$RAW" --developed ci_lens=work/raw
 | `export_presets_fixture.py --check` | 既定 | 凍結 legacy 表と CI 表の構造（名前・ラベル・説明・並び・キー・値域・NR）と書式の検査 |
 | `export_presets_fixture.py --check-source` / `--write` | 旧経路 | `local_raw/presets.py` との突き合わせ / 再生成 |
 
+## CI 基準の新規作成（凍結画像がゼロのとき）
+
+`--frozen-manifest` の経路は既存の凍結画像を照合してから比べるため、旧 worktree ごと画像を失った状態では
+`--frozen-capture` を使えない。そこで**作成だけ**を行う明示モード `--frozen-bootstrap-ci` を持つ（旧 Python・rawpy・
+lensfunpy は使わない）。#57 の実4画像（DSC07402 / DSC07423 の preview / full）の例:
+
+```sh
+CLI=native/coreimage-cli/.build/release/geoframe-ci-develop
+RAW=<repo>/work/raw                      # 読み取り専用の現像元
+FROZEN_ROOT=<worktree 掃除の対象外>/ci-baseline/macos-<version>   # 新規か空のディレクトリ。work/ かリポジトリ外
+python scripts/compare_engines.py --frozen-bootstrap-ci --source-root "$RAW" --cli "$CLI" \
+  --captures DSC07402 DSC07423 --out "$FROZEN_ROOT"
+```
+
+- 各撮影 ID を **preview**（長辺 `--max-edge`、既定 1600）と **full** で描画する（出力順は撮影 ID 順 → preview, full）。
+  リクエストは既定に頼らず全項目を明示する: `profile=apple_default`・レンズ補正 ON・decoder `9`・
+  `--frozen-preset`（既定 `neutral_recovery`）の Adjustments **全9キー**（契約の値域も検査する）。
+  Adjustments を無視する古い CLI（0.3.0 未満）は、完全な基準にならないので作成前に拒否する。
+- 書くもの（すべて `--out` 配下、path は `--out` からの相対）:
+  `ci_frozen.json`（`rawpy_images.json` と同じ形式: `capture_id` / `mode` / `path` / `sha256` / `rgb8_sha256` /
+  `dimensions` / `request`、加えて `source` = ARW のファイル名・サイズ・sha256）、`ci_frozen_provenance.json`
+  （OS 版・CPU 種別・CLI のファイル名と sha256・`--version` / `--capabilities`・応答の CLI/OS/decoder 版・スクリプトの sha256・
+  現像元ハッシュ・全リクエスト）、`bootstrap_report.json`、`run.log`、`coreimage/<mode>/*.jpg` と CLI 応答 JSON。
+  CLI 応答の絶対パスはファイル名・相対パスへ置き換える。EXIF・GPS・絶対パスはマニフェスト・来歴に書かない。
+- **安全規則**: `--out` は存在しないか空のディレクトリだけ（中身があれば何も変えずに拒否）。現像元・CLI と重なる場所、
+  Git 管理下（`work/` 以外のリポジトリ内）も拒否する。描画は同じ親の一時ディレクトリ
+  （`.<out名>.bootstrap-<時刻>-<pid>`）へ行い、全画像の描画・現像元不変の確認・マニフェストの自己照合（ハッシュ・寸法）に
+  成功したときだけ `--out` へ改名して公開する。1 件でも失敗すれば `--out` には何も作らず（終了コード 1）、
+  診断用に一時ディレクトリ（`bootstrap_report.json` あり・マニフェストなし）を残す。不要なら手で削除する。
+  `--captures` の重複・不正 ID・ARW 欠落は描画前に拒否する。
+- **併用できないオプション**は黙って無視せずエラー: `--frozen-manifest` / `--frozen-root` / `--frozen-verify-only` /
+  `--frozen-capture` / `--select` / `--full` / `--no-lens` / 各評価モード / `--dry-run` / `--legacy-rawpy` など。
+  `--source-root` / `--captures` / `--out` は必須（既定の出力先は使わない）。
+- 作成後は通常の経路で使う: `--frozen-manifest "$FROZEN_ROOT/ci_frozen.json" --frozen-root "$FROZEN_ROOT" --frozen-verify-only` で照合、
+  `--source-root` と `--cli` を付けて別の `--out` へ再比較（preview の長辺は `request.max_edge` から再現。
+  同一環境なら ΔE76 0・完全一致率 1.0 を期待する）。
+- 保管: 基準画像は撮影元の EXIF（GPS を含みうる）を引き継ぐため Git に入れない。**画像とマニフェスト・来歴は同じ
+  ディレクトリのまま**、worktree の掃除で消えない場所（リポジトリ外の `$FROZEN_ROOT`）に置き、バックアップも同じ単位で取る。
+  この基準は「作成時点の CI」の開始点であり、削除済みの旧 rawpy / 前回 CI 画像との回帰比較ができたことにはならない。
+
 ## OS 更新時の回帰確認（手順）
 
 ```sh
@@ -148,7 +189,8 @@ CI は 1600×1067 / 6000×4000、rawpy は 1600×1069 / 6000×4008 で、2% 以�
 - `tests/test_evaluation_independence.py` は削除後の状態を一時ディレクトリに再現する: 評価スクリプトと
   `scripts/evaluation/`・凍結 JSON だけをコピーし（`local_raw/` は置かない）、`sitecustomize` で `local_raw` /
   `rawpy` / `lensfunpy` の import を遮断したサブプロセスで、凍結比較（照合・欠落/改変/寸法/画素の失敗・
-  CI 出力の凍結と再生・部分結果で上書きしないこと）、既定比較（rawpy 列なし）、候補集計、evaluate_raw、
+  CI 出力の凍結と再生・部分結果で上書きしないこと、`--frozen-bootstrap-ci` の作成→照合→再比較と空/新規でない出力先・描画失敗・
+  重複 ID・併用不可オプションの拒否）、既定比較（rawpy 列なし）、候補集計、evaluate_raw、
   凍結監査・選定参照値・プリセット表、旧経路の明示エラーを実際に回す。Core Image CLI は偽 CLI。
 - 旧経路が必要になったら、削除前のコミットを別の worktree に出して、その checkout の
   `requirements-raw.txt` の環境で明示フラグを付けて実行する

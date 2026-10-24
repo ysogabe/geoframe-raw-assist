@@ -6238,7 +6238,7 @@ def frozen_request(entry: dict[str, Any], preset: str) -> dict[str, Any]:
     request = dict(FROZEN_DEFAULT_REQUEST)
     recorded = entry.get("request")
     if isinstance(recorded, dict):
-        request.update({k: recorded[k] for k in ("profile", "lens", "decoder_version", "adjustments") if k in recorded})
+        request.update({k: recorded[k] for k in ("profile", "lens", "decoder_version", "adjustments", "max_edge") if k in recorded})
     if "adjustments" not in request:
         request["adjustments"] = ci_preset_adjustments(str(entry.get("preset") or preset))
     return request
@@ -6290,6 +6290,20 @@ def verify_frozen(manifest: Path, root: Path, out: Path) -> list[frozen.FrozenIm
     return images
 
 
+def frozen_capture_entry(output: Path, root: Path, capture_id: str, mode: str, request: dict[str, Any],
+                         row: dict[str, Any]) -> dict[str, Any]:
+    """CI 出力 1 枚を ``rawpy_images.json`` 形式の凍結マニフェスト行にする（path は ``root`` からの相対）。"""
+    with Image.open(output) as handle:
+        rgb8 = np.asarray(handle.convert("RGB"))
+        size = list(handle.size)
+    keys = ("profile", "lens", "decoder_version", "adjustments") + (("max_edge",) if "max_edge" in request else ())
+    return {"capture_id": capture_id, "mode": mode, "path": output.relative_to(root).as_posix(),
+            "sha256": frozen.file_sha256(output),
+            "rgb8_sha256": hashlib.sha256(rgb8.tobytes()).hexdigest(), "dimensions": size,
+            "request": {k: request[k] for k in keys},
+            "coreimage_applied": {k: row.get(k) for k in ("ci_baseline_exposure", "ci_sharpness", "ci_lum_nr")}}
+
+
 def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str, capture: Path | None) -> int:
     """照合済みの凍結画像ごとに現在の CI で描画し、凍結画像と同寸で比べる。描画失敗が 1 件でもあれば 1 を返す。
 
@@ -6314,7 +6328,7 @@ def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str
             continue
         row = run_coreimage(ctx, cid, mode, bool(request["lens"]), decoder_version=str(request["decoder_version"]),
                             profile=str(request["profile"]), variant=variant, adjustments=request["adjustments"],
-                            max_edge=max(image.dimensions) if mode == "preview" else None)
+                            max_edge=(request.get("max_edge") or max(image.dimensions)) if mode == "preview" else None)
         if row.get("error"):
             rows.append({**base, **row})
             continue
@@ -6331,15 +6345,7 @@ def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str
                                     f"{cid} {mode}  ΔE76 {out_row['frozen_delta_e76']:.2f}  fit {fit}"),
                         ctx.out / "sheets" / f"{cid}_{mode}_{index:02d}_frozen.jpg")
         if capture is not None:
-            output = Path(row["output"])
-            with Image.open(output) as handle:
-                rgb8 = np.asarray(handle.convert("RGB"))
-                size = list(handle.size)
-            captured.append({"capture_id": cid, "mode": mode, "path": output.relative_to(ctx.out).as_posix(),
-                             "sha256": frozen.file_sha256(output),
-                             "rgb8_sha256": hashlib.sha256(rgb8.tobytes()).hexdigest(), "dimensions": size,
-                             "request": {k: request[k] for k in ("profile", "lens", "decoder_version", "adjustments")},
-                             "coreimage_applied": {k: row.get(k) for k in ("ci_baseline_exposure", "ci_sharpness", "ci_lum_nr")}})
+            captured.append(frozen_capture_entry(Path(row["output"]), ctx.out, cid, mode, request, row))
     write_rows_csv(ctx.out / "frozen_comparison.csv", rows, ("capture_id", "mode"))
     errors = [r for r in rows if r.get("error")]
     payload = {"out": str(ctx.out), "rows": rows, "errors": errors,
@@ -6357,13 +6363,200 @@ def run_frozen(ctx: RunContext, images: list[frozen.FrozenImage], *, preset: str
     return 1 if errors else 0
 
 
+# =============================================================================
+# 現在の CI 出力を凍結基準の起点にする --frozen-bootstrap-ci（#57 PR A）
+# =============================================================================
+#
+# 旧凍結画像が 1 枚も残っていなくても、現在の Core Image CLI の出力から ``rawpy_images.json`` と同じ形式の
+# 凍結基準を新規に作る。``--frozen-manifest`` の経路は既存の凍結画像を前提にするため、旧 worktree ごと画像が
+# 失われた状態では開始できない。この経路は照合ではなく**作成**だけを行い、次の安全規則を守る:
+#
+# - 出力先 ``--out`` は存在しないか空のディレクトリだけ（既存の基準・入力・現像元は上書きしない）。
+# - 描画は同じ親ディレクトリの一時ディレクトリへ行い、全画像の描画と自己照合に成功したときだけ ``--out`` へ
+#   改名して公開する。1 件でも失敗すれば ``--out`` には何も作らない（途中の画像は一時ディレクトリに残る）。
+# - 基準画像は撮影元の EXIF（GPS を含みうる）を引き継ぐので、Git 管理下（``work/`` 以外のリポジトリ内）は拒否する。
+# - マニフェスト・来歴の path は ``--out`` からの相対、現像元は ``DSC#####.ARW`` のファイル名・サイズ・sha256 だけ
+#   （絶対パス・EXIF・GPS は書かない）。
+
+BOOTSTRAP_MODES = ("preview", "full")
+BOOTSTRAP_PREVIEW_EDGE = 1600
+BOOTSTRAP_MANIFEST = "ci_frozen.json"
+BOOTSTRAP_PROVENANCE = "ci_frozen_provenance.json"
+BOOTSTRAP_REPORT = "bootstrap_report.json"
+#: ``--frozen-bootstrap-ci`` と併用できない（黙って無視されると基準の意味が変わる）オプション。
+BOOTSTRAP_INCOMPATIBLE = (
+    ("frozen_manifest", "--frozen-manifest"), ("frozen_root", "--frozen-root"),
+    ("frozen_verify_only", "--frozen-verify-only"), ("frozen_capture", "--frozen-capture"),
+    ("select", "--select"), ("full", "--full"), ("full_ids", "--full-ids"), ("no_lens", "--no-lens"),
+    ("sharpness", "--sharpness"), ("night", "--night"), ("night_scales", "--night-scales"),
+    ("bracket", "--bracket"), ("bracket_pairs", "--bracket-pairs"), ("highlight", "--highlight"),
+    ("adjustments", "--adjustments"), ("diagnosis", "--diagnosis"), ("presets", "--presets"),
+    ("presets_no_rawpy", "--presets-no-rawpy"), ("keep_dumps", "--keep-dumps"), ("dry_run", "--dry-run"),
+    ("features_cache", "--features-cache"), ("legacy_rawpy", "--legacy-rawpy"),
+)
+
+
+def bootstrap_request(preset: str, mode: str, preview_edge: int = BOOTSTRAP_PREVIEW_EDGE,
+                      presets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """基準 1 枚のリクエスト（純粋）。既定値に頼らず全項目を明示する: apple_default・レンズ補正 ON・decoder 9・
+    CI プリセットの Adjustments 全 9 キー・preview の長辺。契約違反（キー不足・値域外）は ValueError。"""
+    if mode not in BOOTSTRAP_MODES:
+        raise ValueError(f"mode は preview / full のどちらかです: {mode}")
+    adjustments = ci_preset_adjustments(preset, presets)
+    problems = validate_adjustments_request({"settings": {"profile": "apple_default"}, "adjustments": adjustments})
+    if problems:
+        raise ValueError(f"プリセット {preset} の adjustments が契約に反します: " + "; ".join(problems))
+    request: dict[str, Any] = {"profile": "apple_default", "lens": True, "decoder_version": CI_DECODER_VERSION,
+                               "adjustments": adjustments}
+    if mode == "preview":
+        request["max_edge"] = int(preview_edge)
+    return request
+
+
+def bootstrap_path_problems(out: Path, source_root: Path, cli: Path, project_root: Path = PROJECT_ROOT) -> list[str]:
+    """出力先が安全でない理由の一覧（パスと出力先の中身だけで判定。何も作らない）。"""
+    out, source_root, cli, project_root = out.resolve(), source_root.resolve(), cli.resolve(), project_root.resolve()
+    problems = []
+    if out.exists() and not out.is_dir():
+        problems.append(f"--out がディレクトリではありません: {out}")
+    elif out.is_dir() and any(out.iterdir()):
+        problems.append(f"--out が空ではありません（既存の基準・ファイルを上書きしないため空のディレクトリか新規の場所を指定）: {out}")
+    for label, other in (("--source-root", source_root), ("--cli", cli)):
+        if out == other or out.is_relative_to(other) or other.is_relative_to(out):
+            problems.append(f"--out が {label} と重なります: {out}")
+    if (out == project_root or out.is_relative_to(project_root) or project_root.is_relative_to(out)) \
+            and not out.is_relative_to(project_root / "work"):
+        problems.append(f"--out が Git 管理下のリポジトリ内です（基準画像は撮影元の EXIF・GPS を引き継ぐため work/ かリポジトリ外へ）: {out}")
+    return problems
+
+
+def _scrub_cli_response(path: Path, root: Path, source_name: str) -> dict[str, Any]:
+    """CLI 応答 JSON の絶対パス（input / output）を相対・ファイル名へ置き換えて書き戻し、置換後を返す。"""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["input"] = source_name
+    payload["output"] = path.with_suffix(".jpg").relative_to(root).as_posix()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+def bootstrap_ci_baseline(*, source_root: Path, captures: list[str], out: Path, cli: Path, preset: str,
+                          preview_edge: int, project_root: Path = PROJECT_ROOT) -> int:
+    """現在の CI で ``captures`` × (preview, full) を描画し、凍結基準として ``out`` に公開する。成功なら 0。"""
+    try:
+        ids = [validate_capture_id(c) for c in captures]
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if not ids:
+        raise SystemExit("--frozen-bootstrap-ci には --captures（撮影 ID）が必要です")
+    duplicated = sorted({c for c in ids if ids.count(c) > 1})
+    if duplicated:
+        raise SystemExit(f"--captures に重複があります: {', '.join(duplicated)}")
+    source_root, out, cli = source_root.expanduser().resolve(), out.expanduser().resolve(), cli.expanduser().resolve()
+    if not source_root.is_dir():
+        raise SystemExit(f"現像元フォルダがありません: {source_root}")
+    problems = bootstrap_path_problems(out, source_root, cli, project_root)
+    if problems:
+        raise SystemExit("基準の出力先に使えません:\n- " + "\n- ".join(problems))
+    if not 64 <= preview_edge <= 6048:
+        raise SystemExit("--max-edge は 64〜6048 で指定してください")
+    try:
+        requests = {mode: bootstrap_request(preset, mode, preview_edge) for mode in BOOTSTRAP_MODES}
+    except (KeyError, ValueError) as error:
+        raise SystemExit(str(error)) from None
+    if not cli.is_file():
+        raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {cli}")
+    cli_version, cli_capabilities = cli_probe(cli, "--version"), cli_probe(cli, "--capabilities")
+    cli_problem = adjustments_cli_problem(cli_version, cli_capabilities)
+    if cli_problem:
+        raise SystemExit(f"基準を作れません（adjustments を無視する CLI では完全な基準にならない）: {cli_problem}")
+    sources_info = {}
+    for cid in ids:
+        arw = source_file(source_root, cid, "ARW")
+        if not arw.is_file():
+            raise SystemExit(f"現像元の ARW がありません: {cid}")
+        sources_info[cid] = {"file": arw.name, "size_bytes": arw.stat().st_size, "sha256": frozen.file_sha256(arw)}
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    staging = out.parent / f".{out.name}.bootstrap-{stamp}-{os.getpid()}"
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.mkdir()
+    ctx = RunContext(source_root=source_root, out=staging, cli=cli, max_edge=preview_edge, legacy_rawpy=False)
+    entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = []
+    jobs = [(cid, mode) for cid in ids for mode in BOOTSTRAP_MODES]
+    for index, (cid, mode) in enumerate(jobs, 1):
+        ctx.say(f"[bootstrap] ({index}/{len(jobs)}) {cid} {mode}")
+        request = requests[mode]
+        row = run_coreimage(ctx, cid, mode, bool(request["lens"]), decoder_version=request["decoder_version"],
+                            profile=request["profile"], variant=f"baseline{index:02d}", adjustments=request["adjustments"],
+                            max_edge=request.get("max_edge"))
+        if row.get("error"):
+            errors.append({"capture_id": cid, "mode": mode, "error": row["error"]})
+            ctx.say(f"  ERROR {row['error']}")
+            continue
+        output = Path(row["output"])
+        response = _scrub_cli_response(output.with_suffix(".json"), staging, sources_info[cid]["file"])
+        responses.append(response)
+        entry = frozen_capture_entry(output, staging, cid, mode, request, row)
+        entry["source"] = dict(sources_info[cid])
+        entries.append(entry)
+    # 描画中に現像元が変わっていたら、来歴が嘘になるので失敗にする。
+    for cid, info in sources_info.items():
+        if frozen.file_sha256(source_file(source_root, cid, "ARW")) != info["sha256"]:
+            errors.append({"capture_id": cid, "mode": "-", "error": "描画中に現像元の ARW が変更されました"})
+    if not errors and len(entries) != len(jobs):
+        errors.append({"capture_id": "-", "mode": "-", "error": "描画できた画像数が要求と一致しません"})
+    response_versions = []
+    for r in responses:
+        item = {k: r.get(k) for k in ("cli_version", "macos_version", "decoder_version")}
+        if item not in response_versions:
+            response_versions.append(item)
+    provenance = {
+        "kind": "coreimage_frozen_baseline", "preset": preset, "preview_max_edge": preview_edge,
+        "captures": ids, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "os": {"macos": platform.mac_ver()[0], "machine": platform.machine()},
+        "cli": {"file": cli.name, "sha256": frozen.file_sha256(cli), "version": cli_version, "capabilities": cli_capabilities,
+                "response_versions": response_versions},
+        "script": {"file": Path(__file__).name, "sha256": frozen.file_sha256(Path(__file__).resolve())},
+        "sources": sources_info,
+        "requests": requests,
+    }
+    report: dict[str, Any] = {"ok": not errors, "errors": errors, "rendered": len(entries), "expected": len(jobs)}
+    if not errors:
+        manifest = staging / BOOTSTRAP_MANIFEST
+        manifest.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (staging / BOOTSTRAP_PROVENANCE).write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:  # 公開前に、書いたマニフェストを凍結ルートとして自己照合する（ハッシュ・寸法）
+            verified = frozen.verify_manifest(manifest, staging)
+        except frozen.FrozenArtifactError as error:
+            report.update({"ok": False, "errors": [{"capture_id": "-", "mode": "-", "error": str(error)}]})
+            manifest.unlink()
+        else:
+            report["verified"] = len(verified)
+    (staging / BOOTSTRAP_REPORT).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (staging / "run.log").write_text("\n".join(ctx.log) + "\n", encoding="utf-8")
+    if not report["ok"]:
+        ctx.say(f"[bootstrap] 失敗: 基準は公開しません（途中経過は {staging} に残っています。不要なら削除してください）")
+        print("\n".join(f"{e['capture_id']} {e['mode']}: {e['error']}" for e in report["errors"]), file=sys.stderr)
+        return 1
+    try:
+        os.rename(staging, out)  # 空の既存ディレクトリか新規パスへだけ入る（中身があれば OSError で上書きしない）
+    except OSError as error:
+        print(f"基準を公開できません（{out}）: {error}。途中経過: {staging}", file=sys.stderr)
+        return 1
+    print(f"[bootstrap] 凍結基準を作成しました: {out / BOOTSTRAP_MANIFEST}（{len(entries)} 件、自己照合 PASS）", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Core Image CLI の出力をカメラ JPEG・凍結基準（旧 rawpy は明示 opt-in）と比較します。")
     parser.add_argument("--source-root", type=Path, help="ARW / JPG の現像元フォルダ（--frozen-verify-only 以外では必須）")
     parser.add_argument("--captures", nargs="*", help="比較する撮影ID（例 DSC04430）")
     parser.add_argument("--select", choices=["auto"], help="EXIF からカットを自動選定する")
     parser.add_argument("--out", type=Path, help="出力先（既定 work/engine-comparison/<timestamp>/）")
-    parser.add_argument("--max-edge", type=int, default=2400)
+    parser.add_argument("--max-edge", type=int, default=None,
+                        help="preview の長辺（既定 2400。--frozen-bootstrap-ci では既定 1600）")
     parser.add_argument("--full", action="store_true", help="フル解像度でも計測する")
     parser.add_argument("--full-limit", type=int, default=5, help="--full で回すカット数（0 で全件）")
     parser.add_argument("--full-ids", nargs="*", help="--full で回すカットを明示する")
@@ -6419,10 +6612,15 @@ def main(argv: list[str] | None = None) -> None:
                         help="凍結基準のマニフェスト（例 tests/fixtures/baseline/rawpy_images.json）。照合してから現在の CI と比べる")
     parser.add_argument("--frozen-root", type=Path, help="凍結マニフェストの path の基準ディレクトリ（例 wt-107-baseline の checkout）")
     parser.add_argument("--frozen-verify-only", action="store_true", help="凍結物のハッシュ・寸法の照合だけ行う（CLI・現像元は不要）")
-    parser.add_argument("--frozen-preset", default=frozen_presets.DEFAULT_PRESET,
-                        help="request の無い凍結行で使う CI プリセット（presets.json。既定 neutral_recovery）")
+    parser.add_argument("--frozen-preset", default=None,
+                        help="request の無い凍結行、または --frozen-bootstrap-ci で使う CI プリセット（presets.json。既定 neutral_recovery）")
     parser.add_argument("--frozen-capture", type=Path,
-                        help="今回の CI 出力を凍結マニフェストとして書く（次の OS 更新で --frozen-manifest に渡す。--frozen-root は --out）")
+                        help="今回の CI 出力を凍結マニフェストとして書く（--frozen-manifest の比較と同時に使う。次の OS 更新で "
+                             "--frozen-manifest に渡す。--frozen-root は --out）。単独では使えない")
+    parser.add_argument("--frozen-bootstrap-ci", action="store_true",
+                        help="凍結画像が 1 枚も無くても、現在の CI 出力から凍結基準を新規作成する（--captures と空か新規の --out が必須。"
+                             "<out>/ci_frozen.json と来歴を書く。preview は長辺 --max-edge（既定 1600）、apple_default・レンズ ON・decoder 9・"
+                             "プリセットの Adjustments 全 9 キー。docs/development/evaluation-paths.md）")
     # 内部用（別プロセスのワーカー）
     parser.add_argument("--worker-rawpy", help=argparse.SUPPRESS)
     parser.add_argument("--worker-noop", action="store_true", help=argparse.SUPPRESS)
@@ -6432,6 +6630,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--worker-adjustments", help=argparse.SUPPRESS)  # 既定プリセットへの上書き（JSON オブジェクト）
     parser.add_argument("--worker-preset", help=argparse.SUPPRESS)  # rawpy のプリセット名（--presets の legacy 参考）
     args = parser.parse_args(argv)
+    bootstrap_edge = args.max_edge if args.max_edge is not None else BOOTSTRAP_PREVIEW_EDGE
+    args.max_edge = args.max_edge if args.max_edge is not None else 2400
 
     if args.worker_noop:
         worker_noop(args)
@@ -6440,7 +6640,23 @@ def main(argv: list[str] | None = None) -> None:
         worker_rawpy(args)
         return
 
+    if args.frozen_bootstrap_ci:
+        conflicting = [flag for dest, flag in BOOTSTRAP_INCOMPATIBLE if getattr(args, dest)]
+        if conflicting:
+            raise SystemExit("--frozen-bootstrap-ci と併用できないオプションです（黙って無視しません）: " + ", ".join(conflicting))
+        if args.source_root is None or args.out is None or not args.captures:
+            raise SystemExit("--frozen-bootstrap-ci には --source-root・--captures・--out（空か新規のディレクトリ）が必要です")
+        raise SystemExit(bootstrap_ci_baseline(
+            source_root=args.source_root, captures=list(args.captures), out=args.out, cli=args.cli,
+            preset=args.frozen_preset or frozen_presets.DEFAULT_PRESET, preview_edge=bootstrap_edge))
+    if not args.frozen_manifest:
+        stray = [flag for dest, flag in (("frozen_capture", "--frozen-capture"), ("frozen_root", "--frozen-root"),
+                                         ("frozen_preset", "--frozen-preset")) if getattr(args, dest)]
+        if stray:
+            raise SystemExit(f"{', '.join(stray)} は --frozen-manifest か --frozen-bootstrap-ci と一緒にだけ使えます（黙って無視しません）")
     if args.frozen_manifest:
+        if args.frozen_verify_only and (args.frozen_capture or args.frozen_preset):
+            raise SystemExit("--frozen-verify-only は照合だけを行うため --frozen-capture / --frozen-preset とは併用できません")
         if not args.frozen_root:
             raise SystemExit("--frozen-manifest には --frozen-root が必要です")
         out = (args.out or DEFAULT_OUT_ROOT / time.strftime("frozen-%Y%m%d-%H%M%S")).resolve()
@@ -6468,7 +6684,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"Core Image CLI がありません（npm run build:coreimage）: {args.cli}")
         ctx = RunContext(source_root=args.source_root.expanduser().resolve(), out=out, cli=args.cli.resolve(),
                          max_edge=args.max_edge, legacy_rawpy=False)
-        raise SystemExit(run_frozen(ctx, images, preset=args.frozen_preset, capture=capture))
+        raise SystemExit(run_frozen(ctx, images, preset=args.frozen_preset or frozen_presets.DEFAULT_PRESET, capture=capture))
     if args.frozen_verify_only:
         raise SystemExit("--frozen-verify-only には --frozen-manifest が必要です")
     if args.source_root is None:
