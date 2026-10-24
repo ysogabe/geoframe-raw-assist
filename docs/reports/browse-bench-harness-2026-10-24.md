@@ -1,8 +1,7 @@
 # 閲覧ベンチ：一覧・グループ帯の描画計測基盤（Issue #141 ② / #28）
 
 提案グループ一覧（`GroupList`）と操作画面上部のグループ帯（`GroupStrip`）が、グループ数・写真数に対してどこで重くなるかを
-**初回 baseline として測る**ための独立エントリ。**この文書は手順と解釈の枠組みで、結果（数値）はまだ無い。**
-実測は親が実素材で行い、結果は別途記録する。
+**初回 baseline として測る**ための独立エントリ。手順と解釈は本書、実100/451・合成1000/5000枚の数値は[初回計測結果](browse-bench-results-2026-10-24.md)を参照する。
 
 - 対象外: 仮想化・メモ化などの**最適化（render だけ速くする変更は未実装）**。先に baseline を取り、律速が描画かどうかを見る。
   アプリ本体（`App.tsx`・`main.tsx`・プロダクトの `index.html`・`npm run build`）には何も配線していない。
@@ -147,4 +146,4 @@ strip 系シナリオ（`select_group_strip`・`accept_toggle_strip`・`scroll_s
 ## 6. 検証済みの範囲
 
 型（`tsc --noEmit`）・lint・`vitest`（manifest 検証/合成生成/変換、集計、fake driver によるシナリオ契約）・`npm run bench:browse:build`（profiling 差し替えが効いていることの確認）は
-自 worktree で確認した。**ブラウザでの実行（実 DOM・実スクロール・実画像）は未実施**で、動作確認は親の最初の計測で行う。
+自 worktree で確認した。親がChromeのproduction-profilingで4規模×7シナリオを実行済み。画像errorは0。lazy settleのtimeout警告と代表性の制約は[初回計測結果](browse-bench-results-2026-10-24.md)に残す。WKWebViewはこの独立ハーネスでは未計測。
