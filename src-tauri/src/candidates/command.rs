@@ -128,7 +128,8 @@ pub(super) fn exif_hints(root: &Path, capture: &str) -> ExifHints {
         iso: photo.iso.map(|v| v as f64),
     }
 }
-/// アプリと手動 release テストが共有する本番経路。scratch はアプリ専用の一時出力親。
+/// 手動計測テスト専用の既定OFFラッパー。アプリと共通の `generate_in_slot` を、
+/// テスト用の独立した実行枠で呼ぶ。
 #[cfg(test)]
 pub(super) fn generate(
     root: &Path,
@@ -199,7 +200,10 @@ fn generate_in_slot(
     let estimated = (styles.len() - 1) * per_style;
     for style in &styles[1..] {
         let mut chosen = pso::optimise(&base, &base_metrics, style, per_style, seed, |a, gate| {
-            let m = evaluator.evaluate(a, gate)?;
+            ensure_current()?;
+            let evaluated = evaluator.evaluate(a, gate);
+            ensure_current()?;
+            let m = evaluated?;
             evaluations += 1;
             progress_evaluated += 1;
             progress(style, progress_evaluated, estimated);
@@ -218,7 +222,10 @@ fn generate_in_slot(
                 pso::noise_reduction(style),
             );
             if pso::safe(pso::vector(&moved)) {
-                let metrics = evaluator.evaluate(&moved, *style == "stars")?;
+                ensure_current()?;
+                let evaluated = evaluator.evaluate(&moved, *style == "stars");
+                ensure_current()?;
+                let metrics = evaluated?;
                 if guard_failure(style, &metrics, &base_metrics).is_none()
                     && (*style != "stars" || metrics.star_count >= base_metrics.star_count)
                 {

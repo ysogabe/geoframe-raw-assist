@@ -537,3 +537,80 @@ fn candidates_native_roi_release_validation() {
     }
     assert!(differences.is_empty(), "OFF/ON差分: {differences:?}");
 }
+
+#[test]
+fn stale_pso_stops_before_next_render_and_releases_scratch_and_slot() {
+    use std::os::unix::fs::PermissionsExt;
+    for point in ["render", "progress"] {
+        let root = scratch_test_root(&format!("stale-pso-{point}"));
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([((x + y) * 2 + 16) as u8; 3]))
+            .save(root.join("source.jpg"))
+            .unwrap();
+        fs::write(root.join("DSC07402.ARW"), "mock").unwrap();
+        if point == "render" {
+            fs::write(root.join("stale_on_render"), "").unwrap();
+        }
+        let cli = root.join("cli");
+        fs::write(
+            &cli,
+            r#"#!/bin/sh
+base=$(dirname "$0")
+n=0
+renders=0
+while IFS= read -r line; do
+ n=$((n+1))
+ case "$line" in
+  *'"op":"decode"'*) printf '{"ok":true,"handle":"h%d","sequence":%d}\n' "$n" "$n" ;;
+  *'"op":"release"'*) printf '{"ok":true,"released":true,"sequence":%d}\n' "$n" ;;
+  *)
+   output=$(printf '%s' "$line" | sed -E 's/.*"output":"([^"]*)".*/\1/')
+   renders=$((renders+1))
+   printf '%s' "$renders" > "$base/renders"
+   cp "$base/source.jpg" "$output" || exit 7
+   if [ -f "$base/stale_on_render" ] && [ "$renders" -eq 2 ]; then touch "$base/stale"; fi
+   printf '{"ok":true,"output":"%s","width":64,"height":48,"sequence":%d}\n' "$output" "$n" ;;
+ esac
+done
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let slot = coreimage::DevelopSlot::new(0);
+        let mut renders_when_stale = None;
+        let result = {
+            let guard = slot.acquire().unwrap();
+            generate_in_slot(
+                &root,
+                &cli,
+                &root.join("DSC07402.ARW"),
+                ScratchParent::for_directory(&root.join("scratch")).unwrap(),
+                "DSC07402",
+                "nightscape",
+                Some(42),
+                Some(48),
+                true,
+                &guard,
+                || {
+                    if root.join("stale").exists() {
+                        Err(CoreImageError::new("CANDIDATES_STALE", "stale"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |stage, _, _| {
+                    if point == "progress" && stage != "decode" {
+                        renders_when_stale =
+                            Some(fs::read_to_string(root.join("renders")).unwrap());
+                        fs::write(root.join("stale"), "").unwrap();
+                    }
+                },
+            )
+        };
+        assert_eq!(result.unwrap_err().code, "CANDIDATES_STALE");
+        let expected = renders_when_stale.unwrap_or_else(|| "2".into());
+        assert_eq!(fs::read_to_string(root.join("renders")).unwrap(), expected);
+        assert_eq!(fs::read_dir(root.join("scratch")).unwrap().count(), 0);
+        assert!(slot.acquire().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
