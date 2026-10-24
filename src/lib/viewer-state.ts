@@ -23,6 +23,9 @@ export const WHEEL_ZOOM_SPEED = 0.0018;
 /** キーボード / ボタン 1 回あたりの倍率。 */
 export const ZOOM_STEP = 1.25;
 
+/** 「全体表示のまま」とみなす倍率差（fit に対する相対値）。浮動小数の誤差だけを吸収する。 */
+const AT_FIT_EPSILON = 1e-6;
+
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -184,7 +187,8 @@ export function viewerReducer(state: ViewerState, action: ViewerAction): ViewerS
         faceErrors: { ...state.faceErrors, [action.face]: action.message },
       };
       // 見せるはずだった面が壊れていても、反対側が読めるなら正常な面から始める。
-      // 壊れた面は選べば（再読み込みも含めて）そのエラーが出る。
+      // 壊れた面は選べばそのエラーが出る（面の再選択自体は再読み込みしない。
+      // 後から load が届けば ready に復帰する）。
       if (action.face === "before" || state.face !== action.face) return failed;
       return { ...withMounted(failed, "before"), face: "before" };
     }
@@ -201,10 +205,13 @@ export function viewerReducer(state: ViewerState, action: ViewerAction): ViewerS
       const base = state.base;
       if (!base) return state;
       const fit = Math.min(action.stage.width / base.width, action.stage.height / base.height);
-      // 拡大して見ている最中のリサイズでは倍率と位置を保つ。全体表示より縮んでいる
-      // （＝リサイズで下限を割った）ときだけ、全体表示へ戻して中央に置き直す。
-      const view =
-        !action.initial && state.view.scale > fit ? state.view : centeredView(fit, base, action.stage);
+      // 拡大して見ている最中のリサイズでは倍率と位置を保つ。全体表示のまま（旧 fit と
+      // 等値）なら新しい fit へ追従する。縮んだステージで旧倍率を保つと、全体表示の
+      // つもりの画像がはみ出すため。全体表示より縮んでいる（＝下限を割った）ときも
+      // 全体表示へ戻して中央に置き直す。
+      const wasAtFit = Math.abs(state.view.scale - state.fit) <= AT_FIT_EPSILON * state.fit;
+      const keep = !action.initial && !wasAtFit && state.view.scale > fit;
+      const view = keep ? state.view : centeredView(fit, base, action.stage);
       return { ...state, fit, view };
     }
 
