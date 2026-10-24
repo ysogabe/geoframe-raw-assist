@@ -1,5 +1,5 @@
 import { useRef, type RefObject } from "react";
-import type { DevelopMode, EngineStatus, ViewerGallery, ViewerSource, ViewingItem } from "../lib/app-state";
+import { acceptedMergeLabel, comparisonSurfaceOf, type AcceptedMergeView, type DevelopMode, type EngineStatus, type ViewerGallery, type ViewerSource, type ViewingItem } from "../lib/app-state";
 import {
   formatAperture,
   formatConfidence,
@@ -73,8 +73,12 @@ type OperationPanelProps = {
   mergeBlockReason: string | null;
   mergePreviewResult: MergedResult | undefined;
   mergeFullResult: MergedResult | undefined;
+  /** 今表示している合成（本合成）が採用そのものか。✓ はこのときだけ付く。 */
   mergedAccepted: boolean;
+  /** 採用済みだが今の合成設定に合わない合成（採用時のスナップショット）。無ければ null。 */
+  previousAcceptedMerge: AcceptedMergeView | null;
   onAcceptMerged: () => void;
+  onRemovePreviousAcceptedMerge: () => void;
   onViewMerged: () => void;
   globalBusy: boolean;
   onDevelop: (mode: DevelopMode) => void;
@@ -89,7 +93,7 @@ type OperationPanelProps = {
   previewResults: Record<CaptureId, DevelopedResult>;
   fullResults: Record<CaptureId, DevelopedResult>;
   comparisonRef: RefObject<HTMLDivElement | null>;
-  /** このグループで今見ている面。比較タブの選択状態はここから導く。 */
+  /** このグループで実際に出している面（effectiveViewingOf）。比較タブの選択状態はここから導く。 */
   viewing: ViewingItem;
   /** アプリ内の原寸ビューアを開く。送り輪（開いた時点のスナップショット）はこの画面が組み立てる。 */
   onOpenViewer: (gallery: ViewerGallery) => void;
@@ -139,7 +143,9 @@ export function OperationPanel({
   mergePreviewResult,
   mergeFullResult,
   mergedAccepted,
+  previousAcceptedMerge,
   onAcceptMerged,
+  onRemovePreviousAcceptedMerge,
   onViewMerged,
   globalBusy,
   onDevelop,
@@ -156,16 +162,12 @@ export function OperationPanel({
   const mergePanelRef = useRef<HTMLElement>(null);
   const unscored = analysis.scored === false;
   const developResult = fullResult ?? previewResult;
-  const mergeFullMatchesSelection = mergeFullResult !== undefined &&
-    mergeFrames.length === mergeFullResult.capture_ids.length &&
-    mergeFrames.every((id) => mergeFullResult.capture_ids.includes(id));
-  const mergedResult = isBracket
-    ? mergeFullMatchesSelection ? mergeFullResult : (mergePreviewResult ?? mergeFullResult)
-    : undefined;
-  const canToggleComparison = Boolean(developResult && mergedResult);
+  // App 側で「今の選択・プリセット・調整に合う結果」だけに絞って渡している。
+  // 本合成があればそれを、無ければプレビューを見せる。
+  const mergedResult = isBracket ? (mergeFullResult ?? mergePreviewResult) : undefined;
   const mergedFrameCount = mergedResult?.frames ?? mergeFrames.length;
-  const showMerged = Boolean(mergedResult) && (viewing.kind === "merged" || !developResult);
-  const result = showMerged ? mergedResult : developResult;
+  // 合成を見せるのは viewing が merged のときだけ（写真が未現像でも合成へ黙って切り替えない）。
+  const { showMerged, result, canToggle: canToggleComparison } = comparisonSurfaceOf(viewing, mergedResult, developResult);
 
   /**
    * 原寸ビューアの送り輪を組み立てる。**グループを跨いだ全写真**を一覧と同じ並び順で並べ、
@@ -200,20 +202,26 @@ export function OperationPanel({
     return { items, index: index < 0 ? 0 : index };
   }
 
-  function viewerGalleryFor(initial: "before" | "after"): ViewerGallery {
-    const merged = result && isMergedResult(result) ? result : null;
-    if (!merged) return photoGalleryFor(initial);
+  function mergedGalleryFor(merged: MergedResult, initial: "before" | "after"): ViewerGallery {
+    // 合成の先頭フレームを現像前として見せる。表示中の合成なら captureId と一致する。
+    const lead = merged.capture_ids[0];
     return { items: [{
-      captureId,
-      beforeUrl: sourceJpgUrl(captureId),
+      captureId: lead,
+      beforeUrl: sourceJpgUrl(lead),
       afterUrl: merged.output_url,
       beforeLabel: "現像前",
       afterLabel: "合成後",
       initial,
       preview: Boolean(merged.preview),
       previewEdge: merged.preview ? Math.max(merged.width, merged.height) : undefined,
-      title: `${captureId}（ブラケット合成 ${merged.frames}枚）`,
+      title: `${lead}（ブラケット合成 ${merged.frames}枚）`,
     }], index: 0 };
+  }
+
+  function viewerGalleryFor(initial: "before" | "after"): ViewerGallery {
+    const merged = result && isMergedResult(result) ? result : null;
+    if (!merged) return photoGalleryFor(initial);
+    return mergedGalleryFor(merged, initial);
   }
 
   return (
@@ -252,10 +260,27 @@ export function OperationPanel({
                     <span className="shot-well"><b aria-hidden="true">▤</b><em>本合成すると採用できます</em></span>}
                 </button>
                 <span className="merged-tag">合成 {mergedFrameCount}枚</span>
+                {/* 宛先は今表示している本合成だけ。本合成が無い/合わないときは押せない。 */}
                 <button type="button" className="shot-accept" aria-pressed={mergedAccepted}
                   aria-label={mergedAccepted ? "合成の採用を外す" : "合成した1枚を採用する"}
-                  disabled={!mergeFullResult && !mergedAccepted} title={mergeFullResult || mergedAccepted ? undefined : "本合成すると採用できます"}
+                  disabled={!mergeFullResult} title={mergeFullResult ? undefined : "本合成すると採用できます"}
                   onClick={onAcceptMerged}><span aria-hidden="true">{mergedAccepted ? "✓" : "○"}</span></button>
+              </li>
+            )}
+
+            {/* 今の設定に合わなくなった採用済みの合成。今の合成へ✓を移さず、別タイルで確認と取り消しを残す。 */}
+            {isBracket && previousAcceptedMerge && (
+              <li className="shot-tile shot-merged shot-merged-previous accepted">
+                <button type="button" className="shot-open" aria-label="以前の設定で採用した合成を原寸で確認する"
+                  disabled={!previousAcceptedMerge.result}
+                  onClick={() => previousAcceptedMerge.result && onOpenViewer(mergedGalleryFor(previousAcceptedMerge.result, "after"))}>
+                  {previousAcceptedMerge.result ? <img src={previousAcceptedMerge.result.output_url} alt="以前の設定で採用した合成" decoding="async" /> :
+                    <span className="shot-well"><b aria-hidden="true">▤</b><em>成果物なし</em></span>}
+                </button>
+                <span className="merged-tag">{acceptedMergeLabel(previousAcceptedMerge)}</span>
+                <button type="button" className="shot-accept" aria-pressed="true"
+                  aria-label="以前の設定で採用した合成の採用を外す"
+                  onClick={onRemovePreviousAcceptedMerge}><span aria-hidden="true">✓</span></button>
               </li>
             )}
 
@@ -415,7 +440,9 @@ export function OperationPanel({
           mergeMode={mergeMode} elapsedLabel={mergeElapsedLabel} blockReason={mergeBlockReason}
           busy={globalBusy} engineStatus={engineStatus} presetLabel={presets.find((item) => item.name === presetName)?.label ?? presetName}
           hasPreview={Boolean(mergePreviewResult)} hasFull={Boolean(mergeFullResult)}
-          accepted={mergedAccepted} onAcceptMerged={onAcceptMerged} panelRef={mergePanelRef}
+          accepted={mergedAccepted} onAcceptMerged={onAcceptMerged}
+          previousAccepted={previousAcceptedMerge} onRemovePreviousAccepted={onRemovePreviousAcceptedMerge}
+          panelRef={mergePanelRef}
         />
       )}
 

@@ -1,5 +1,7 @@
 import type { RefObject } from "react";
 import {
+  acceptedMergeLabel,
+  type AcceptedMergeView,
   MERGE_MAX_FRAMES,
   MERGE_MIN_FRAMES,
   defaultMergeFrames,
@@ -35,6 +37,9 @@ type BracketMergeProps = {
    */
   accepted: boolean;
   onAcceptMerged: () => void;
+  /** 採用済みだが今の合成設定に合わない合成。無ければ null。✓ は今の合成には移さず別行で出す。 */
+  previousAccepted: AcceptedMergeView | null;
+  onRemovePreviousAccepted: () => void;
   panelRef: RefObject<HTMLElement | null>;
 };
 
@@ -55,6 +60,8 @@ export function BracketMerge({
   hasFull,
   accepted,
   onAcceptMerged,
+  previousAccepted,
+  onRemovePreviousAccepted,
   panelRef,
 }: BracketMergeProps) {
   const selected = new Set(frames);
@@ -80,7 +87,8 @@ export function BracketMerge({
 
       <p className="bracket-lead">
         露出を変えて撮った{MERGE_MIN_FRAMES}〜{MERGE_MAX_FRAMES}枚を合成し、白飛びと黒つぶれを同時に抑えます。
-        現像プリセット「{presetLabel}」と右の現像パラメータをそのまま使います。
+        現像プリセット「{presetLabel}」と右のパラメータのうち、色温度・暗部の持ち上げ・明るさ・コントラスト・彩度・
+        シャープネス・ノイズ低減を反映します。露出とハイライト回復は合成には反映されません。
       </p>
 
       {multiScene && (
@@ -135,13 +143,13 @@ export function BracketMerge({
         </button>
       </div>
 
-      {/* 採用は本合成の結果があるときだけ。プレビューは書き出しに使えない。 */}
+      {/* 新規採用は今の設定に合う本合成があるときだけ。プレビューや古い本合成は採用できない。 */}
       <div className="bracket-accept">
         <button
           type="button"
           className={`accept-toggle${accepted ? " on" : ""}`}
           aria-pressed={accepted}
-          disabled={!hasFull && !accepted}
+          disabled={!hasFull}
           onClick={onAcceptMerged}
         >
           {accepted ? "採用を外す" : "合成した1枚を採用する"}
@@ -152,6 +160,15 @@ export function BracketMerge({
             : "本合成すると採用できます。"}
         </small>
       </div>
+
+      {previousAccepted && (
+        <div className="bracket-accept bracket-accept-previous">
+          <button type="button" className="accept-toggle on" aria-pressed="true" onClick={onRemovePreviousAccepted}>
+            以前の設定の採用を外す
+          </button>
+          <small>{acceptedMergeLabel(previousAccepted)}</small>
+        </div>
+      )}
 
       {blockReason ? (
         <p className="bracket-block" role="status">{blockReason}</p>
