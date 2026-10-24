@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   acceptedMergeOf,
   activePreset,
+  adjustmentsLostOnLeave,
+  changedAdjustmentKeys,
   comparisonSurfaceOf,
   effectiveViewingOf,
   currentMergeResultsOf,
@@ -1174,6 +1176,62 @@ describe("currentMergeResultsOf / viewingCaptureOf", () => {
       expect(back.presetName).toBe(baseline.presetName);
       expect(back.overrides).toEqual({});
       expect(currentMergeResultsOf(back, bracket).full).toBeUndefined();
+    });
+  });
+
+  describe("グループ移動の確認（adjustmentsLostOnLeave）", () => {
+    /** グループ2で shadow_rescue + contrast 1.3 の本合成を作り、いったん離れて戻った state。 */
+    function restoredState(): State {
+      let state = reducer(opened, { type: "preset/change", presetName: "shadow_rescue" });
+      state = reducer(state, { type: "adjust/change", key: "contrast", value: 1.3 as never });
+      state = { ...state, mergeFullResults: { 2: mergedNow(state, ["B1", "B2", "B3"]) } };
+      return run(state, { type: "screen/operation", groupId: 1 }, { type: "screen/operation", groupId: 2 });
+    }
+
+    it("復元した非既定 recipe を触っていなければ、changedAdjustmentKeys が dirty でも確認しない", () => {
+      const state = restoredState();
+      expect(changedAdjustmentKeys(state)).toEqual(["contrast"]);
+      expect(adjustmentsLostOnLeave(state, bracket)).toBe(false);
+    });
+
+    it("復元した recipe から 1 キーでも手動変更すると確認する", () => {
+      const edited = reducer(restoredState(), { type: "adjust/change", key: "saturation", value: 1.1 as never });
+      expect(adjustmentsLostOnLeave(edited, bracket)).toBe(true);
+    });
+
+    it("既定へリセットしても、戻ると保存 recipe に変わるので確認する", () => {
+      const reset = reducer(restoredState(), { type: "adjust/reset" });
+      expect(changedAdjustmentKeys(reset)).toEqual([]);
+      expect(adjustmentsLostOnLeave(reset, bracket)).toBe(true);
+    });
+
+    it("プリセット名が違っても全 9 値が復元値と同じなら失われない", () => {
+      // shadow_rescue の既定値と同じ値になる neutral_recovery + overrides。
+      const state = restoredState();
+      const same: State = { ...state, presetName: "neutral_recovery", overrides: { shadow_lift: 60, contrast: 1.3 } };
+      expect(effectiveAdjustments(same)).toEqual(effectiveAdjustments(state));
+      expect(adjustmentsLostOnLeave(same, bracket)).toBe(false);
+    });
+
+    it("同じフレームの本合成 A と現在のプレビュー B があるときは、戻ると A になるので B は失われる", () => {
+      const made = restoredState(); // full A = shadow_rescue + contrast 1.3
+      const b = reducer(made, { type: "adjust/change", key: "contrast", value: 1.1 as never });
+      const withPreviewB: State = { ...b, mergePreviewResults: { 2: mergedNow(b, ["B1", "B2", "B3"]) } };
+      expect(currentMergeResultsOf(withPreviewB, bracket).preview).toBeDefined();
+      expect(adjustmentsLostOnLeave(withPreviewB, bracket)).toBe(true);
+      const back = run(withPreviewB, { type: "screen/operation", groupId: 1 }, { type: "screen/operation", groupId: 2 });
+      expect(back.overrides).toEqual({ contrast: 1.3 });
+    });
+
+    it("復元できる保存結果が無いグループは、従来の changedAdjustmentKeys 基準", () => {
+      const clean = run(withEngine, { type: "screen/operation", groupId: 2 });
+      expect(adjustmentsLostOnLeave(clean, bracket)).toBe(false);
+      const edited = reducer(clean, { type: "adjust/change", key: "contrast", value: 1.3 as never });
+      expect(adjustmentsLostOnLeave(edited, bracket)).toBe(true);
+      // legacy recipe（復元できない）も同じく従来基準。
+      const made = { ...edited, mergeFullResults: { 2: { ...mergedNow(edited, ["B1", "B2", "B3"]), adjustments: null as never } } };
+      expect(adjustmentsLostOnLeave(made, bracket)).toBe(true);
+      expect(adjustmentsLostOnLeave({ ...made, overrides: {} }, bracket)).toBe(false);
     });
   });
 
