@@ -85,8 +85,8 @@ export type BenchManifest = {
 
 export type ManifestCheck = { ok: true; manifest: BenchManifest } | { ok: false; errors: string[] };
 
-const MAX_GROUPS = 20_000;
-const MAX_PHOTOS = 100_000;
+export const MAX_GROUPS = 20_000;
+export const MAX_PHOTOS = 100_000;
 const MAX_ERRORS = 20;
 const GROUP_KINDS: readonly GroupKind[] = ["burst", "bracket", "similar", "single"];
 const RAW_LEVELS: readonly RawLevel[] = ["none", "maybe", "recommended", "strong"];
@@ -428,6 +428,16 @@ function pad(value: number, width: number): string {
  * `kind: "synthetic"` として扱い、実メタデータと数値を混ぜない。
  */
 export function generateSyntheticManifest(options: SyntheticOptions): BenchManifest {
+  // 巨大な配列を作る前に入力を検査する(100 万グループや NaN seed を生成に入れない)。
+  if (!Number.isSafeInteger(options.groupCount) || options.groupCount < 1 || options.groupCount > MAX_GROUPS) {
+    throw new Error(`groupCount は 1〜${MAX_GROUPS} の整数(受け取った値: ${String(options.groupCount)})`);
+  }
+  if (!Number.isSafeInteger(options.seed)) throw new Error(`seed は整数(受け取った値: ${String(options.seed)})`);
+  if (!Number.isSafeInteger(options.thumbPoolSize) || options.thumbPoolSize < 1) {
+    throw new Error(`thumbPoolSize は 1 以上の整数(受け取った値: ${String(options.thumbPoolSize)})`);
+  }
+  if (!ID_PATTERN.test(options.id)) throw new Error("id は英数字と . _ - の 1〜64 文字");
+  if (!isRelativeThumbUrl(options.thumbPrefix)) throw new Error("thumbPrefix は相対ディレクトリ(絶対パス・.. は不可)");
   const random = seededRandom(options.seed);
   const photos: BenchPhoto[] = [];
   const groups: BenchGroup[] = [];
@@ -436,6 +446,7 @@ export function generateSyntheticManifest(options: SyntheticOptions): BenchManif
     sizes.push(SYNTHETIC_SIZES[Math.floor(random() * SYNTHETIC_SIZES.length)] ?? 1);
   }
   const photoCount = sizes.reduce((sum, value) => sum + value, 0);
+  if (photoCount > MAX_PHOTOS) throw new Error(`生成される写真数 ${photoCount} が上限 ${MAX_PHOTOS} を超える(groupCount を減らす)`);
   const unique = options.thumbPoolSize >= photoCount;
   // 2026-01-01T09:00:00 から、グループ間 90 秒 + グループ内 1 枚 2 秒で並べる（時刻表示用で、意味は無い）。
   let clock = Date.UTC(2026, 0, 1, 9, 0, 0);
@@ -477,7 +488,7 @@ export function generateSyntheticManifest(options: SyntheticOptions): BenchManif
     });
     clock += 90_000;
   });
-  return {
+  const manifest: BenchManifest = {
     schema: BROWSE_BENCH_MANIFEST_SCHEMA,
     dataset: {
       id: options.id,
@@ -489,6 +500,29 @@ export function generateSyntheticManifest(options: SyntheticOptions): BenchManif
     photos,
     groups,
   };
+  // 生成物も実データと同じ検証を通す(宣言と実数の一致・URL 形式・ID の整合)。
+  const checked = validateManifest(manifest);
+  if (!checked.ok) throw new Error(`合成 manifest の検証に失敗: ${checked.errors.join("; ")}`);
+  return manifest;
+}
+
+/** `?synthetic=` のクエリ(文字列)を厳密に解釈する。`1e3`・空文字・NaN・小数・負数は拒否し、上限は MAX_GROUPS。 */
+export function parseSyntheticQuery(params: URLSearchParams): SyntheticOptions {
+  const integer = (name: string, fallback: string | null, signed = false): number => {
+    const raw = params.get(name) ?? fallback;
+    if (raw === null || !(signed ? /^-?\d{1,15}$/ : /^\d{1,15}$/).test(raw)) {
+      throw new Error(`?${name} は整数(受け取った値: ${raw === null ? "なし" : JSON.stringify(raw)})`);
+    }
+    return Number(raw);
+  };
+  const groupCount = integer("synthetic", null);
+  if (groupCount < 1 || groupCount > MAX_GROUPS) throw new Error(`?synthetic は 1〜${MAX_GROUPS}(受け取った値: ${groupCount})`);
+  const pool = integer("pool", "64");
+  if (pool < 1) throw new Error("?pool は 1 以上");
+  const seed = integer("seed", "1", true);
+  const thumbs = params.get("thumbs") ?? "";
+  if (!isRelativeThumbUrl(thumbs)) throw new Error("?thumbs=<bench-fixtures 配下の相対ディレクトリ> が必要(絶対パス・.. は不可)");
+  return { id: `synthetic-${groupCount}g-pool${pool}`, groupCount, seed, thumbPoolSize: pool, thumbPrefix: thumbs };
 }
 
 // ---------------------------------------------------------------------------

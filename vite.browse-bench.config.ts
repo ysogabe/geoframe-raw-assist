@@ -45,10 +45,13 @@ function benchFixtures(): Plugin {
       return response.end();
     }
     let file: string;
+    let size: number;
     try {
       // シンボリックリンクを解決した実体が bench-fixtures の外へ出る指定(.. や外向きリンク)は拒否する。
       file = realpathSync(path.resolve(FIXTURE_DIR, relative));
-      if (!statSync(file).isFile()) throw new Error("not a file");
+      const stat = statSync(file);
+      if (!stat.isFile()) throw new Error("not a file");
+      size = stat.size;
     } catch {
       response.statusCode = 404;
       return response.end();
@@ -60,7 +63,22 @@ function benchFixtures(): Plugin {
     response.setHeader("content-type", CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream");
     response.setHeader("cache-control", cacheControl);
     response.setHeader("x-bench-thumb-cache", policyName);
-    createReadStream(file).pipe(response);
+    response.setHeader("content-length", size);
+    // HEAD はヘッダだけ返す(計測ページがキャッシュ方針の確認に使う)。
+    if (request.method === "HEAD") return response.end();
+    const stream = createReadStream(file);
+    // 読み出し中のエラー(ファイルの消失・I/O 失敗)で preview/dev サーバーごと落とさない。
+    stream.on("error", () => {
+      if (!response.headersSent) {
+        response.statusCode = 500;
+        response.end();
+      } else {
+        response.destroy();
+      }
+    });
+    // クライアントが途中で切れたら読み出しも止める(大量のサムネ要求の取り消しでリークさせない)。
+    response.on("close", () => stream.destroy());
+    stream.pipe(response);
   };
 
   return {

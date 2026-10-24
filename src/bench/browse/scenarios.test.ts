@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { DomCounts } from "./metrics";
+import type { SettleResult } from "./settle";
 import { SCENARIO_IDS, runAllScenarios, runScenario, type BenchDriver, type Observed } from "./scenarios";
 
 const FRAME = 1000 / 60;
 
 /** 時計を自前で進める fake。操作のたびに 2ms 後にコミットがあったことにする(決定論的)。 */
-function createFake(groupCount: number, options: { windowMax?: number; stripMax?: number } = {}) {
+function createFake(
+  groupCount: number,
+  options: { windowMax?: number; stripMax?: number; settle?: () => SettleResult; failOpen?: boolean } = {},
+) {
   let clock = 0;
   const calls: string[] = [];
   let observed: Observed = { started_at: 0, profiler: [], images: [], resources: [], long_tasks: null };
@@ -23,8 +27,12 @@ function createFake(groupCount: number, options: { windowMax?: number; stripMax?
     },
     groupIds: () => ids,
     recommendedCaptureOf: (groupId) => `DSC${groupId}`,
-    reset: async () => void calls.push("reset"),
+    reset: async () => {
+      calls.push("reset");
+      return { waited_ms: 0, settled: true, pending: 0 };
+    },
     openGroup: (groupId) => {
+      if (options.failOpen) throw new Error("クリック対象が無い");
       calls.push(`open:${groupId}`);
       commit();
     },
@@ -53,14 +61,15 @@ function createFake(groupCount: number, options: { windowMax?: number; stripMax?
     observed: () => observed,
     endObserve: () => {
       observing = false;
+      calls.push("endObserve");
       return observed;
     },
     waitImagesSettled: async () => {
       clock += 250;
-      return { waited_ms: 250, settled: true };
+      return options.settle ? options.settle() : { waited_ms: 250, settled: true, pending: 0 };
     },
   };
-  return { driver, calls, ids };
+  return { driver, calls, ids, isObserving: () => observing };
 }
 
 describe("操作シナリオ", () => {
@@ -110,8 +119,40 @@ describe("操作シナリオ", () => {
   it("戻って再表示は開く→戻るを繰り返す", async () => {
     const { driver, calls } = createFake(3);
     const result = await runScenario(driver, "return_to_list", { steps: 4 });
-    expect(calls.filter((call) => call !== "reset")).toEqual(["open:1", "back", "open:2", "back", "open:3", "back", "open:1", "back"]);
+    expect(calls.filter((call) => call !== "reset" && call !== "endObserve")).toEqual(["open:1", "back", "open:2", "back", "open:3", "back", "open:1", "back"]);
     expect(result.operations).toBe(4);
+  });
+});
+
+describe("画像の未完了・失敗の扱い", () => {
+  it("画像が静まらなかったら settled として扱わず、warnings に未完了枚数を残す", async () => {
+    const { driver } = createFake(6, { settle: () => ({ waited_ms: 3000, settled: false, pending: 7 }) });
+    const mount = await runScenario(driver, "mount_list", { mountRepeats: 2 });
+    expect(mount.warnings.filter((line) => line.includes("要求済み未完了 7 枚"))).not.toHaveLength(0);
+    // reset も静まらなければ、前のシナリオの読み込みが混入しうると明記する。
+    expect(mount.warnings.some((line) => line.startsWith("reset") || line.includes("mount 1 回目"))).toBe(true);
+    const scroll = await runScenario(driver, "scroll_list", { maxScrollMs: 100 });
+    expect(scroll.warnings.some((line) => line.includes("スクロール後") && line.includes("7 枚"))).toBe(true);
+  });
+
+  it("reset が静まらなければ次のシナリオへの混入を警告する", async () => {
+    const { driver } = createFake(6);
+    driver.reset = async () => ({ waited_ms: 2000, settled: false, pending: 3 });
+    const result = await runScenario(driver, "accept_toggle_list", { steps: 3 });
+    expect(result.warnings.some((line) => line.startsWith("reset:") && line.includes("混入"))).toBe(true);
+  });
+
+  it("シナリオが例外で終わっても観測を止める(次の計測に観測フラグを残さない)", async () => {
+    const fake = createFake(6, { failOpen: true });
+    await expect(runScenario(fake.driver, "select_group_strip", { steps: 3 })).rejects.toThrow("クリック対象");
+    expect(fake.isObserving()).toBe(false);
+  });
+
+  it("グループ数より操作が多い採用トグルは追加と取消が混ざると明記する", async () => {
+    const few = await runScenario(createFake(3).driver, "accept_toggle_list", { steps: 7 });
+    expect(few.warnings.some((line) => line.includes("追加と取消が混ざる"))).toBe(true);
+    const many = await runScenario(createFake(20).driver, "accept_toggle_list", { steps: 7 });
+    expect(many.warnings.some((line) => line.includes("追加と取消"))).toBe(false);
   });
 });
 

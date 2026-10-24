@@ -9,9 +9,17 @@ import {
   type BenchReport,
   type BootTiming,
   type ScenarioId,
+  type RunFailure,
   type ScenarioResult,
 } from "./metrics";
 import { DEFAULT_OPTIONS, SCENARIO_IDS, runAllScenarios, runScenario, type BenchDriver, type ScenarioOptions } from "./scenarios";
+
+/** download の Blob URL を失効させるまでの待ち(ms)。 */
+export const REVOKE_DELAY_MS = 60_000;
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export const REPORT_SCHEMA = "geoframe.browse-bench.report/1";
 
@@ -46,7 +54,20 @@ export function createApi(options: {
   now?: () => Date;
 }): BrowseBenchCore {
   let results: ScenarioResult[] = [];
+  let failures: RunFailure[] = [];
+  let running: string | null = null;
   const clock = options.now ?? (() => new Date());
+
+  /** run / runAll の同時起動を拒否する。DOM と観測バッファは 1 つしか無く、混ぜると両方の数字が壊れる。 */
+  async function exclusive<T>(label: string, task: () => Promise<T>): Promise<T> {
+    if (running !== null) throw new Error(`別のシナリオが実行中(${running})。完了してから ${label} を呼ぶ`);
+    running = label;
+    try {
+      return await task();
+    } finally {
+      running = null;
+    }
+  }
 
   function report(reporterNotes = ""): BenchReport {
     return {
@@ -67,6 +88,9 @@ export function createApi(options: {
         reporter_notes: reporterNotes,
         caveats: REPRESENTATIVENESS_CAVEATS,
       },
+      // 失敗が 1 件でもあれば incomplete。部分結果(scenarios)は残すが、成功した報告としては扱わない。
+      run_status: failures.length === 0 ? "complete" : "incomplete",
+      failures,
       scenarios: results,
       limitations: LIMITATIONS,
     };
@@ -78,17 +102,33 @@ export function createApi(options: {
     defaults: () => DEFAULT_OPTIONS,
     manifest: () => ({ stats: options.stats }),
     async run(id, scenarioOptions) {
-      const result = await runScenario(options.driver, id, scenarioOptions);
-      results.push(result);
-      return result;
+      return exclusive(id, async () => {
+        try {
+          const result = await runScenario(options.driver, id, scenarioOptions);
+          results.push(result);
+          return result;
+        } catch (error) {
+          failures.push({ scenario: id, message: messageOf(error) });
+          throw error;
+        }
+      });
     },
     async runAll(scenarioOptions) {
-      results = [...results, ...(await runAllScenarios(options.driver, scenarioOptions))];
-      return report();
+      return exclusive("runAll", async () => {
+        try {
+          await runAllScenarios(options.driver, scenarioOptions, (result) => results.push(result));
+        } catch (error) {
+          failures.push({ scenario: "runAll", message: messageOf(error) });
+          throw error;
+        }
+        return report();
+      });
     },
     report,
     clear() {
+      if (running !== null) throw new Error(`実行中(${running})は clear できない`);
       results = [];
+      failures = [];
     },
     exportJson: (reporterNotes) => JSON.stringify(report(reporterNotes), null, 2),
     download(reporterNotes) {
@@ -97,8 +137,14 @@ export function createApi(options: {
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = `browse-bench-${options.stats.id}-${clock().toISOString().replace(/[:.]/g, "-")}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      // Chrome はダウンロードの開始が非同期。click 直後に revoke すると取得に失敗しうるので遅らせる。
+      document.body.append(anchor);
+      try {
+        anchor.click();
+      } finally {
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
+      }
     },
   };
 }

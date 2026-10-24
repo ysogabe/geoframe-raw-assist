@@ -2,6 +2,7 @@
  * 閲覧ベンチのシナリオ。ブラウザ依存はすべて `BenchDriver` の向こうに置くので、
  * fake driver で操作の順序と集計を決定論的にテストできる(scenarios.test.ts)。
  */
+import { type SettleResult } from "./settle";
 import {
   gapsOf,
   summarizeFrameGaps,
@@ -34,7 +35,7 @@ export interface BenchDriver {
   groupIds(): number[];
   recommendedCaptureOf(groupId: number): string;
   /** 状態を「解析済み・一覧表示・採用なし・スクロール先頭」へ戻し、1〜2 フレーム待つ。 */
-  reset(): Promise<void>;
+  reset(): Promise<SettleResult>;
   /** 一覧のカード(または操作画面の帯)のクリックでグループを開く/選ぶ。実ハンドラを通す。 */
   openGroup(groupId: number): void;
   backToList(): void;
@@ -51,8 +52,8 @@ export interface BenchDriver {
   /** 観測中の記録への参照(操作ごとの commit 時刻を引くのに使う)。 */
   observed(): Observed;
   endObserve(): Observed;
-  /** `quietMs` の間 load が来なくなるか `timeoutMs` で打ち切るまで待つ。経過 ms を返す。 */
-  waitImagesSettled(timeoutMs: number, quietMs: number): Promise<{ waited_ms: number; settled: boolean }>;
+  /** load/error が `quietMs` 来ず、かつ要求済みで未完了の画像が 0 になるまで待つ。`timeoutMs` で打ち切ったら settled=false(未完了を settled にしない)。 */
+  waitImagesSettled(timeoutMs: number, quietMs: number): Promise<SettleResult>;
 }
 
 export type ScenarioOptions = {
@@ -107,11 +108,37 @@ type Body = {
   warnings?: string[];
 };
 
-async function openFirstGroup(driver: BenchDriver): Promise<void> {
+/** 画像が静まらなかったときの注記を集める。未完了のまま次へ進んだことを結果に残すため。 */
+type SettleTracker = { notes: string[]; settle(label: string, timeoutMs: number, quietMs?: number): Promise<SettleResult> };
+
+function createSettleTracker(driver: BenchDriver): SettleTracker {
+  const notes: string[] = [];
+  return {
+    notes,
+    async settle(label, timeoutMs, quietMs = QUIET_MS) {
+      const result = await driver.waitImagesSettled(timeoutMs, quietMs);
+      if (!result.settled) {
+        notes.push(`${label}: 画像が ${timeoutMs}ms 以内に静まらなかった(要求済み未完了 ${result.pending} 枚)。次の操作・計測に読み込みが混入しうる`);
+      }
+      return result;
+    },
+  };
+}
+
+async function openFirstGroup(driver: BenchDriver, tracker: SettleTracker, settleMs: number): Promise<void> {
   const first = driver.groupIds()[0];
   if (first === undefined) return;
   driver.openGroup(first);
   await twoFrames(driver);
+  await tracker.settle("setup(先頭グループを開く)", settleMs);
+}
+
+/** 同じグループを複数回トグルする(= 追加と取消が混ざる)ときの説明。 */
+function toggleMixWarning(ids: readonly number[]): string[] {
+  const distinct = new Set(ids).size;
+  return distinct < ids.length
+    ? [`グループ数 ${distinct} < 操作 ${ids.length} 回: 同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(後半は取消の再描画を含む)`]
+    : [];
 }
 
 async function twoFrames(driver: BenchDriver): Promise<number> {
@@ -160,20 +187,31 @@ function pickGroups(driver: BenchDriver, count: number): { ids: number[]; warnin
 
 async function run(
   driver: BenchDriver,
+  tracker: SettleTracker,
   id: ScenarioId,
   params: Record<string, number | string | boolean>,
   body: () => Promise<Body>,
   /** 観測を始める前の準備(操作画面を開いておく等)。ここでの mount は Profiler/DOM の before に混ぜない。 */
   setup?: () => Promise<void>,
 ): Promise<ScenarioResult> {
-  await driver.reset();
+  const reset = await driver.reset();
+  if (!reset.settled) {
+    tracker.notes.push(`reset: 前のシナリオの画像が静まらなかった(要求済み未完了 ${reset.pending} 枚)。この結果に前の読み込みが混入しうる`);
+  }
   if (setup) await setup();
   driver.beginObserve();
-  const dom_before = driver.dom();
-  const result = await body();
+  let dom_before: DomCounts;
+  let result: Body;
+  try {
+    dom_before = driver.dom();
+    result = await body();
+  } catch (error) {
+    driver.endObserve();
+    throw error;
+  }
   const dom_after = driver.dom();
   const observed = driver.endObserve();
-  const warnings = [...(result.warnings ?? [])];
+  const warnings = [...tracker.notes, ...(result.warnings ?? [])];
   if (result.operations < SAMPLE_WARN_P95) {
     warnings.push(`操作/フレーム数 n=${result.operations} が ${SAMPLE_WARN_P95} 未満: p95 は最大値に近い参考値`);
   }
@@ -230,23 +268,21 @@ export async function runScenario(
 ): Promise<ScenarioResult> {
   const o = { ...DEFAULT_OPTIONS, ...options };
   const groupIds = driver.groupIds();
+  const tracker = createSettleTracker(driver);
 
   switch (id) {
     case "mount_list":
-      return run(driver, id, { mountRepeats: o.mountRepeats, settleMs: o.settleMs }, async () => {
+      return run(driver, tracker, id, { mountRepeats: o.mountRepeats, settleMs: o.settleMs }, async () => {
         const to_frame: number[] = [];
         const to_commit: number[] = [];
         const settle: number[] = [];
-        const unsettled: number[] = [];
         for (let index = 0; index < o.mountRepeats; index += 1) {
           driver.unmountList();
           await twoFrames(driver);
           const measured = await measureOperation(driver, () => driver.mountList());
           to_frame.push(measured.frame);
           if (measured.commit !== null) to_commit.push(measured.commit);
-          const settled = await driver.waitImagesSettled(o.settleMs, QUIET_MS);
-          settle.push(settled.waited_ms);
-          if (!settled.settled) unsettled.push(index);
+          settle.push((await tracker.settle(`mount ${index + 1} 回目`, o.settleMs)).waited_ms);
         }
         return {
           operations: o.mountRepeats,
@@ -254,24 +290,21 @@ export async function runScenario(
           to_frame,
           gaps: [],
           extra: { images_settle_ms: settle },
-          warnings: [
-            "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
-            ...(unsettled.length ? [`画像が ${o.settleMs}ms 以内に落ち着かなかった反復: ${unsettled.join(",")}`] : []),
-          ],
+          warnings: ["1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む"],
         };
       });
 
     case "scroll_list":
-      return run(driver, id, { scrollSpeed: o.scrollSpeed, maxScrollMs: o.maxScrollMs }, async () => {
+      return run(driver, tracker, id, { scrollSpeed: o.scrollSpeed, maxScrollMs: o.maxScrollMs }, async () => {
         const max = driver.windowScrollMax();
         const warnings = max <= 0 ? ["スクロールできる高さが無い(グループが少なすぎる/ビューポートが大きすぎる)"] : [];
         const gaps = max > 0 ? await sweep(driver, max, (y) => driver.scrollWindowTo(y), o.scrollSpeed, o.maxScrollMs) : [];
-        await driver.waitImagesSettled(o.settleMs, QUIET_MS);
+        await tracker.settle("スクロール後", o.settleMs);
         return { operations: gaps.length, to_commit: [], to_frame: [], gaps, warnings };
       });
 
     case "select_group_strip":
-      return run(driver, id, { steps: o.steps }, async () => {
+      return run(driver, tracker, id, { steps: o.steps }, async () => {
         const warnings: string[] = [];
         if (groupIds.length < 2) return { operations: 0, to_commit: [], to_frame: [], gaps: [], warnings: ["グループが 2 件未満"] };
         if (groupIds.length - 1 < o.steps) warnings.push(`グループ数 ${groupIds.length} < steps ${o.steps}: 先頭から巡回して選択する`);
@@ -280,24 +313,24 @@ export async function runScenario(
           driver.openGroup(groupIds[(index + 1) % groupIds.length] as number);
         });
         return { ...measured, gaps: [], warnings };
-      }, () => openFirstGroup(driver));
+      }, () => openFirstGroup(driver, tracker, o.settleMs));
 
     case "accept_toggle_list":
-      return run(driver, id, { steps: o.steps }, async () => {
+      return run(driver, tracker, id, { steps: o.steps }, async () => {
         const picked = pickGroups(driver, o.steps);
         const measured = await timedOperations(driver, picked.ids.length, (index) => driver.toggleAccept(picked.ids[index] as number));
-        return { ...measured, gaps: [], warnings: picked.warnings };
+        return { ...measured, gaps: [], warnings: [...picked.warnings, ...toggleMixWarning(picked.ids)] };
       });
 
     case "accept_toggle_strip":
-      return run(driver, id, { steps: o.steps }, async () => {
+      return run(driver, tracker, id, { steps: o.steps }, async () => {
         const picked = pickGroups(driver, o.steps);
         const measured = await timedOperations(driver, picked.ids.length, (index) => driver.toggleAccept(picked.ids[index] as number));
-        return { ...measured, gaps: [], warnings: picked.warnings };
-      }, () => openFirstGroup(driver));
+        return { ...measured, gaps: [], warnings: [...picked.warnings, ...toggleMixWarning(picked.ids)] };
+      }, () => openFirstGroup(driver, tracker, o.settleMs));
 
     case "return_to_list":
-      return run(driver, id, { steps: o.steps, settleMs: o.settleMs }, async () => {
+      return run(driver, tracker, id, { steps: o.steps, settleMs: o.settleMs }, async () => {
         const picked = pickGroups(driver, o.steps);
         const settle: number[] = [];
         const to_commit: number[] = [];
@@ -308,7 +341,7 @@ export async function runScenario(
           const measured = await measureOperation(driver, () => driver.backToList());
           to_frame.push(measured.frame);
           if (measured.commit !== null) to_commit.push(measured.commit);
-          settle.push((await driver.waitImagesSettled(o.settleMs, QUIET_MS)).waited_ms);
+          settle.push((await tracker.settle(`戻る ${settle.length + 1} 回目`, o.settleMs)).waited_ms);
         }
         return {
           operations: picked.ids.length,
@@ -321,20 +354,29 @@ export async function runScenario(
       });
 
     case "scroll_strip":
-      return run(driver, id, { scrollSpeed: o.scrollSpeed, maxScrollMs: o.maxScrollMs }, async () => {
+      return run(driver, tracker, id, { scrollSpeed: o.scrollSpeed, maxScrollMs: o.maxScrollMs }, async () => {
         if (groupIds.length === 0) return { operations: 0, to_commit: [], to_frame: [], gaps: [], warnings: ["グループが 0 件"] };
         const max = driver.stripScrollMax();
         const warnings = max <= 0 ? ["帯が横スクロールできない(グループが少ない)"] : [];
         const gaps = max > 0 ? await sweep(driver, max, (x) => driver.scrollStripTo(x), o.scrollSpeed, o.maxScrollMs) : [];
-        await driver.waitImagesSettled(o.settleMs, QUIET_MS);
+        await tracker.settle("スクロール後", o.settleMs);
         return { operations: gaps.length, to_commit: [], to_frame: [], gaps, warnings };
-      }, () => openFirstGroup(driver));
+      }, () => openFirstGroup(driver, tracker, o.settleMs));
   }
 }
 
 /** 全シナリオを固定の順序で直列に走らせる。 */
-export async function runAllScenarios(driver: BenchDriver, options: ScenarioOptions = {}): Promise<ScenarioResult[]> {
+export async function runAllScenarios(
+  driver: BenchDriver,
+  options: ScenarioOptions = {},
+  /** 1 シナリオ終わるごとに呼ぶ。途中で失敗しても、それまでの結果を呼び出し側が保持できる。 */
+  onResult?: (result: ScenarioResult) => void,
+): Promise<ScenarioResult[]> {
   const results: ScenarioResult[] = [];
-  for (const id of SCENARIO_IDS) results.push(await runScenario(driver, id, options));
+  for (const id of SCENARIO_IDS) {
+    const result = await runScenario(driver, id, options);
+    results.push(result);
+    onResult?.(result);
+  }
   return results;
 }

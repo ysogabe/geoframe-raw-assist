@@ -199,10 +199,16 @@ export type ScenarioResult = {
 };
 
 export type BootTiming = {
-  /** エントリ評価開始 → 最初の一覧コミット(ms)。manifest の fetch/検証は含めない。 */
+  /** React の render 開始(`createRoot().render()` の直前)→ 最初の一覧コミット(ms)。manifest の fetch/検証/変換は含めない。 */
   to_first_commit_ms: number | null;
-  /** 〃 → 2 回目の rAF。 */
+  /** 〃(render 開始)→ 2 回目の rAF。 */
   to_first_frame_ms: number | null;
+  /** エントリ評価開始 → render 開始。manifest の fetch・検証・Analysis 変換・配信ヘッダ確認(HEAD)を含む。 */
+  pre_render_ms: number;
+  /** エントリ評価開始 → 最初のコミット。fetch/検証を含む全体値(= pre_render_ms + to_first_commit_ms)。 */
+  from_entry_to_first_commit_ms: number | null;
+  /** エントリ評価開始 → 2 回目の rAF。fetch/検証を含む全体値。 */
+  from_entry_to_first_frame_ms: number;
   /** 最初のコミットの root Profiler actualDuration(mount)。React が dev ビルドだと過大、非 profiling の本番ビルドだと null。 */
   mount_actual_ms: number | null;
 };
@@ -216,6 +222,11 @@ export const LIMITATIONS: readonly string[] = [
   "コミット時間は React Profiler の actualDuration/commitTime。React が dev ビルドのときは本番より遅い(`environment.react_build` を確認)。",
   "操作はハーネス自身の DOM(GroupList/GroupStrip + 実 reducer)で再生しており、App.tsx の他の副作用(OperationPanel・キー入力・Tauri 呼び出し・確認ダイアログ)は含まない。",
   "画像デコード時間は直接測っていない。load イベントと Resource Timing の範囲(ネットワーク + ブラウザキャッシュ)まで。",
+  "採用トグル(accept_toggle_*)と『戻る』(backToList)は DOM のクリックではなく reducer への直接 dispatch。グループ選択(select_group_strip)と一覧カードを開く操作だけが実 onClick を通る。操作回数がグループ数を超えると同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(該当時は warnings に出る)。",
+  "Profiler の合計(profiler.*.actual_total_ms・commits)には、観測窓の中で行う準備操作(mount_list の unmount、return_to_list の openGroup など)のコミットも入る。to_commit_ms / to_frame_ms は測定対象の操作 1 回ぶんだけ。両者を混ぜて『操作 1 回の費用』と読まない。strip 系の初回 mount は観測前の setup に移してある。",
+  "GroupStrip は選択変更のたびに選択カードへ smooth scroll する(prefers-reduced-motion でなければ)。select_group_strip では前の操作の smooth scroll が次の操作に重なる。本番の ←→ 連打と同じ挙動込みの値で、reduced motion には固定していない。",
+  "サムネ配信ヘッダ(キャッシュ方針)はサムネ 1 枚への HEAD で確認する。取れなかったときは environment.thumb_cache_policy_source が unobservable になり、キャッシュ方針は不明として読む。",
+  "画像の『落ち着いた』は load/error が 200ms 来ず、かつ要求済みで未完了の <img> が 0。lazy の未要求は currentSrc とビューポート±3000px で除外する近似で、ブラウザの実際の先読み幅とは一致しない。timeout で打ち切った場合は settled=false として warnings に残す。",
 ];
 
 export type BenchEnvironment = {
@@ -230,6 +241,9 @@ export type BenchEnvironment = {
   prefers_reduced_motion: boolean;
   /** manifest 配信時の `x-bench-thumb-cache` ヘッダ(サーバー設定の記録)。合成をページ内生成したときは null。 */
   thumb_cache_policy: string | null;
+  /** policy の出所。head_probe=サムネ 1 枚への HEAD 応答の `x-bench-thumb-cache`、unobservable=取れなかった(理由は _note)。 */
+  thumb_cache_policy_source: "head_probe" | "unobservable";
+  thumb_cache_policy_note: string | null;
 };
 
 export type RepresentativenessBlock = {
@@ -242,6 +256,8 @@ export type RepresentativenessBlock = {
   caveats: string[];
 };
 
+export type RunFailure = { scenario: string; message: string };
+
 export type BenchReport = {
   schema: "geoframe.browse-bench.report/1";
   generated_at: string;
@@ -250,6 +266,9 @@ export type BenchReport = {
   /** 一目で取り違えないための要約。groups と photos は別の数。 */
   dataset: { kind: "real_metadata" | "synthetic"; id: string; groups: number; photos: number; source_groups: number | null };
   representativeness: RepresentativenessBlock;
+  /** failures があれば incomplete。scenarios には失敗前に完了した分だけが残る(成功した報告として読まない)。 */
+  run_status: "complete" | "incomplete";
+  failures: RunFailure[];
   scenarios: ScenarioResult[];
   limitations: readonly string[];
 };
