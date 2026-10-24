@@ -86,6 +86,7 @@ Rust が生成する code:
 | `CACHE_IO_FAILED` | 合成の古いキャッシュを置き換え・検査できない | merge |
 | `PROVENANCE_WRITE_FAILED` | 現像の来歴 JSON を書けない | develop 系 |
 | `THUMBNAIL_FAILED` / `CACHE_WRITE_FAILED` | 解析中のサムネイル・解析キャッシュの書き込み失敗（**`get_analysis` の `error` に message だけが載る**。§1.1） | start_analysis（非同期） |
+| `SOURCE_SCAN_FAILED` | 解析開始時に現像元フォルダを走査できない（消えた・ディレクトリでない・権限・列挙の途中失敗）か、対象ファイルのサイズ・mtime を取れない（壊れたシンボリックリンク等。§3 の入力指紋）。空フォルダは失敗ではない。`error` の扱いは上と同じ | start_analysis（非同期） |
 | `CANDIDATES_FAILED` | 候補生成の scratch・代理画像・CLI 異常終了・スレッド異常 | candidates |
 | `BUSY` | §0.4 の待ち上限超過 | develop 系、merge、candidates |
 | `SIDECAR_NOT_FOUND` | 実行ファイルの隣に `geoframe-ci-develop` が無い（`npm run build:coreimage` 未実行） | engine_info、develop 系、merge、candidates |
@@ -137,6 +138,10 @@ AnalysisStatus =
 
 - 実行中かどうかを先に見るので、`running` は `config.json` が無くても返る。
 - `ready` はキャッシュ（§4 `analysis/<root_key>.json`）が有効なときだけ。有効条件は §3。
+  同じ完了済み解析を何度読んでも `analysis.analysis_revision` と `analysis.source_id` は変わらない。
+- 応答はリクエスト時点の現像元フォルダについてのもの。フロントは応答（成功・未設定・失敗とも）に
+  リクエストを出した時点のフォルダ世代（`sourceFolderGeneration`）を添えて reducer に渡し、
+  フォルダ変更を跨いで遅れて届いた前のフォルダの応答を捨てる（#5）。
 - エラー: `SOURCE_ROOT_NOT_CONFIGURED`、`APP_DATA_DIR_UNAVAILABLE`、`INTERNAL_ERROR`。
 
 ### 1.2 `start_analysis`
@@ -145,6 +150,7 @@ AnalysisStatus =
   - `"already_running"` … 解析中。
   - `"ready"` … `force=false` で有効なキャッシュがある（再解析しない）。
   - `"started"` … バックグラウンド（`spawn_blocking`、最大 6 ワーカー）で解析を開始。直前の `error` を消す。
+    完了した解析は入力が前回と同じでも新しい `analysis_revision` を持つ（`force=true` の再解析を見分けるため）。
 - 解析中の失敗（`THUMBNAIL_FAILED`、`CACHE_WRITE_FAILED`）は `get_analysis` の `{status:"absent", error}` で見える。
   デコードできない JPG は黙って飛ばす。
 - 対象ファイルは現像元フォルダ直下の `^DSC\d{5}\.(ARW|JPG)$`（拡張子は大小無視）。
@@ -441,7 +447,9 @@ Adjustments = {
 ```
 Analysis = {
   analysis_version: 3, scored: true,
-  generated_at: string,            // ローカル時刻 %Y-%m-%dT%H:%M:%S%:z
+  generated_at: string,            // ローカル時刻 %Y-%m-%dT%H:%M:%S%:z（表示用。秒精度なので世代の判定に使わない）
+  analysis_revision: string,       // 完了した解析ごとの一意な世代（不透明。現行は 32 桁 hex）
+  source_id: string,               // 解析した入力の識別子（不透明。現行は入力指紋 v2 の SHA-1 40 桁 hex）
   source: { root /* display_path と同じ整形 */, pairs, jpg_only, arw_only, total_bytes },
   summary: { groups, raw_candidates /* raw.level が recommended|strong のグループ数 */, needs_review /* confidence < 0.6 */ },
   photos: { [capture_id]: PhotoInfo },
@@ -471,9 +479,28 @@ GroupInfo = {
 ```
 
 - `close_call` は confidence < 0.6 のとき付く。
+- **`analysis_revision`（解析の世代）**: 解析が完了するたびに新しく作る一意値（時刻・プロセス ID・連番・
+  プロセスごとの乱数鍵の SHA-1 先頭 32 桁）。入力からは導かないので、同じ入力・同じ秒の強制再解析でも変わり、
+  キャッシュに保存されるので同じ解析の再取得では変わらない。フロントは採用（accepted）の結び直しを
+  この値の変化で判定する（#3 B1）。値が無い v2（Python）の解析だけ `generated_at` で代用する。
+- **`source_id`（入力の識別子）**: 入力指紋 v2。現像元フォルダの解決済みパスと、対象ファイル
+  （`^DSC\d{5}\.(ARW|JPG)$`、拡張子の大小無視。表記違いの同 ID も別エントリとして全部）の
+  **実名・バイト数・mtime（ナノ秒）** を実名の辞書順に並べた SHA-1。入力が変わらなければ再解析しても同じ値。
+  解析の**読み込み前**（scanning）に取るので、解析中に入力が変わると次の照合で外れて再解析に倒れる。
+  中身はハッシュしない（ポーリングごとに 24MP の JPG/ARW を読まないため。照合は stat のみ）。
+- **stat 方式の検出限界**: サイズと mtime を保ったままの差し替え（`cp -p`、`rsync -t`、mtime を戻すツール等）は
+  検出しない。FAT32 の mtime は 2 秒、exFAT は 10ms 単位なので、その粒度内でサイズも同じ書き換えは見逃しうる。
+  逆に mtime だけ変わる操作（`touch`、コピーし直し）でも再解析になる（安全側）。
 - **キャッシュの有効条件**（すべて満たすときだけ `ready`）: `analysis_version == 3`、`scored == true`、
-  内部キー `_source_signature`（現像元フォルダの解決済みパスと対象ファイル名一覧の SHA-1。返却時には除く）が一致、
-  全 `photos[*].thumb` が存在。**ファイルの中身・mtime・サイズは見ない**。無効なキャッシュは削除せず「無い」扱い。
+  内部キー `_source_fingerprint: { version: 2, digest }`（返却時には除く）の版が一致し、`digest` が
+  `source_id` と同じで、今のフォルダから取り直した入力指紋とも一致する、`analysis_revision` が空でない、
+  全 `photos[*].thumb` が存在。指紋を取れない（フォルダの走査・エントリ列挙・stat のどれかが失敗）ときも無効で、
+  一部だけ読めた一覧で一致させることはない。
+  無効なキャッシュは削除せず「無い」扱い（再解析でサムネイルも作り直す）。
+  旧形式（`_source_signature` = パスと名前一覧のみ）のキャッシュは `_source_fingerprint` を持たないので、
+  更新後の初回に一度だけ無効になる。`analysis_version` は 3 のまま（公開の形は追加フィールドのみ）。
+- `tests/fixtures/baseline/analysis.json` は旧形式の凍結記録で、`analysis_revision`・`source_id` を持たない。
+  現行契約に合わせて書き換えない（基準比較は採点値・グループ・推薦・`summary` だけを見る）。
 
 ---
 

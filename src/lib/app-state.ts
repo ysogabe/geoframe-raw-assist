@@ -285,11 +285,15 @@ export type Action =
   | { type: "engine/fail" }
   /** プリセット一覧の到着（#98）。Tauri 起動時の get_presets。 */
   | { type: "presets/loaded"; presets: PresetInfo[] }
-  | { type: "analysis/status"; response: AnalysisResponse }
+  /**
+   * `get_analysis` の応答。`generation` は**リクエストを出した時点**の sourceFolderGeneration。
+   * フォルダ変更を跨いで遅れて届いた前のフォルダの応答（成功・未設定・失敗とも）を捨てるため必須。
+   */
+  | { type: "analysis/status"; response: AnalysisResponse; generation: number }
   | { type: "analysis/requested" }
-  /** 現像元フォルダが未設定（SOURCE_ROOT_NOT_CONFIGURED）。 */
-  | { type: "analysis/unconfigured" }
-  | { type: "analysis/error"; message: string }
+  /** 現像元フォルダが未設定（SOURCE_ROOT_NOT_CONFIGURED）。`generation` は analysis/status と同じ。 */
+  | { type: "analysis/unconfigured"; generation: number }
+  | { type: "analysis/error"; message: string; generation: number }
   | { type: "source/loaded"; info: SourceFolderInfo }
   | { type: "source/applying" }
   | { type: "source/changed"; info: SourceFolderInfo; message: string; tone?: "info" | "error" }
@@ -454,6 +458,14 @@ function reconcileAccepted(
   return { accepted: next, dropped: accepted.length - next.length };
 }
 
+/**
+ * 解析結果の世代。Rust（#32）は完了した解析ごとに一意の `analysis_revision` を返す。
+ * 世代を持たない解析（Python 版 v2 の応答）だけ、従来どおり `generated_at` で代用する。
+ */
+export function analysisRevisionOf(analysis: Analysis): string {
+  return analysis.analysis_revision ?? `generated_at:${analysis.generated_at}`;
+}
+
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "engine/ok":
@@ -467,13 +479,16 @@ export function reducer(state: State, action: Action): State {
       return applyPresets(state, action.presets);
 
     case "analysis/status": {
+      if (action.generation !== state.sourceFolderGeneration) return state;
       const response = action.response;
       if (response.status === "ready") {
         const analysis = response.analysis;
         // 解析は 1 秒ポーリングで何度も同じ結果を返す。作り直しが起きたとき
-        // （generated_at が変わったとき）だけ採用を結び直す。毎回やると、同じ
+        // （analysis_revision が変わったとき）だけ採用を結び直す。毎回やると、同じ
         // 内容の再取得でも配列の同一性が失われて useMemo が無駄に走る。
-        const regenerated = state.analysis !== null && state.analysis.generated_at !== analysis.generated_at;
+        // generated_at は秒精度なので、同じ秒の再解析を見分けられない（#3 B1）。
+        const regenerated =
+          state.analysis !== null && analysisRevisionOf(state.analysis) !== analysisRevisionOf(analysis);
         const { accepted, dropped } = regenerated
           ? reconcileAccepted(state.accepted, analysis)
           : { accepted: state.accepted, dropped: 0 };
@@ -509,6 +524,7 @@ export function reducer(state: State, action: Action): State {
     }
 
     case "analysis/unconfigured":
+      if (action.generation !== state.sourceFolderGeneration) return state;
       return {
         ...state,
         analysisState: "unconfigured",
@@ -522,6 +538,7 @@ export function reducer(state: State, action: Action): State {
       return { ...state, analyzeRequested: true, analysisState: "running", analysisError: "" };
 
     case "analysis/error":
+      if (action.generation !== state.sourceFolderGeneration) return state;
       return { ...state, analysisState: "error", analysisError: action.message, analyzeRequested: false };
 
     case "source/loaded":
