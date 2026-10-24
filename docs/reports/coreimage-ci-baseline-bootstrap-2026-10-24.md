@@ -10,7 +10,7 @@
 - 全4画像のファイル/RGBハッシュ・寸法の自己照合に成功。
 - 同じCLIで別出力先へ再描画し、全4画像でΔE76 0、RGB MAE 0、完全一致画素率1.0。
 - 基準はworktree外の`geoframe-evaluation-baselines/ci-2026-10-24/`へ保存。
-  外付けBackupの`GeoFrame-evaluation-baselines/ci-2026-10-24/`へ同じ単位で複製し、全12ファイルのSHA-256一致を確認。
+  SMBマウントBackupの`GeoFrame-evaluation-baselines/ci-2026-10-24/`へ同じ単位で複製し、全12ファイルのSHA-256一致を確認。
   実写画像とマニフェストはGitに含めていない。
 
 | 来歴 | SHA-256 |
