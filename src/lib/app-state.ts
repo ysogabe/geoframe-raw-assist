@@ -1388,6 +1388,27 @@ export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
 }
 
 /**
+ * このグループから離れると、今の操作値が失われるか（移動確認の判定専用）。
+ *
+ * 戻るときの操作値は screen/operation が決める。保存済み合成の recipe を復元できる
+ * グループなら、離れた後に戻って得られる値は **復元される preset + overrides の全 9 値** で、
+ * 今の effectiveAdjustments と 1 つでも違えば失われる（復元した recipe を触っていなければ失われない。
+ * 手動で既定へ reset した場合は、戻ると保存 recipe に変わるので失われる）。比べるのは値だけで、
+ * プリセットの名前が違っても全 9 値が同じなら失われない。復元基準は restoredMergeRecipeOf と
+ * 同じ（本合成優先）なので、新しいプレビューがあっても本合成の recipe に戻る分は失われる扱い。
+ * 復元できるものが無いグループは、戻ると既定になるので従来の changedAdjustmentKeys で判定する。
+ * 表示・リセットに使う changedAdjustmentKeys の意味は変えない。
+ */
+export function adjustmentsLostOnLeave(state: State, group: GroupInfo): boolean {
+  const restored = restoredMergeRecipeOf(state, group);
+  const now = effectiveAdjustments(state);
+  const preset = restored ? presetFor(state.presets, restored.presetName) : null;
+  if (!restored || !preset || !now) return changedAdjustmentKeys(state).length > 0;
+  const back = resolveAdjustments(preset, restored.overrides);
+  return [...ADJUSTMENT_NUMERIC_KEYS, "noise_reduction" as const].some((key) => back[key] !== now[key]);
+}
+
+/**
  * 現像済み（本現像）または本合成の結果を持つグループID。
  *
  * 合成の有無も groupMergeResultOf の関門を通す。直接インデックスすると、再解析でIDが
