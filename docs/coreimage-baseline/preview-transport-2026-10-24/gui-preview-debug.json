@@ -1,0 +1,183 @@
+{
+  "schema": "geoframe.preview-gui-observation.v1",
+  "observed_on": "2026-10-24",
+  "collection": "Web Inspector console through CUA; compact fields transcribed from 8 recorder rows",
+  "build": "QA debug bundle; production sources include cb04d75",
+  "source_storage": "local APFS",
+  "origin": "button_handler",
+  "paint_proxy": "decode resolved + 2rAF, not actual paint",
+  "rows": [
+    {
+      "index": 0,
+      "capture_id": "DSC07402",
+      "status": "image_not_observed",
+      "cache_hit": false,
+      "pre_invoke_ms": 1,
+      "invoke_wall_ms": 938,
+      "invoke_to_load_ms": null,
+      "load_to_decode_ms": null,
+      "decode_to_raf_ms": null,
+      "origin_to_raf_ms": null,
+      "cli_elapsed_ms": {
+        "decode": 306.6,
+        "render_encode": 593,
+        "total": 899.7
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 1,
+      "capture_id": "DSC07402",
+      "status": "image_not_observed",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 924,
+      "invoke_to_load_ms": null,
+      "load_to_decode_ms": null,
+      "decode_to_raf_ms": null,
+      "origin_to_raf_ms": null,
+      "cli_elapsed_ms": {
+        "decode": 292,
+        "render_encode": 582.8,
+        "total": 874.8
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 2,
+      "capture_id": "DSC04430",
+      "status": "ok",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 991,
+      "invoke_to_load_ms": 7,
+      "load_to_decode_ms": 18,
+      "decode_to_raf_ms": 26,
+      "origin_to_raf_ms": 1042,
+      "cli_elapsed_ms": {
+        "decode": 322.1,
+        "render_encode": 617.4,
+        "total": 939.5
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 3,
+      "capture_id": "DSC04430",
+      "status": "image_not_observed",
+      "cache_hit": true,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 3,
+      "invoke_to_load_ms": null,
+      "load_to_decode_ms": null,
+      "decode_to_raf_ms": null,
+      "origin_to_raf_ms": null,
+      "cli_elapsed_ms": {
+        "decode": 322.1,
+        "render_encode": 617.4,
+        "total": 939.5
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 4,
+      "capture_id": "DSC04430",
+      "status": "ok",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 955,
+      "invoke_to_load_ms": 4,
+      "load_to_decode_ms": 15,
+      "decode_to_raf_ms": 29,
+      "origin_to_raf_ms": 1003,
+      "cli_elapsed_ms": {
+        "decode": 324.3,
+        "render_encode": 592.3,
+        "total": 916.6
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 5,
+      "capture_id": "DSC04430",
+      "status": "ok",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 948,
+      "invoke_to_load_ms": 4,
+      "load_to_decode_ms": 16,
+      "decode_to_raf_ms": 27,
+      "origin_to_raf_ms": 995,
+      "cli_elapsed_ms": {
+        "decode": 355.2,
+        "render_encode": 546.3,
+        "total": 901.6
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 6,
+      "capture_id": "DSC04430",
+      "status": "ok",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 991,
+      "invoke_to_load_ms": 6,
+      "load_to_decode_ms": 16,
+      "decode_to_raf_ms": 24,
+      "origin_to_raf_ms": 1037,
+      "cli_elapsed_ms": {
+        "decode": 363.4,
+        "render_encode": 581,
+        "total": 944.3
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    },
+    {
+      "index": 7,
+      "capture_id": "DSC04430",
+      "status": "ok",
+      "cache_hit": false,
+      "pre_invoke_ms": 0,
+      "invoke_wall_ms": 1007,
+      "invoke_to_load_ms": 3,
+      "load_to_decode_ms": 18,
+      "decode_to_raf_ms": 19,
+      "origin_to_raf_ms": 1047,
+      "cli_elapsed_ms": {
+        "decode": 350.2,
+        "render_encode": 619.2,
+        "total": 969.4
+      },
+      "width": 2400,
+      "height": 1600,
+      "error_code": null
+    }
+  ],
+  "status_counts": {
+    "ok": 5,
+    "image_not_observed": 3,
+    "invoke_error": 0,
+    "decode_failed": 0
+  },
+  "limitations": [
+    "Only 5 successful observations on one photo, not a population p95 or a transport comparison.",
+    "2 preview results were hidden by an existing full result; 1 cache hit reused the same URL and had no new image load.",
+    "Input latency before the handler and actual paint remain unmeasured.",
+    "Debug Rust build and ad hoc manual parameter changes, not a release performance run."
+  ]
+}

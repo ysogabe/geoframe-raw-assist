@@ -97,3 +97,22 @@ TIFF16を8bitへ落としていない。読めない圧縮/タイル構造は比
 
 Core Imageコアを共有して薄いCLIを残す案は維持する。将来C ABIを試す場合も最小のnew/handle_line/string_free/freeから始め、
 画素バッファ直返却はエンコード/書き込み/WebView復号がE2Eを支配すると分かった場合の別の変種とする。
+
+
+## 実WKWebViewでの任意計測（2026-10-24）
+
+専用ID `com.geoframe.rawassist.qaroadmap` のdebug bundleを明示許可後に起動し、ローカルのQA用コピーで計測ON→手動プレビューボタン→比較画像を確認した。[取得した8行の主要フィールド](../coreimage-baseline/preview-transport-2026-10-24/gui-preview-debug.json)を保存した。Console経由の取得で原本/EXIF/GPS/URLは含めない。
+
+statusはok 5、image_not_observed 3、invoke_error 0、decode_failed 0。2行は本現像を優先表示してプレビューが表示されず、1行は同じcache hit URLで新しいloadが出なかった。欠測を0msや成功のE2Eに置換しない。
+
+| 観測（成功したDSC04430の5行のみ） | p50 ms | p95 ms（n=5、参考） |
+|---|---:|---:|
+| ハンドラ入口→decode後2rAF | 1,037 | 1,047 |
+| invoke wall | 991 | 1,007 |
+| invoke帰着→画像load | 4 | 7 |
+| load→decode | 16 | 18 |
+| decode→2rAF | 26 | 29 |
+
+初期値→contrast 1.17→exposure 0.5→exposure -1.3→shadow 61の手動列で、後続はそれまでの変更を保持した。CLI totalは901.6〜969.4ms。これは少数1枚・debug Rust・ローカル入力であり、release基準のp95やSMB/batchのE2E比較ではない。実paint、ハンドラ以前の入力遅延、スライダー数値表示の応答は未計測。
+
+今回の新規プレビューでは待ちの大半がinvoke/CLI内で、追加のUI受け渡しは数十msだった。FFI採用の根拠にはせず、まずB1の常駐ライフサイクル/枠/timeout復旧を製品相当で検証する判断を維持する。C ABI/XPCの実測はない。
