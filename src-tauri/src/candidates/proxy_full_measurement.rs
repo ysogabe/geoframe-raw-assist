@@ -13,10 +13,11 @@
 //! - `app_data/<key>/coreimage/full/*.jpg` … 原寸現像の実画像（EXIF 継承あり。コミットしない）
 use super::{
     command::{exif_hints, generate},
-    image_ops::{gaussian, mean, round6, std},
+    image_ops::round6,
     metrics::image_metrics,
     pso,
     renderer::{Renderer, ScratchParent, MAX_EDGE},
+    roi::{crop, crop_u8, rect, select_rois, shadow_mask, ROI_FRAC},
     stars::{star_measurements, ExifHints},
     RgbImage,
 };
@@ -47,7 +48,7 @@ const COMPARE_METRICS: [&str; 10] = [
     "shadow_mean",
     "star_count",
 ];
-/// ROI で比べる指標（[`image_metrics`] の値）と、スケール診断値（[`roi_diagnostics`]）。
+/// ROI で比べる指標（[`image_metrics`] の値）と、スケール診断値（[`super::roi::roi_diagnostics`]）。
 const ROI_METRICS: [&str; 3] = ["detail", "noise_flat", "halo"];
 const ROI_DIAG: [&str; 3] = ["grad_mean", "band_px", "band_matched"];
 /// 2 つ目の代理（#57 コメント: decoder sharpness < 1 は 640 では見えず 1280 以上で効く）。
@@ -55,12 +56,8 @@ const EXTRA_EDGE: usize = 1280;
 /// 正規化範囲は [0.8, 1.6]（`normalize_adjustments`）。0 は契約外なので下限 0.8 を使う。
 const SWEEP_SHARPNESS: [f64; 4] = [0.8, 1.0, 1.47, 1.6];
 const SWEEP_NR: [&str; 3] = ["off", "light", "full"];
-/// ROI の一辺 = 長辺 × この比（640 で 80px、6000 で 750px）。
-const ROI_FRAC: f64 = 0.125;
 /// 変化の向きの不一致を数えるときの不感帯（両方の |Δ| がこれを超えたものだけ数える）。
 const DIRECTION_EPS: f64 = 1e-4;
-/// [`metrics::image_metrics`] の残差ぼかし σ（px）。
-const RESIDUAL_SIGMA: f64 = 1.1;
 const FULL_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
@@ -168,140 +165,6 @@ fn area_resize(src: &image::RgbImage, dw: usize, dh: usize) -> Result<RgbImage, 
     }
     RgbImage::new(dw, dh, out)
 }
-/// 正規化座標 [x0, y0, x1, y1] を w×h の画素矩形 (x, y, rw, rh) にする。
-fn rect(frac: [f64; 4], w: usize, h: usize) -> (usize, usize, usize, usize) {
-    let x0 = ((frac[0] * w as f64).round() as usize).min(w.saturating_sub(8));
-    let y0 = ((frac[1] * h as f64).round() as usize).min(h.saturating_sub(8));
-    let x1 = ((frac[2] * w as f64).round() as usize).clamp(x0 + 8, w);
-    let y1 = ((frac[3] * h as f64).round() as usize).clamp(y0 + 8, h);
-    (x0, y0, x1 - x0, y1 - y0)
-}
-fn crop_u8(src: &image::RgbImage, frac: [f64; 4]) -> Result<RgbImage, String> {
-    let (x, y, w, h) = rect(frac, src.width() as usize, src.height() as usize);
-    let mut pixels = Vec::with_capacity(w * h);
-    for yy in y..y + h {
-        for xx in x..x + w {
-            pixels.push(
-                src.get_pixel(xx as u32, yy as u32)
-                    .0
-                    .map(|v| v as f32 / 255.0),
-            );
-        }
-    }
-    RgbImage::new(w, h, pixels)
-}
-fn crop(img: &RgbImage, frac: [f64; 4]) -> Result<RgbImage, String> {
-    let (x, y, w, h) = rect(frac, img.width, img.height);
-    let mut pixels = Vec::with_capacity(w * h);
-    for yy in y..y + h {
-        pixels.extend_from_slice(&img.pixels[yy * img.width + x..yy * img.width + x + w]);
-    }
-    RgbImage::new(w, h, pixels)
-}
-/// [`super::renderer::Evaluator`] と同じ暗部マスク（輝度の 25% 分位以下）。
-fn shadow_mask(img: &RgbImage) -> Vec<bool> {
-    let gray = img.gray();
-    let mut sorted = gray.clone();
-    sorted.sort_unstable_by(f32::total_cmp);
-    let p = (sorted.len() - 1) as f64 * 0.25;
-    let q = sorted[p.floor() as usize] as f64
-        + (sorted[p.ceil() as usize] - sorted[p.floor() as usize]) as f64 * p.fract();
-    gray.iter().map(|v| *v <= q as f32).collect()
-}
-fn grad_mean(gray: &[f32], w: usize) -> f64 {
-    let mut sum = 0.0;
-    for (i, v) in gray.iter().enumerate() {
-        let up = gray[if i < w { i } else { i - w }];
-        let left = gray[if i % w == 0 { i } else { i - 1 }];
-        sum += ((v - up).abs() + (v - left).abs()) as f64;
-    }
-    sum / gray.len() as f64
-}
-/// スケール診断値。band_px は画素単位の高域（image_metrics の残差と同じ σ=1.1px）、band_matched は
-/// 640 代理の 1.1px と同じ「画面上の周波数」へ σ を長辺比で拡大した高域（σ = 1.1 × long_edge / 640）。
-fn roi_diagnostics(img: &RgbImage, long_edge: usize) -> Value {
-    let gray = img.gray();
-    let (w, h) = (img.width, img.height);
-    let band = |sigma: f64| {
-        let blurred = gaussian(&gray, w, h, sigma);
-        std(&gray
-            .iter()
-            .zip(blurred)
-            .map(|(a, b)| a - b)
-            .collect::<Vec<_>>())
-    };
-    let matched_sigma = RESIDUAL_SIGMA * long_edge as f64 / MAX_EDGE as f64;
-    json!({
-        "grad_mean": round6(grad_mean(&gray, w)),
-        "band_px": round6(band(RESIDUAL_SIGMA)),
-        "band_matched": round6(band(matched_sigma)),
-        "band_matched_sigma": round6(matched_sigma),
-        "mean_luma": round6(mean(&gray)),
-    })
-}
-/// natural の 640 代理から ROI を決定的に選ぶ（同じ正規化座標を全スケール・全集合で使う）。
-fn select_rois(img: &RgbImage) -> Vec<(String, [f64; 4])> {
-    let (w, h) = (img.width, img.height);
-    let side = ((ROI_FRAC * w.max(h) as f64).round() as usize).clamp(8, w.min(h));
-    let stride = (side / 2).max(1);
-    let gray = img.gray();
-    // (x, y, 平均輝度, 平均勾配)。白飛びが 1% を超えるタイルは平坦候補から外す。
-    let mut tiles = Vec::new();
-    let mut y = 0;
-    while y + side <= h {
-        let mut x = 0;
-        while x + side <= w {
-            let (mut luma, mut grad, mut clipped) = (0.0, 0.0, 0usize);
-            for yy in y..y + side {
-                for xx in x..x + side {
-                    let i = yy * w + xx;
-                    luma += gray[i] as f64;
-                    if xx > x && yy > y {
-                        grad +=
-                            ((gray[i] - gray[i - 1]).abs() + (gray[i] - gray[i - w]).abs()) as f64;
-                    }
-                    clipped += usize::from(img.pixels[i].iter().any(|v| *v >= 0.985));
-                }
-            }
-            let n = (side * side) as f64;
-            tiles.push((x, y, luma / n, grad / n, clipped as f64 / n));
-            x += stride;
-        }
-        y += stride;
-    }
-    let frac = |x: usize, y: usize| {
-        [
-            x as f64 / w as f64,
-            y as f64 / h as f64,
-            (x + side) as f64 / w as f64,
-            (y + side) as f64 / h as f64,
-        ]
-    };
-    let mut rois = vec![("center".to_string(), frac((w - side) / 2, (h - side) / 2))];
-    if let Some(t) = tiles.iter().max_by(|a, b| a.3.total_cmp(&b.3)) {
-        rois.push(("detail".into(), frac(t.0, t.1)));
-    }
-    let mut lumas: Vec<f64> = tiles.iter().map(|t| t.2).collect();
-    lumas.sort_by(f64::total_cmp);
-    if let Some(q) = lumas.get(lumas.len() / 4) {
-        if let Some(t) = tiles
-            .iter()
-            .filter(|t| t.2 <= *q && t.4 < 0.01)
-            .min_by(|a, b| a.3.total_cmp(&b.3))
-        {
-            rois.push(("flat_dark".into(), frac(t.0, t.1)));
-        }
-    }
-    if let Some(t) = tiles
-        .iter()
-        .filter(|t| (0.2..=0.8).contains(&t.2) && t.4 < 0.01)
-        .min_by(|a, b| a.3.total_cmp(&b.3))
-    {
-        rois.push(("flat_mid".into(), frac(t.0, t.1)));
-    }
-    rois
-}
-
 // ---------------------------------------------------------------------------
 // 現像
 // ---------------------------------------------------------------------------
@@ -477,7 +340,6 @@ fn measure_scale(
             .push(json!({"scale": scale, "set": "natural", "error": "natural の画像がありません"}));
     }
     let frame_mask = natural.frame.as_ref().map(shadow_mask);
-    let roi_masks: Vec<Vec<bool>> = natural.rois.iter().map(shadow_mask).collect();
     let mut entries = Map::new();
     for (set, r) in sets.iter().zip(rendered) {
         let mut entry = json!({"applied": r.applied, "timing": r.timing, "extra": r.extra});
@@ -499,22 +361,20 @@ fn measure_scale(
         }
         let mut roi_entries = Map::new();
         for (i, (name, frac)) in rois.iter().enumerate() {
-            let (Some(img), Some(base), Some(mask)) =
-                (r.rois.get(i), natural.rois.get(i), roi_masks.get(i))
-            else {
+            let (Some(img), Some(base)) = (r.rois.get(i), natural.rois.get(i)) else {
                 continue;
             };
-            let metrics = match image_metrics(base, img, exif, false, Some(mask)) {
-                Ok(m) => serde_json::to_value(m).unwrap(),
+            let measured = match super::roi::measure(base, img, r.long_edge) {
+                Ok(m) => m,
                 Err(e) => {
                     errors.push(json!({"scale": scale, "set": set.id, "roi": name, "error": e}));
-                    json!({"error": e})
+                    json!({"metrics":{"error":e}})
                 }
             };
             roi_entries.insert(
                 name.clone(),
-                json!({"frac": frac, "dims": [img.width, img.height], "metrics": metrics,
-                    "diag": roi_diagnostics(img, r.long_edge)}),
+                json!({"frac": frac, "dims": [img.width, img.height], "metrics": measured["metrics"],
+                    "diag": measured["diag"]}),
             );
         }
         entry["rois"] = Value::Object(roi_entries);

@@ -372,3 +372,168 @@ fn candidate_threshold_survey() {
     )
     .unwrap();
 }
+
+/// Exercise the actual search+selection path twice; only diagnostic fields/timing may differ.
+#[test]
+fn diagnostic_opt_in_preserves_search_ids_adjustments_and_proxy_metrics() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch_test_root("diagnostic-opt-in");
+    let source = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([((x + y) * 2 + 16) as u8; 3]));
+    source.save(root.join("source.jpg")).unwrap();
+    fs::write(root.join("DSC07402.ARW"), "mock").unwrap();
+    let cli = root.join("cli");
+    fs::write(
+        &cli,
+        r#"#!/bin/sh
+base=$(dirname "$0")
+n=0
+while IFS= read -r line; do
+ n=$((n+1))
+ case "$line" in
+  *'"op":"decode"'*) printf '{"ok":true,"handle":"h%d","sequence":%d}\n' "$n" "$n" ;;
+  *'"op":"release"'*) printf '{"ok":true,"released":true,"sequence":%d}\n' "$n" ;;
+  *)
+   output=$(printf '%s' "$line" | sed -E 's/.*"output":"([^"]*)".*/\1/')
+   cp "$base/source.jpg" "$output" || exit 7
+   printf '{"ok":true,"output":"%s","width":64,"height":48,"sequence":%d}\n' "$output" "$n" ;;
+ esac
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let slot = coreimage::DevelopSlot::new(0);
+    let guard = slot.acquire().unwrap();
+    let run = |enabled| {
+        generate_in_slot(
+            &root,
+            &cli,
+            &root.join("DSC07402.ARW"),
+            ScratchParent::for_directory(&root.join("scratch")).unwrap(),
+            "DSC07402",
+            "nightscape",
+            Some(42),
+            Some(48),
+            enabled,
+            &guard,
+            || Ok(()),
+            |_, _, _| {},
+        )
+        .unwrap()
+    };
+    let off = run(false);
+    let on = run(true);
+    for key in [
+        "capture_id",
+        "preset",
+        "seed",
+        "budget",
+        "proxy",
+        "star_scene",
+        "candidates",
+        "rejected",
+    ] {
+        assert_eq!(off[key], on[key], "{key} changed with diagnostics enabled");
+    }
+    assert_eq!(off["native_roi_diagnostics"]["status"], "not_run");
+    assert_ne!(on["native_roi_diagnostics"]["status"], "not_run");
+    assert!(on["native_roi_diagnostics"]["renders"].as_u64().unwrap() <= 5);
+    assert_eq!(fs::read_dir(root.join("scratch")).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Parent QA only: real 11-image OFF/ON comparison, sequential, budget 48.
+/// GEOFRAME_PSO_RAW_ROOT=... GEOFRAME_PSO_SIDECAR=... GEOFRAME_NATIVE_ROI_OUT=<new directory> \
+/// cargo test --release --manifest-path src-tauri/Cargo.toml candidates_native_roi_release_validation -- --ignored --nocapture
+/// Creates only new measurement JSON and owned scratch; never overwrites existing outputs.
+#[test]
+#[ignore = "実CLI11枚の検収は親担当。素材・release CLI・新しい出力先が必要"]
+fn candidates_native_roi_release_validation() {
+    assert!(!cfg!(debug_assertions), "--release で実行してください");
+    let root =
+        Path::new(&std::env::var_os("GEOFRAME_PSO_RAW_ROOT").expect("GEOFRAME_PSO_RAW_ROOT"))
+            .canonicalize()
+            .unwrap();
+    let sidecar =
+        Path::new(&std::env::var_os("GEOFRAME_PSO_SIDECAR").expect("GEOFRAME_PSO_SIDECAR"))
+            .canonicalize()
+            .unwrap();
+    let out = std::path::PathBuf::from(
+        std::env::var_os("GEOFRAME_NATIVE_ROI_OUT")
+            .expect("GEOFRAME_NATIVE_ROI_OUT: 新しいディレクトリを指定"),
+    );
+    fs::create_dir(&out).expect("既存の出力先には書き込みません");
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../scripts/eval_cases/candidates_baseline.json"
+    ))
+    .unwrap();
+    let stars = &cases["sets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["root"] == "stars")
+        .unwrap()["cases"];
+    let slot = coreimage::DevelopSlot::new(0);
+    let mut differences = Vec::new();
+    for case in stars.as_array().unwrap() {
+        let (capture, preset) = case.as_str().unwrap().split_once(':').unwrap();
+        let input = coreimage::resolve_arw(&root, capture).unwrap();
+        let guard = slot.acquire().unwrap();
+        let run = |enabled| {
+            generate_in_slot(
+                &root,
+                &sidecar,
+                &input,
+                ScratchParent::for_directory(&out.join("scratch")).unwrap(),
+                capture,
+                preset,
+                None,
+                Some(48),
+                enabled,
+                &guard,
+                || Ok(()),
+                |_, _, _| {},
+            )
+        };
+        let off = run(false).unwrap();
+        let on = run(true).unwrap();
+        for key in [
+            "capture_id",
+            "preset",
+            "seed",
+            "budget",
+            "proxy",
+            "star_scene",
+            "candidates",
+            "rejected",
+        ] {
+            if off[key] != on[key] {
+                differences.push(format!("{capture}:{preset}:{key}"));
+            }
+        }
+        let record = json!({"off":off,"on":on});
+        fs::write(
+            out.join(format!("{capture}__{preset}.json")),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "{capture}:{preset}: off={}ms on={}ms renders={} status={}",
+            off["elapsed_ms"]["total"],
+            on["elapsed_ms"]["total"],
+            on["native_roi_diagnostics"]["renders"],
+            on["native_roi_diagnostics"]["status"]
+        );
+        assert!(on["native_roi_diagnostics"]["renders"].as_u64().unwrap() <= 5);
+        assert!(
+            matches!(
+                on["native_roi_diagnostics"]["status"].as_str(),
+                Some("complete" | "missing")
+            ),
+            "診断未実行/失敗を検収成功として扱いません: {}",
+            on["native_roi_diagnostics"]
+        );
+        assert_eq!(fs::read_dir(out.join("scratch")).unwrap().count(), 0);
+    }
+    assert!(differences.is_empty(), "OFF/ON差分: {differences:?}");
+}

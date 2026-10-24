@@ -1593,6 +1593,45 @@ fn load_cached(context: &ResultContext<'_>) -> Option<CoreImagePreviewResult> {
     Some(result)
 }
 
+/// Execute the same single-shot request for regular development and native diagnostics.
+/// The caller must already own the CLI slot. This function never acquires a slot or
+/// touches normal output/cache directories; diagnostics can safely target their own scratch.
+pub(crate) fn develop_to_output_in_slot(
+    sidecar: &Path,
+    input: &Path,
+    output: &Path,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+    timeout: Duration,
+    _slot: &SlotGuard<'_>,
+) -> Result<Value, CoreImageError> {
+    let mut request = base_request(input, mode, adjustments);
+    request.insert("output".into(), json!(output));
+    let request = Value::Object(request);
+    let body = request.to_string();
+    let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
+    let mut response = parse_response(&result)?;
+    if response.get("ok") != Some(&Value::Bool(true)) || !result.status.success() {
+        return Err(cli_error(&response, result.status));
+    }
+    if response
+        .get("output")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        != Some(output)
+        || !output.is_file()
+        || !response["width"].as_u64().is_some_and(|w| w > 0)
+        || !response["height"].as_u64().is_some_and(|h| h > 0)
+    {
+        return Err(CoreImageError::new(
+            "SIDECAR_BAD_RESPONSE",
+            "Core Image CLI の出力先・ファイル・寸法が不正です",
+        ));
+    }
+    response["request"] = request;
+    Ok(response)
+}
+
 /// 現像の本体（Tauri に依存しない。テストから直接呼ぶ）。
 ///
 /// `adjustments` は `normalize_adjustments` 済みのもの（コマンドは常に Some）。`slot` は
@@ -1625,7 +1664,7 @@ pub(crate) fn develop(
 
     // 2. 出力名（安定ハッシュ）の決定。
     let version = cli_version(sidecar)?;
-    let mut request = base_request(&input, mode, adjustments);
+    let request = base_request(&input, mode, adjustments);
     // full のみ JPG を読み取る。継承に使うものと同じバイト列を鍵に含め、
     // ペア追加／更新／削除で必ず再現像する。画像や GPS の値は来歴・ログに出さない。
     let source_jpeg = if mode == DevelopMode::Full {
@@ -1684,33 +1723,22 @@ pub(crate) fn develop(
     }
 
     // 4. CLI は同時 1 本。空くまで待つ（待ちが上限を超えたら BUSY）。枠はガードの drop で返る。
-    let _slot = slot.acquire()?;
+    let slot_guard = slot.acquire()?;
     // 待っている間に同じ現像（連打など）が終わっていればそれを返す。
     if let Some(cached) = load_cached(&context) {
         return Ok(cached);
     }
 
     // 5. CLI 呼び出し（ウォッチドッグは子プロセスの起動から数える）。
-    request.insert(
-        "output".into(),
-        Value::String(output.to_string_lossy().into_owned()),
-    );
-    let body = Value::Object(request).to_string();
-    let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
-    let mut response = parse_response(&result)?;
-    if response.get("ok") != Some(&Value::Bool(true)) || !result.status.success() {
-        return Err(cli_error(&response, result.status));
-    }
-    let reported = response
-        .get("output")
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    if reported.as_deref() != Some(output.as_path()) || !output.is_file() {
-        return Err(CoreImageError::new(
-            "SIDECAR_BAD_RESPONSE",
-            "Core Image CLI の出力先が依頼と一致しないか、出力ファイルがありません",
-        ));
-    }
+    let mut response = develop_to_output_in_slot(
+        sidecar,
+        &input,
+        &output,
+        mode,
+        adjustments,
+        timeout,
+        &slot_guard,
+    )?;
     let mut developed = result_from_response(&response, &context, false).ok_or_else(|| {
         CoreImageError::new(
             "SIDECAR_BAD_RESPONSE",
@@ -1728,7 +1756,6 @@ pub(crate) fn develop(
     response["mode"] = json!(mode.as_str());
     // Swift の実応答には request がない。Rust が実際に送った要求を来歴に記録する。
     // #111 は request.mode / input / output を検証してから full を複製する。
-    response["request"] = serde_json::from_str(&body).expect("Rust-serialized request JSON");
     // 6. 来歴: preview と同じ CLI 応答 JSON に Rust の継承結果を加える。
     write_provenance(&provenance, &format!("{}\n", response))?;
 

@@ -5,6 +5,9 @@ import type {
   AnalysisResponse,
   AnalyzeResponse,
   CaptureId,
+  DevelopmentCandidatesRequest,
+  DevelopmentCandidatesResponse,
+  DevelopmentCandidatesProgress,
   ExportItem,
   ExportResponse,
   ImportToPhotosRequest,
@@ -142,4 +145,25 @@ export async function importToPhotos(request: ImportToPhotosRequest): Promise<Im
 /** 書き出したフォルダを Finder で表示する。 */
 export async function revealExport(path: string): Promise<void> {
   await invoke("reveal_export", { path });
+}
+
+/** 探索→任意の原寸ROI→done まで待つ。原寸診断は明示trueのみ。 */
+export async function generateDevelopmentCandidates(
+  request: DevelopmentCandidatesRequest,
+  onProgress?: (progress: DevelopmentCandidatesProgress) => void,
+): Promise<DevelopmentCandidatesResponse> {
+  const { listen } = await import("@tauri-apps/api/event");
+  let active = true;
+  const unlisten = onProgress ? await listen<DevelopmentCandidatesProgress>("development-candidates-progress", ({ payload }) => {
+    if (active && payload.capture_id === request.capture_id && payload.preset === request.preset) onProgress(payload);
+  }) : null;
+  try {
+    return await invoke<DevelopmentCandidatesResponse>("generate_development_candidates", {
+      captureId: request.capture_id, preset: request.preset, seed: request.seed, budget: request.budget,
+      nativeRoiDiagnostics: request.native_roi_diagnostics ?? false,
+    });
+  } finally {
+    active = false;
+    unlisten?.();
+  }
 }
