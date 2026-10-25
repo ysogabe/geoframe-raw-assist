@@ -39,22 +39,35 @@ fn main() {
         ])
         .plugin(tauri_plugin_dialog::init());
 
+    // One context for both paths (the feature check below reads the same config that is run).
+    let context = tauri::generate_context!();
+
     // Ordinary build: unchanged `.run` semantics.
     #[cfg(not(feature = "resident-preview-qa"))]
     builder
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 
-    // QA-only (#141 B1 PR-B): `setup` refuses every identifier except the dedicated QA one, and
-    // the exit hook closes the idle resident CLI child (stdin EOF -> bounded grace -> kill/wait).
+    // QA-only (#141 B1 PR-B): refuse every identifier except the dedicated QA one *before*
+    // `Builder::build`/`run`, so no window or webview is ever created under the wrong ID. The
+    // `setup` hook keeps the same check defensively. The exit hook closes the idle resident CLI
+    // child (stdin EOF -> bounded grace -> kill/wait).
     #[cfg(feature = "resident-preview-qa")]
-    builder
-        .setup(coreimage::resident::qa::setup)
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                coreimage::resident::qa::on_exit(app);
-            }
-        });
+    {
+        if let Err(error) =
+            coreimage::resident::qa::check_identifier(&context.config().identifier)
+        {
+            eprintln!("{}: {}", error.code, error.message);
+            std::process::exit(1);
+        }
+        builder
+            .setup(coreimage::resident::qa::setup)
+            .build(context)
+            .expect("error while building tauri application")
+            .run(|app, event| {
+                if let tauri::RunEvent::Exit = event {
+                    coreimage::resident::qa::on_exit(app);
+                }
+            });
+    }
 }

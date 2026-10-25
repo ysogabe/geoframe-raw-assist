@@ -180,7 +180,9 @@ impl<'slot> ResidentPreview<'slot> {
         )
     }
 
-    /// Nonblocking: never takes the slot and never interrupts a request holding the owner.
+    /// Never takes the slot and never interrupts a request holding the owner (`owner.try_lock`).
+    /// It does wait for the `pinned` mutex, which `pinned()` holds during the first-use sidecar
+    /// hash (finite, not instantaneous), so this is not strictly nonblocking.
     pub(crate) fn reap_idle(&self) -> bool {
         let pinned = self
             .pinned
@@ -215,8 +217,9 @@ impl<'slot> ResidentPreview<'slot> {
     }
 }
 
-/// Background idle reaper. It only calls `reap_idle` (try_lock), so it never waits for the slot
-/// or the owner and can always be stopped promptly.
+/// Background idle reaper. It only calls `reap_idle`, so it never waits for the slot or a busy
+/// owner (`try_lock`). It may wait a finite time on the `pinned` mutex while the first preview
+/// hashes the sidecar; `stop` joins after that, so shutdown is not guaranteed to be instantaneous.
 pub(crate) struct Reaper {
     stop: Option<mpsc::Sender<()>>,
     join: Option<JoinHandle<()>>,
@@ -295,10 +298,13 @@ impl QaApp {
     }
 }
 
-/// `setup` hook: refuse any non-QA identifier, then manage the app-lifetime state.
+/// `setup` hook: defensive repeat of the identifier check, then manage the app-lifetime state.
+/// `main` already refuses a wrong identifier before `Builder::build`, so this should not fire; it
+/// keeps the code in the message because Tauri's setup runs after the window has been created.
 #[cfg(feature = "resident-preview-qa")]
 pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    check_identifier(&app.config().identifier).map_err(|error| error.message)?;
+    check_identifier(&app.config().identifier)
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
     app.manage(QaApp::start_default());
     Ok(())
 }

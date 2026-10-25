@@ -10,7 +10,7 @@ IPC の引数と結果の形は変えない。実アプリ E2E・署名・GUI・
 | 項目 | 内容 |
 |---|---|
 | feature | `resident-preview-qa = ["tauri/devtools"]`（default は空）。 |
-| 有効化条件 | 専用 ID `com.geoframe.rawassist.qaroadmap` のみ。`setup` が `app.config().identifier` を検査し、不一致は `RESIDENT_QA_WRONG_APP_ID` で起動を拒否する。環境変数での切替はない。 |
+| 有効化条件 | 専用 ID `com.geoframe.rawassist.qaroadmap` のみ。`main` が `tauri::generate_context!()` を一度だけ作り、feature 時は `Builder::build`/`run` の**前**に `context.config().identifier` を検査する。不一致は stderr に `RESIDENT_QA_WRONG_APP_ID: <message>` を出して `exit(1)` し、ウィンドウ／WebView は作られない（明示的な起動前拒否）。`setup` にも防御的な同じ検査を残し、そちらは code 付きの文字列でエラーを返す（通常は到達しない）。なお Tauri の `setup` はウィンドウ作成後に走るため、setup だけでは「ウィンドウ前の拒否」にならない。環境変数での切替はない。通常ビルドは従来の `.run(context)` のまま。 |
 | ルーティング | `develop_command`（feature 時は `develop_for_command`）の **`DevelopMode::Preview` だけ** `develop_with_executor` + resident。Full / merge / candidates / native ROI は `develop` / 独自 session のまま。Full の cache bypass が resident を通る問題は、この入口の mode 分岐で防ぐ。 |
 | 共通処理 | 入力検証・正規化、request、cache key、出力検証、EXIF、prune は `develop_with_executor` のまま複製しない。 |
 | owner | `ResidentPreview`（managed state `QaApp` の中）が最初の preview で遅延生成。sidecar パスを固定し、`static DEVELOP_SLOT` を borrow（別 slot は作らない）。別パスの呼び出しは `SIDECAR_IDENTITY_CHANGED`。 |
@@ -20,12 +20,18 @@ IPC の引数と結果の形は変えない。実アプリ E2E・署名・GUI・
 
 ### 寿命の保証範囲
 
-- **reaper**: 5 秒間隔のスレッドが `reap_idle`（`try_lock`）だけを呼ぶ。slot も owner の待ちも取らないので、処理中の要求を kill せず、
-  いつでも即座に止められる。idle TTL / 要求回数超過の idle 子だけを閉じる（stdin EOF → 最大 500ms 猶予 → kill/wait の既存 `BatchSession::Drop`）。
+- **reaper**: 5 秒間隔のスレッドが `reap_idle` だけを呼ぶ。slot は取らず、owner は `try_lock` なので、処理中の要求を kill も待ちもしない。
+  ただし owner の手前の `pinned` mutex は blocking lock で、初回 preview の sidecar hash 計算中は `ResidentPreview::pinned` が保持するため、
+  reaper（と終了処理）はその間だけ**有限時間**待つ。「即座・完全 nonblocking」とは保証しない。
+  idle TTL / 要求回数超過の idle 子だけを閉じる（stdin EOF → 最大 500ms 猶予 → kill/wait の既存 `BatchSession::Drop`）。
 - **終了処理**: `Exit` で reaper を止め、owner に `closing`（sticky）を立ててから `try_lock` で close を最大 3 秒ポーリングする。
-  以後の要求は `RESIDENT_CLOSED` で、子は新たに起動されない。idle なら EOF で閉じる。
+  以後の**resident preview** の要求は `RESIDENT_CLOSED` で、resident の子は新たに起動されない（この保証は resident preview の範囲。
+  Full / 合成 / 候補は従来の単発 CLI のままで、本 PR は終了処理でそれらを止めない）。idle なら EOF で閉じる。
   **処理中の要求は kill しない**。3 秒内に終わらなければ `StillBusy` をログに出して諦め、子は親プロセス終了による stdin EOF に任せる。
-  その場合に子が確実に消えること（以前の standalone probe では約 12〜67ms で不在を観測）はこの PR のテストでは証明しておらず、親が実アプリで観測する。
+  - 完走する子なら、現像が終わって stdin を読みに戻ったところで EOF を見て終了する。
+  - **hang した子は stdin を読まず、親のタイムアウトも親プロセスごと消えるため、回収は保証されない**（既存の Single 経路にもある制約）。
+    子 kill の追加など仕様変更は本 PR ではしていない。
+  - 子が確実に消えること（以前の standalone probe では約 12〜67ms で不在を観測）はこの PR のテストでは証明しておらず、親が実アプリで観測する。
   異常終了（SIGKILL など）はそもそも Exit フックが走らない。
 - OS の子回収 `wait` は同期処理で、厳密なリアルタイム上限は保証しない。静的 `Drop` には依存していない（`DEVELOP_SLOT` は static のまま）。
 - 「1 active + idle resident 1」: 同時に現像するのは 1 本のまま、待機中の常駐子が別に 1 本存在しうる。プロセス総数の上限ではない。
@@ -54,6 +60,8 @@ IPC の引数と結果の形は変えない。実アプリ E2E・署名・GUI・
 ## 既知のトレードオフ（維持）
 
 resident の cache hit も CLI 同一性検査のために先に実行枠を取る。他の現像が走行中だと待ち（上限超過で `BUSY`）になる。
+同じ理由で、不正入力（無効な capture_id など）も resident 入口の identity 用 slot を待つため、`BUSY` が検証エラーより先に出うる
+（Single は入力検証が先で slot を取らない）。これも既知のトレードオフとして維持する。
 通常ビルドの Single の hit は枠不要で、この差は mock テスト（`resident_cache_hit_takes_a_slot_but_single_does_not`）で固定した。
 lockless identity への変更はしていない。親 QA で、候補/合成/原寸の最中に preview の cache hit が待たされる体感・`BUSY` を確認する。
 CLI が差し替えられると `SIDECAR_IDENTITY_CHANGED` が sticky で、同一プロセス内では回復しない（アプリ再起動が必要）。
@@ -77,7 +85,8 @@ QA リリース（親が実行。QA 用 config は ID `com.geoframe.rawassist.qa
 env -u CI npm run tauri:build -- --bundles app --features resident-preview-qa --config <qa>/tauri-qa-config.json
 ```
 
-通常 ID で feature 付きをビルド・起動すると `setup` が `RESIDENT_QA_WRONG_APP_ID` で拒否する（アプリは起動しない）。
+通常 ID で feature 付きをビルド・起動すると、`main` が `Builder::build` の前に stderr へ `RESIDENT_QA_WRONG_APP_ID: ...` を出して `exit(1)` する
+（ウィンドウは作られない。実 bundle での確認は親 QA 表 #1 で未実施）。
 署名（adhoc strict）・配布は本 PR の範囲外。
 
 ### devtools の開き方（要親確認）
