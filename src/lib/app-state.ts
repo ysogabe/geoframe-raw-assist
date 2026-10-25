@@ -576,12 +576,17 @@ export function reducer(state: State, action: Action): State {
     case "screen/operation": {
       // グループ切替とプリセット/スライダーの初期化は 1 アクションで行う（effect 内での setState を避ける）。
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);
+      // 合成済みのグループへ戻るときは、その合成を作ったプリセット・調整を操作値へ復元する。
+      // 毎回推薦プリセット + 空の overrides へ戻すと、非既定の recipe で作った結果が
+      // 他グループを見て戻っただけで「今の設定に合わない」扱いになる。復元できなければ
+      // （未合成の初回・フレーム違い・古い recipe）従来どおり推薦プリセットから始める。
+      const restored = group ? restoredMergeRecipeOf(state, group) : null;
       return {
         ...state,
         screen: "operation",
         selectedGroupId: action.groupId,
-        presetName: suggestPreset(state.presets, group),
-        overrides: {},
+        presetName: restored?.presetName ?? suggestPreset(state.presets, group),
+        overrides: restored?.overrides ?? {},
         // 別グループ・別プリセットの候補を持ち越さない。生成中（busy）の応答は
         // captureId を残して受け取るが、表示・適用時に capture_id / preset を照合する。
         ...clearedCandidateResult(),
@@ -648,9 +653,13 @@ export function reducer(state: State, action: Action): State {
         };
       }
       const group = state.analysis?.groups.find((item) => item.id === action.groupId);
-      // 新規採用は、現在のグループに属する本合成だけ許可する。プレビュー結果や
-      // 別グループ/古いcapture IDを action から直接渡しても書き出し対象にしない。
-      if (!group || !mergedResultFor(state.mergeFullResults, group, action.leadCaptureId)) return state;
+      // 新規採用は、選択中のグループの **今の合成設定に合う本合成** だけ許可する。
+      // プレビュー結果・別グループ・古い capture ID に加えて、フレーム選択/プリセット/調整が
+      // 変わって合わなくなった古い本合成も、action を直接渡されて書き出し対象にしない
+      // （UI のボタンが無効でも reducer 単体で守る。取り消しは上の already 分岐が先に通す）。
+      if (!group || state.selectedGroupId !== group.id) return state;
+      const full = currentMergeResultsOf(state, group).full;
+      if (!full || full.capture_ids[0] !== action.leadCaptureId) return state;
       // 新規採用は **同じグループの古い合成採用を置き換える**（増やさない）。
       //
       // 置き換えないと孤児が残る: グループGでリード=Xの合成を採用したあと、フレームを
@@ -982,11 +991,38 @@ export function viewingCaptureOf(state: State, group: GroupInfo): CaptureId {
   // そのまま残っていることがある。ここで返した撮影IDは「この写真を採用」の宛先に
   // なるので、グループに属さないIDを返すとそのグループの採用として別の写真が
   // 記録されてしまう。必ずグループ内に絞ってから返す。
-  const merged = state.mergeFullResults[group.id] ?? state.mergePreviewResults[group.id];
-  const lead = [merged?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
+  //
+  // 先頭フレームは **今の選択・プリセット・調整に合う合成結果** から取る。raw な本合成を
+  // 優先すると、フレームを選び直して新しいプレビューを作ったあとも古い本合成の先頭を
+  // 返し、画面に出ている合成と SELECTED PHOTO / EXIF / 写真の採用先が別の写真になる。
+  // 合う結果が無いときは今の選択の先頭フレームを見る。frames は選択順、合成結果の
+  // capture_ids はサーバが昇順に正規化したものなので、選択順が昇順でないと合成結果が
+  // 合っている間と合っていない間で先頭が入れ替わりうる。これは「合っていない間は
+  // 今の選択の先頭を写真として見せる」という明示的な表示上のフォールバックで、
+  // effectiveViewingOf が写真面として扱う。採用の宛先（mergedAcceptTargetOf）は
+  // 合成結果の先頭だけを使うので、このフォールバックが採用先を動かすことはない。
+  const shown = currentMergeResultsOf(state, group).shown;
+  const lead = [shown?.capture_ids[0], mergeFramesOf(state, group)[0]].find(
     (captureId) => captureId !== undefined && group.capture_ids.includes(captureId),
   );
   return lead ?? group.recommended_capture_id;
+}
+
+/**
+ * 実際に画面へ出している面。
+ *
+ * 保存されたカーソルが merged でも、今の設定に合う合成結果が無ければ画面に出るのは
+ * viewingCaptureOf が返す写真（今の選択の先頭フレーム）になる。カーソルのまま渡すと、
+ * 表示は写真なのに合成タイルが「表示中」のままで、実際に出ている写真のタイルに印が付かない。
+ * 表示・SELECTED PHOTO・EXIF・採用先は、この関数が返す面に揃える。
+ * 保存されたカーソル自体は書き換えない（合成結果が合い直せば merged の表示へ戻る）。
+ */
+export function effectiveViewingOf(state: State, group: GroupInfo): ViewingItem {
+  const viewing = viewingOf(state, group);
+  if (viewing.kind === "merged" && !currentMergeResultsOf(state, group).shown) {
+    return { kind: "photo", captureId: viewingCaptureOf(state, group) };
+  }
+  return viewing;
 }
 
 /**
@@ -1007,6 +1043,189 @@ export function groupMergeResultOf(
   const merged = results[group.id];
   if (!merged) return undefined;
   return merged.capture_ids.every((captureId) => group.capture_ids.includes(captureId)) ? merged : undefined;
+}
+
+/**
+ * その合成結果が「今の合成設定で作ったもの」か。
+ *
+ * 照合するのはフレームの集合・プリセット・調整値の全量。いずれかが違えば、画面に出すと
+ * 今の設定と別の画像を「合成結果」として見せることになる。
+ *
+ * プリセットと調整値（state.presetName / overrides）は **選択中のグループの操作内容** なので、
+ * 選択中でないグループ（一覧カードの代表写真など）には当てはめられない。そちらはフレームの
+ * 集合だけを照合する。調整値がまだ取れていない（プリセット未取得）選択中グループは、
+ * 照合できないので合わないものとして扱う。
+ */
+export function isMergeResultCurrent(state: State, group: GroupInfo, result: MergedResult): boolean {
+  const frames = mergeFramesOf(state, group);
+  if (result.capture_ids.length !== frames.length || !frames.every((id) => result.capture_ids.includes(id))) {
+    return false;
+  }
+  if (state.selectedGroupId !== group.id) return true;
+  const adjustments = effectiveAdjustments(state);
+  if (!adjustments || result.preset !== state.presetName) return false;
+  // 古い recipe 由来の結果は adjustments が null / undefined / 配列などで来うる。
+  // 照合できない結果を「合っている」とは推定せず、落とさずに合わないものとして扱う。
+  const recipe: unknown = result.adjustments;
+  if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return false;
+  const recorded = recipe as Partial<Adjustments>;
+  return (Object.keys(adjustments) as (keyof Adjustments)[]).every((key) => recorded[key] === adjustments[key]);
+}
+
+/**
+ * そのグループで「今の合成設定に合う」合成結果。
+ *
+ * - `full` / `preview`: groupMergeResultOf の関門（全フレームがグループ内）に加えて
+ *   isMergeResultCurrent を通ったものだけ。
+ * - `shown`: 画面に出す1枚。本合成が合っていればそれ、無ければ合っているプレビュー。
+ *
+ * 表示・SELECTED PHOTO/EXIF・写真の採用先・合成の採用ボタンの有効判定は、すべてこの値を
+ * 見る。**採用済みの成果物の引き直し（mergedResultFor）はここを通さない**: 採用は
+ * 採用した時点の成果物のスナップショットで、あとから現像パネルを触っただけで書き出し対象
+ * から外れてはいけないため。
+ */
+export function currentMergeResultsOf(
+  state: State,
+  group: GroupInfo,
+): { preview?: MergedResult; full?: MergedResult; shown?: MergedResult } {
+  const pick = (results: Record<number, MergedResult>) => {
+    const result = groupMergeResultOf(results, group);
+    return result && isMergeResultCurrent(state, group, result) ? result : undefined;
+  };
+  const preview = pick(state.mergePreviewResults);
+  const full = pick(state.mergeFullResults);
+  return { preview, full, shown: full ?? preview };
+}
+
+const ADJUSTMENT_NUMERIC_KEYS: (keyof Adjustments)[] = [
+  "exposure",
+  "wb_temp",
+  "shadow_lift",
+  "highlight_recovery",
+  "brightness",
+  "contrast",
+  "saturation",
+  "sharpness",
+];
+const NOISE_REDUCTION_VALUES: readonly string[] = ["off", "light", "full"];
+
+/** 9 キーすべてが揃い、数値キーが有限数・noise_reduction が既知の値である recipe か。 */
+function isCompleteRecipe(value: unknown): value is Adjustments {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recipe = value as Record<string, unknown>;
+  return (
+    ADJUSTMENT_NUMERIC_KEYS.every((key) => typeof recipe[key] === "number" && Number.isFinite(recipe[key])) &&
+    typeof recipe.noise_reduction === "string" &&
+    NOISE_REDUCTION_VALUES.includes(recipe.noise_reduction)
+  );
+}
+
+/**
+ * そのグループの保存済み合成結果から復元できる操作値（プリセット + 既定との差分）。無ければ null。
+ *
+ * 対象は **現在のフレーム集合に合う** 結果だけで、本合成を優先し、無い（または復元できない）ときだけ
+ * プレビューを使う。フレームの違う古い本合成を優先すると、今のフレームで作った新しい
+ * プレビューの設定を消してしまうため。プリセットが一覧に無い・recipe が 9 キー揃っていない
+ * 古い結果は復元せず（null）、呼び出し側が従来の既定へ倒す。
+ *
+ * overrides は **プリセット既定と違うキーだけ**。全キーを入れると、既定と同じ値まで「変更あり」
+ * 扱いになり、グループ移動の確認ダイアログが人工的に出る。復元後の操作値は
+ * resolveAdjustments の結果が結果の recipe と全キー一致するので、共通 selector
+ * （isMergeResultCurrent）をそのまま満たす。結果を current と偽装して返すのではない。
+ */
+function restoredMergeRecipeOf(
+  state: State,
+  group: GroupInfo,
+): { presetName: PresetName; overrides: Partial<Adjustments> } | null {
+  const frames = mergeFramesOf(state, group);
+  for (const results of [state.mergeFullResults, state.mergePreviewResults]) {
+    const result = groupMergeResultOf(results, group);
+    if (!result) continue;
+    if (result.capture_ids.length !== frames.length || !frames.every((id) => result.capture_ids.includes(id))) {
+      continue;
+    }
+    const preset = presetFor(state.presets, result.preset);
+    if (!preset || !isCompleteRecipe(result.adjustments)) continue;
+    const overrides: Partial<Adjustments> = {};
+    for (const key of [...ADJUSTMENT_NUMERIC_KEYS, "noise_reduction" as const]) {
+      if (result.adjustments[key] !== preset.adjustments[key]) Object.assign(overrides, { [key]: result.adjustments[key] });
+    }
+    return { presetName: preset.name, overrides };
+  }
+  return null;
+}
+
+/**
+ * 比較エリアに出す面。**カーソルが merged のときだけ** 合成を見せる。
+ *
+ * 写真を見ているのに、その写真が未現像だからと合成へ黙って切り替えると、SELECTED PHOTO・EXIF・
+ * 写真の採用先は写真のまま、比較エリアだけ合成になる。写真が未現像なら比較エリアは空にし、
+ * 面の切り替え（タブ）は現像結果と合成結果が両方あるときだけ出す。
+ */
+export function comparisonSurfaceOf<M, D>(
+  viewing: ViewingItem,
+  mergedResult: M | undefined,
+  developResult: D | undefined,
+): { showMerged: boolean; result: M | D | undefined; canToggle: boolean } {
+  const showMerged = viewing.kind === "merged" && mergedResult !== undefined;
+  return {
+    showMerged,
+    result: showMerged ? mergedResult : developResult,
+    canToggle: developResult !== undefined && mergedResult !== undefined,
+  };
+}
+
+/** 採用済みの合成の表示ラベル（タイルと合成パネルで同じ短い表現にそろえる）。 */
+export function acceptedMergeLabel(view: AcceptedMergeView): string {
+  return `採用済み（以前の設定、${view.result ? `${view.result.frames}枚` : "成果物なし"}）`;
+}
+
+/**
+ * 合成タイルの採用ボタン（新規採用・取り消し）が操作する先頭フレーム。操作できないなら undefined。
+ *
+ * 宛先は **今の設定に合う本合成だけ**。合わなくなった本合成は、未採用なら新規採用させず、
+ * 採用済みでもこのボタンの宛先にしない（現在の画像と別物の採用を、同じボタンで外すと
+ * 何をトグルしているか分からなくなる）。採用済みの古い成果物の取り消しは
+ * acceptedMergeOf の leadCaptureId を使う専用の導線が持つ。
+ */
+export function mergedAcceptTargetOf(state: State, group: GroupInfo): CaptureId | undefined {
+  return currentMergeResultsOf(state, group).full?.capture_ids[0];
+}
+
+/** 採用済みの合成（採用時のスナップショット）と、今の合成設定との関係。 */
+export type AcceptedMergeView = {
+  /** accept/merged で取り消すときの先頭フレーム。 */
+  leadCaptureId: CaptureId;
+  /** 採用した成果物。再合成などで引けなくなっていれば undefined（取り消しだけできる）。 */
+  result: MergedResult | undefined;
+  /** 採用した成果物が、今の選択・プリセット・調整に合う本合成そのものか。 */
+  isCurrent: boolean;
+};
+
+/**
+ * そのグループで採用済みの合成。無ければ undefined。
+ *
+ * currentMergeResultsOf は **今の設定に合うものだけ** を返し、こちらは **採用時のスナップショット**
+ * を返す。両者を黙って入れ替えない: 採用が今の画像と別物のとき（isCurrent が false）は、
+ * ✓ を今表示している合成に付けず、「採用済み（以前の設定）」として別に見せる。
+ * 引き直しは mergedResultFor と同じ（グループの現在の本合成の先頭フレームが一致するか）。
+ * 再結合で同じグループに採用が複数同居するときは、成果物を引けるものを優先する。
+ */
+export function acceptedMergeOf(state: State, group: GroupInfo): AcceptedMergeView | undefined {
+  const items = state.accepted.filter(
+    (item): item is AcceptedMerged => item.kind === "merged" && item.groupId === group.id,
+  );
+  if (items.length === 0) return undefined;
+  const currentFull = currentMergeResultsOf(state, group).full;
+  const resolved = items
+    .map((item) => ({ item, result: mergedResultFor(state.mergeFullResults, group, item.leadCaptureId) }))
+    .find((entry) => entry.result !== undefined);
+  if (!resolved) return { leadCaptureId: items[0].leadCaptureId, result: undefined, isCurrent: false };
+  return {
+    leadCaptureId: resolved.item.leadCaptureId,
+    result: resolved.result,
+    isCurrent: resolved.result === currentFull,
+  };
 }
 
 /**
@@ -1166,6 +1385,27 @@ export function changedAdjustmentKeys(state: State): (keyof Adjustments)[] {
   return (Object.keys(state.overrides) as (keyof Adjustments)[]).filter(
     (key) => state.overrides[key] !== preset.adjustments[key],
   );
+}
+
+/**
+ * このグループから離れると、今の操作値が失われるか（移動確認の判定専用）。
+ *
+ * 戻るときの操作値は screen/operation が決める。保存済み合成の recipe を復元できる
+ * グループなら、離れた後に戻って得られる値は **復元される preset + overrides の全 9 値** で、
+ * 今の effectiveAdjustments と 1 つでも違えば失われる（復元した recipe を触っていなければ失われない。
+ * 手動で既定へ reset した場合は、戻ると保存 recipe に変わるので失われる）。比べるのは値だけで、
+ * プリセットの名前が違っても全 9 値が同じなら失われない。復元基準は restoredMergeRecipeOf と
+ * 同じ（本合成優先）なので、新しいプレビューがあっても本合成の recipe に戻る分は失われる扱い。
+ * 復元できるものが無いグループは、戻ると既定になるので従来の changedAdjustmentKeys で判定する。
+ * 表示・リセットに使う changedAdjustmentKeys の意味は変えない。
+ */
+export function adjustmentsLostOnLeave(state: State, group: GroupInfo): boolean {
+  const restored = restoredMergeRecipeOf(state, group);
+  const now = effectiveAdjustments(state);
+  const preset = restored ? presetFor(state.presets, restored.presetName) : null;
+  if (!restored || !preset || !now) return changedAdjustmentKeys(state).length > 0;
+  const back = resolveAdjustments(preset, restored.overrides);
+  return [...ADJUSTMENT_NUMERIC_KEYS, "noise_reduction" as const].some((key) => back[key] !== now[key]);
 }
 
 /**

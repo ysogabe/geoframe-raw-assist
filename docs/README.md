@@ -25,12 +25,14 @@
 | [design/coreimage-preset-retune.md](design/coreimage-preset-retune.md) | 11 プリセットを Core Image 向けに再調整し、`highlight_recovery` を露出とシャドウ持ち上げへ写像する設計（Issue #81） |
 | [design/single-app-implementation-plan.md](design/single-app-implementation-plan.md) | Python 無しの単一アプリへ段階的に移行する実装プラン（マイルストーン M0〜M4 と各 Issue の範囲） |
 | [design/evaluation-before-python-removal.md](design/evaluation-before-python-removal.md) | Python 本体を削除する前に評価経路を独立させる実施順と検収条件 |
+| [design/coreimage-candidate-native-roi-plan.md](design/coreimage-candidate-native-roi-plan.md) | #57 の次の実装計画。回帰用CI基準の再確保、最終候補の原寸ROI診断、素材追加後の較正と採否への接続 |
 
 ## 開発者向け
 
 | 文書 | 内容 |
 |---|---|
 | [development/evaluation-paths.md](development/evaluation-paths.md) | `scripts/` の評価スクリプトの使い方（モード、前提、削除後の扱い）と、OS 更新時の回帰確認の手順 |
+| [development/issue-audit-2026-10-24.md](development/issue-audit-2026-10-24.md) | 全Open Issueと移行後の残問題の棚卸し。完了・統合・再オープンの根拠と、解析/採用の正しさを先に直す作業順 |
 | [development/coreimage-regression-check.md](development/coreimage-regression-check.md) | macOS 更新で現像結果が変わっていないかを、ベースラインの実効パラメータと画質指標で確かめる手順 |
 | [development/coreimage-parameter-mapping.md](development/coreimage-parameter-mapping.md) | Adjustments の各キーと Core Image（CIRAWFilter・後段 CIFilter）の対応表。「対応」「近似」「対応なし」の区別と、実装時の決定 |
 
