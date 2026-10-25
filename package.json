@@ -20,7 +20,10 @@
     "tauri:build": "tauri build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "bench:browse:dev": "vite --config vite.browse-bench.config.ts",
+    "bench:browse:build": "vite build --config vite.browse-bench.config.ts",
+    "bench:browse:prod": "vite build --config vite.browse-bench.config.ts && vite preview --config vite.browse-bench.config.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
