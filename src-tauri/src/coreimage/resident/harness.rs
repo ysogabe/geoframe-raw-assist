@@ -55,7 +55,10 @@ fn run(cfg: &Config, binary: &'static str) -> Result<Value, CoreImageError> {
         cfg.roots[0].canonicalize().map_err(io_error)?,
         cfg.roots[1].canonicalize().map_err(io_error)?,
     ];
-    assert_ne!(roots[0], roots[1], "two distinct canonical source roots required");
+    assert_ne!(
+        roots[0], roots[1],
+        "two distinct canonical source roots required"
+    );
     // Resolve all inputs before writing scratch; never enumerate photos beyond explicit IDs.
     for root in &roots {
         for id in &cfg.captures {
