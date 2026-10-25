@@ -15,7 +15,7 @@ mod presets;
 mod source_folder;
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(analysis::AnalysisState::default())
         // 元 JPG の配信（Issue #110）: geoframe://localhost/source-jpg/DSC12345.JPG
         .register_asynchronous_uri_scheme_protocol("geoframe", analysis::source_jpg_protocol)
@@ -37,7 +37,24 @@ fn main() {
             export::reveal_export,
             photos_import::import_to_photos
         ])
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Ordinary build: unchanged `.run` semantics.
+    #[cfg(not(feature = "resident-preview-qa"))]
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    // QA-only (#141 B1 PR-B): `setup` refuses every identifier except the dedicated QA one, and
+    // the exit hook closes the idle resident CLI child (stdin EOF -> bounded grace -> kill/wait).
+    #[cfg(feature = "resident-preview-qa")]
+    builder
+        .setup(coreimage::resident::qa::setup)
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                coreimage::resident::qa::on_exit(app);
+            }
+        });
 }

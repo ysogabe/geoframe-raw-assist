@@ -1,5 +1,7 @@
 # #141 B1 stateless resident — PR-A
 
+> PR152完了時の記録。後続PR-BではQA専用featureに限りコンパイル対象を拡張する。[PR-B](coreimage-resident-pr-b.md)参照。通常製品ビルドはSingleのまま。
+
 PR-A は Rust executor seam、resident owner、mock 契約テスト、ignored 実 CLI 比較ハーネスまで。
 Tauri command / IPC / UI / Cargo feature / 既定経路は変更しない。実素材・GUI の最終 QA と git 操作は親担当。
 

@@ -10,6 +10,12 @@ rust-version = "1.77.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+# #141 B1 PR-B: QA 専用。preview だけ常駐 stateless CLI（resident）で実行し、tauri/devtools も有効にする。
+# 製品ビルドでは使わない。専用 QA ID（com.geoframe.rawassist.qaroadmap）以外の起動は setup で拒否する。
+resident-preview-qa = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

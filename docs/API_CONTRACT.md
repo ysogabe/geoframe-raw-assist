@@ -63,6 +63,20 @@
   `canonicalize` 後の親ディレクトリが現像元フォルダと一致しないもの（シンボリックリンクで外へ出るもの）は拒否する。
 - **Core Image CLI の同時実行**: `DEVELOP_SLOT` は CLI を 1 本ずつ走らせ、待ちは最大 2 件。
   さらに来た呼び出しは即 `BUSY`。プレビュー・原寸現像・合成・候補生成で共有する。キャッシュヒットはスロットを取らない。
+- **QA 専用 feature `resident-preview-qa`（通常ビルドには存在しない。#141 B1 PR-B）**: 専用 QA ID
+  `com.geoframe.rawassist.qaroadmap` でのみ有効で、他の ID で起動すると `setup` が拒否してアプリが立ち上がらない。
+  環境変数などの実行時切替はない。IPC の引数・結果の形は通常ビルドと同じ。上の契約との差分は次のとおり。
+  - プレビュー現像だけが常駐 stateless CLI（resident）で実行される。原寸・合成・候補生成・native ROI は従来の単発 CLI /
+    独自セッションのまま。
+  - 例外として「実行中 1 本 + 待機中の常駐 CLI 1 本」が同時に存在しうる。CPU/GPU で同時に現像するのは今までどおり 1 本で、
+    プロセス総数が 1 本という意味ではない。常駐 CLI は idle TTL・要求回数・アプリ終了で閉じる（QA 用の未調整ノブ）。
+  - resident のプレビューはキャッシュヒットでも CLI の同一性検査のために先にスロットを取る。他の現像が走行中なら待ち（上限超過は
+    `BUSY`）になる（通常ビルドのキャッシュヒットは待たない）。
+  - 来歴 JSON に `resident_qa: {schema, executor: "resident_batch", owner_pid}` が付く（resident が実行したときだけ。
+    キャッシュ鍵・request には入らない）。キーが無い来歴は単発製か旧来歴で、キャッシュヒットの応答は生成時の来歴をそのまま返す
+    ので、タグは「過去にその pid が実行した」事実であり現在の生存を意味しない。
+  - 追加 code: `SIDECAR_IDENTITY_CHANGED`（CLI が差し替えられた。アプリ再起動が必要で、同一プロセス内では回復しない）、
+    `RESIDENT_CLOSED`（終了処理後の要求）、`RESIDENT_QA_NOT_READY`（QA 初期化前）。
 
 ### 0.5 エラー code 一覧（`CoreImageError`）
 

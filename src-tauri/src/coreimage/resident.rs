@@ -1,8 +1,11 @@
-//! PR-A stateless owner, available only to Rust tests until PR-B's preview feature.
+//! Stateless resident owner (#141 B1). Compiled only for Rust tests and the QA-only
+//! `resident-preview-qa` feature; the ordinary product build never contains it.
 //! Lock order: caller's DevelopSlot -> state. No owner operation acquires a slot.
 use super::*;
 use std::os::unix::fs::MetadataExt;
 use std::sync::TryLockError;
+
+pub(crate) mod qa;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Identity {
@@ -69,6 +72,9 @@ pub(super) struct ResidentOwner<'slot> {
     identity: Identity,
     state: Mutex<State>,
     policy: Policy,
+    /// Set once by `shutdown` and never cleared: no request may start a child afterwards.
+    /// Checked under the state lock, so a request already holding the lock still completes.
+    closing: AtomicBool,
 }
 
 impl<'slot> ResidentOwner<'slot> {
@@ -92,6 +98,7 @@ impl<'slot> ResidentOwner<'slot> {
             identity,
             state: Mutex::new(State::default()),
             policy,
+            closing: AtomicBool::new(false),
         })
     }
 
@@ -146,6 +153,20 @@ impl<'slot> ResidentOwner<'slot> {
         timeout: Duration,
         slot: &SlotGuard<'_>,
     ) -> Result<Value, CoreImageError> {
+        self.request_observed(sidecar, request, timeout, slot)
+            .map(|(response, _)| response)
+    }
+
+    /// Same as `request`, plus the pid of the child that was sent the request. The pid is read
+    /// under the same state lock, after the session is ensured and before the send, so a
+    /// concurrent reaper/evict cannot make it point at another process.
+    pub(super) fn request_observed(
+        &self,
+        sidecar: &Path,
+        request: &Value,
+        timeout: Duration,
+        slot: &SlotGuard<'_>,
+    ) -> Result<(Value, Option<u32>), CoreImageError> {
         self.check_slot(slot)?;
         let Some(object) = request.as_object() else {
             return Err(CoreImageError::new(
@@ -165,6 +186,12 @@ impl<'slot> ResidentOwner<'slot> {
             ));
         }
         let mut state = self.lock(slot)?;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(CoreImageError::new(
+                "RESIDENT_CLOSED",
+                "resident owner is shutting down",
+            ));
+        }
         self.check_identity(sidecar, &mut state)?;
         if self.expired(&state, Instant::now()) {
             state.evict();
@@ -188,6 +215,7 @@ impl<'slot> ResidentOwner<'slot> {
         // BatchSession's timeout is per session. A caller may change its budget between requests.
         let session = state.session.as_mut().unwrap();
         session.set_timeout(timeout);
+        let pid = session.pid();
         let result = session.request(request);
         state.requests += 1;
         state.last_used = Some(Instant::now());
@@ -201,7 +229,7 @@ impl<'slot> ResidentOwner<'slot> {
         self.check_identity(sidecar, &mut state)?;
         result.map(|mut response| {
             response.as_object_mut().unwrap().remove("sequence");
-            response
+            (response, pid)
         })
     }
 
@@ -241,7 +269,16 @@ impl<'slot> ResidentOwner<'slot> {
         Ok(())
     }
 
+    /// Nonblocking, final close for application exit. Marks the owner closing first so that no
+    /// later request can start a child, then closes like `close`: a request holding the state
+    /// lock is never killed and yields BUSY (the caller may retry; the flag already stays set).
+    pub(super) fn shutdown(&self) -> Result<(), CoreImageError> {
+        self.closing.store(true, Ordering::Release);
+        self.close()
+    }
+
     /// Request-boundary observation only. This is not a peak-RSS measurement.
+    #[cfg(test)]
     pub(super) fn pid(&self, slot: &SlotGuard<'_>) -> Option<u32> {
         self.lock(slot)
             .ok()?
@@ -292,4 +329,6 @@ impl DevelopExecutor for ResidentOwner<'_> {
 #[cfg(test)]
 mod tests;
 
+// The harness depends on the test-only transport_bench module.
+#[cfg(test)]
 mod harness;
