@@ -30,6 +30,7 @@ import {
 } from "./lib/app-state";
 import {
   exportSelection,
+  generateDevelopmentCandidates,
   importToPhotos,
   getAnalysis,
   getPresets,
@@ -42,8 +43,7 @@ import {
 import { SOURCE_FOLDER_NO_PAIRS, sourceFolderErrorMessage } from "./lib/format";
 import { adjacentGroupId, isEditableTarget } from "./lib/group-nav";
 import { confirmDiscard } from "./lib/confirm";
-import { invoke } from "@tauri-apps/api/core";
-import type { Adjustments, DevelopmentCandidatesResponse, ExportItem } from "./lib/types";
+import type { Adjustments, DevelopmentCandidatesProgress, ExportItem } from "./lib/types";
 import { previewTiming } from "./lib/preview-timing";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
@@ -87,6 +87,8 @@ function sourceFolderFailureMessage(error: unknown): string {
 
 export default function Home() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [candidateProgress, setCandidateProgress] = useState<DevelopmentCandidatesProgress | null>(null);
+  const candidateRequest = useRef(0);
   const [tick, setTick] = useState(0);
   const comparisonRef = useRef<HTMLDivElement>(null);
 
@@ -495,7 +497,7 @@ export default function Home() {
     }
   }
 
-  async function runDevelopmentCandidates() {
+  async function runDevelopmentCandidates(nativeRoiDiagnostics: boolean) {
     if (!group || !captureId || state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
     if (state.engineStatus !== "ready") {
       dispatch({ type: "notice/set", message: ENGINE_STOPPED_MESSAGE, tone: "error" });
@@ -504,13 +506,19 @@ export default function Home() {
     const preset = activePreset(state);
     if (!preset) return;
     const generation = state.sourceFolderGeneration;
+    const requestId = ++candidateRequest.current;
+    setCandidateProgress(null);
     dispatch({ type: "candidates/start", captureId, generation });
     try {
-      const response = await invoke<DevelopmentCandidatesResponse>("generate_development_candidates", {
-        captureId, preset: preset.name,
+      const response = await generateDevelopmentCandidates({
+        capture_id: captureId, preset: preset.name, native_roi_diagnostics: nativeRoiDiagnostics,
+      }, (progress) => {
+        if (candidateRequest.current === requestId) setCandidateProgress(progress);
       });
+      if (candidateRequest.current !== requestId) return;
       dispatch({ type: "candidates/ok", captureId, response, generation });
     } catch (error) {
+      if (candidateRequest.current !== requestId) return;
       dispatch({ type: "candidates/fail", captureId, generation,
         message: messageOf(error, "現像候補の生成に失敗しました。") });
     }
@@ -714,7 +722,8 @@ export default function Home() {
               candidatesResponse={currentDevelopmentCandidatesResponse(state, captureId)}
               candidatesBusy={state.developmentCandidatesBusy}
               candidatesError={state.developmentCandidatesError}
-              onGenerateCandidates={() => void runDevelopmentCandidates()}
+              candidatesProgress={candidateProgress}
+              onGenerateCandidates={(nativeRoi) => void runDevelopmentCandidates(nativeRoi)}
               onApplyCandidate={(candidate) => dispatch({ type: "candidates/apply", candidate, captureId })}
               isBracket={isBracketGroup(group)}
               mergeFrames={mergeFrames}

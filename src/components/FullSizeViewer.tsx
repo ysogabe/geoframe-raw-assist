@@ -2,37 +2,24 @@ import {
   useCallback,
   useEffect,
   useId,
+  useReducer,
   useRef,
-  useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { ViewerGallery } from "../lib/app-state";
-
-type Face = "before" | "after";
-type Size = { width: number; height: number };
-/** ステージ座標系での画像の置き方。translate してから scale する（transform-origin は 0 0）。 */
-type ViewState = { scale: number; tx: number; ty: number };
-
-/** 拡大の上限。6000px 級の画像で 8 倍まで寄れれば粒状まで確認できる。 */
-const MAX_SCALE = 8;
-/** ホイールの deltaY にかける係数。exp を取るので、どの方向へも等比で動く。 */
-const WHEEL_ZOOM_SPEED = 0.0018;
-/** キーボード / ボタン 1 回あたりの倍率。 */
-const ZOOM_STEP = 1.25;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
-/** 画像全体がステージに収まる倍率で中央に置く。 */
-function centeredView(scale: number, base: Size, stage: Size): ViewState {
-  return {
-    scale,
-    tx: (stage.width - base.width * scale) / 2,
-    ty: (stage.height - base.height * scale) / 2,
-  };
-}
+import {
+  WHEEL_ZOOM_SPEED,
+  ZOOM_STEP,
+  clamp,
+  createViewerState,
+  faceOf,
+  shownFace,
+  viewerReducer,
+  viewerStatus,
+  type Face,
+  type Size,
+} from "../lib/viewer-state";
 
 /**
  * 寸法だけを測る。
@@ -63,11 +50,6 @@ async function decodeImage(url: string): Promise<Size> {
   return { width: image.naturalWidth, height: image.naturalHeight };
 }
 
-/** その 2 面で最初に見せる面。現像していなければ現像後は選べない。 */
-function faceOf(item: { afterUrl?: string; initial: "before" | "after" }): Face {
-  return item.afterUrl && item.initial === "after" ? "after" : "before";
-}
-
 type FullSizeViewerProps = {
   gallery: ViewerGallery;
   onClose: () => void;
@@ -93,7 +75,10 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
-  const [index, setIndex] = useState(gallery.index);
+  const [state, dispatch] = useReducer(viewerReducer, undefined, () =>
+    createViewerState(gallery.index, faceOf(gallery.items[gallery.index])),
+  );
+  const { index, face, peek, mounted, base, view, fit: fitScale, generation } = state;
   const current = gallery.items[index];
   const lastIndex = gallery.items.length - 1;
   const canStep = gallery.items.length > 1;
@@ -102,28 +87,8 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   // 現像していなければ切替コントロール自体を出さないので、初期面も before に倒す。
   const initialFace: Face = faceOf(current);
 
-  const [face, setFace] = useState<Face>(initialFace);
-  const [peek, setPeek] = useState(false);
-  // 片面しか見ない使い方でメモリを払わないよう、2 枚目は必要になってから DOM に載せる。
-  const [mounted, setMounted] = useState({
-    before: initialFace === "before",
-    after: initialFace === "after",
-  });
-  const [ready, setReady] = useState({ before: false, after: false });
-  // 基準グリッドは常に現像前（カメラJPG）の実解像度。scale = 1 がそのまま原寸になり、
-  // 倍率表示が嘘をつかない。プレビュー品質の現像後は引き伸ばされてぼやけるが、それが正直。
-  const [base, setBase] = useState<Size | null>(null);
-  const [failure, setFailure] = useState("");
-  const [view, setView] = useState<ViewState>({ scale: 1, tx: 0, ty: 0 });
-  const [fitScale, setFitScale] = useState(1);
-  const [dragging, setDragging] = useState(false);
-
-  // ホイール用のリスナーは一度だけ張るため、そこから読む値は ref に置く（古い値を掴まないように）。
-  const fitRef = useRef(1);
-  const dragRef = useRef<{ id: number; x: number; y: number; tx: number; ty: number } | null>(null);
-
-  const shown: Face = peek ? "before" : face;
-  const busy = !failure && (!base || !ready[shown]);
+  const shown: Face = shownFace(state);
+  const status = viewerStatus(state);
   const devicePixels = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
 
   // ---- ダイアログの開閉 ----------------------------------------------------
@@ -167,27 +132,19 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
    * 送り先へ移り、写真に紐づく state を **同じイベントハンドラの中で** すべて初期化する。
    *
    * useEffect([index]) でリセットすると「添字だけ進んだ 1 フレーム」がペイントされ、
-   * 新しい写真に前の写真の面・倍率・パン位置が乗った中間状態が見える。React は
-   * ハンドラ内の setState を 1 コミットにまとめるので、ここで全部倒しておく。
+   * 新しい写真に前の写真の面・倍率・パン位置が乗った中間状態が見える。1 回の dispatch
+   * （reducer の photo/go）で面・読み込み状態・ドラッグ・倍率をまとめて倒す。
    *
    * base を null に落とすとキャンバスごと外れ、読み込みスピナーに戻る。新しい寸法が
-   * 入った時点で全体表示の計算（recompute(true)）が走るため、送るたびにズームは
+   * 入った時点で全体表示の計算（stage/fit）が走るため、送るたびにズームは
    * 全体表示へ戻る（同一写真内の面切替では base を触らないので位置は保たれる）。
    */
   function goTo(nextIndex: number) {
     const clamped = clamp(nextIndex, 0, lastIndex);
     if (clamped === index) return;
-    const nextFace = faceOf(gallery.items[clamped]);
-    setIndex(clamped);
-    setFace(nextFace);
-    setPeek(false);
-    setMounted({ before: nextFace === "before", after: nextFace === "after" });
-    setReady({ before: false, after: false });
-    setBase(null);
-    setFailure("");
-    // 全体表示の再計算は base が入ってからの effect（＝ペイント後）なので、ここで倒して
-    // おかないと前の写真の倍率とパン位置で 1 フレーム描かれてしまう。
-    setView({ scale: 1, tx: 0, ty: 0 });
+    // ポインタは stage に捕捉されたままになる。掴んだまま送った場合に備えて手放しておく。
+    releaseDragCapture();
+    dispatch({ type: "photo/go", index: clamped, face: faceOf(gallery.items[clamped]) });
   }
 
   function step(delta: 1 | -1) {
@@ -198,29 +155,57 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
 
   // ---- 画像の読み込み ------------------------------------------------------
   useEffect(() => {
+    // 写真送りで effect が張り替わったら cancelled で打ち切る。取りこぼした応答も
+    // generation が合わなければ reducer が捨てる。
     let cancelled = false;
-    const faceUrl = initialFace === "after" && current.afterUrl ? current.afterUrl : current.beforeUrl;
+    const showAfterFirst = initialFace === "after" && Boolean(current.afterUrl);
 
     void (async () => {
-      try {
-        const decoded = await decodeImage(faceUrl);
-        // 現像後を先に見せる場合でも、基準グリッドは現像前の実解像度に固定する。
-        // 見ない面のデコードは払いたくないので、そのときは寸法だけを測る。
-        const measured = faceUrl === current.beforeUrl ? decoded : await measureImage(current.beforeUrl);
-        if (cancelled) return;
-        if (!measured.width || !measured.height) throw new Error("画像の寸法を取得できませんでした。");
-        setBase(measured);
-      } catch (error) {
-        if (!cancelled) {
-          setFailure(error instanceof Error ? error.message : "画像を読み込めませんでした。");
+      // 最初に見せる面を先にデコードする。現像後が壊れていても、現像前が読めるなら
+      // 基準グリッドは作れるので、その面を落として現像前から始める。
+      if (showAfterFirst && current.afterUrl) {
+        try {
+          await decodeImage(current.afterUrl);
+        } catch {
+          if (cancelled) return;
+          dispatch({
+            type: "initial/failed",
+            generation,
+            face: "after",
+            message: `${current.afterLabel}の画像を読み込めませんでした。`,
+          });
         }
+        if (cancelled) return;
+      }
+
+      // 基準グリッドは常に現像前の実解像度に固定する。現像前を最初に見せるときは
+      // デコードまで待ち、そうでなければ寸法だけを測る（見ない面のデコードは払わない）。
+      try {
+        const measured = showAfterFirst ? await measureImage(current.beforeUrl) : await decodeImage(current.beforeUrl);
+        if (cancelled) return;
+        if (!measured.width || !measured.height) {
+          dispatch({
+            type: "base/failed",
+            generation,
+            message: `${current.beforeLabel}の画像の寸法を取得できませんでした。`,
+          });
+          return;
+        }
+        dispatch({ type: "base/loaded", generation, size: measured });
+      } catch {
+        if (cancelled) return;
+        dispatch({
+          type: "base/failed",
+          generation,
+          message: `${current.beforeLabel}の画像を読み込めませんでした。原寸の基準にする寸法が取れないため表示できません。`,
+        });
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [initialFace, current]);
+  }, [initialFace, current, generation]);
 
   // ---- 全体表示の倍率（ステージ寸法が変わるたびに測り直す） ------------------
   useEffect(() => {
@@ -230,15 +215,7 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
     const recompute = (initial: boolean) => {
       const rect = stage.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
-      const fit = Math.min(rect.width / base.width, rect.height / base.height);
-      fitRef.current = fit;
-      setFitScale(fit);
-      setView((prev) => {
-        // 拡大して見ている最中のリサイズでは倍率と位置を保つ。全体表示より縮んでいる
-        // （＝リサイズで下限を割った）ときだけ、全体表示へ戻して中央に置き直す。
-        if (!initial && prev.scale > fit) return prev;
-        return centeredView(fit, base, { width: rect.width, height: rect.height });
-      });
+      dispatch({ type: "stage/fit", stage: { width: rect.width, height: rect.height }, initial });
     };
 
     recompute(true);
@@ -248,21 +225,6 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   }, [base]);
 
   // ---- 拡大縮小 ------------------------------------------------------------
-  /** point（ステージ座標）の下にある画像上の点を動かさずに倍率を変える。 */
-  const zoomAt = useCallback((point: { x: number; y: number }, factor: number) => {
-    setView((prev) => {
-      const scale = clamp(prev.scale * factor, fitRef.current, MAX_SCALE);
-      if (scale === prev.scale) return prev;
-      // t2 = p - (p - t) * (s2 / s) を x/y 独立に解く。
-      const ratio = scale / prev.scale;
-      return {
-        scale,
-        tx: point.x - (point.x - prev.tx) * ratio,
-        ty: point.y - (point.y - prev.ty) * ratio,
-      };
-    });
-  }, []);
-
   const stageCenter = useCallback(() => {
     const rect = stageRef.current?.getBoundingClientRect();
     return rect ? { x: rect.width / 2, y: rect.height / 2 } : null;
@@ -271,36 +233,24 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   const zoomFromCenter = useCallback(
     (factor: number) => {
       const point = stageCenter();
-      if (point) zoomAt(point, factor);
+      if (point) dispatch({ type: "zoom/at", point, factor });
     },
-    [stageCenter, zoomAt],
+    [stageCenter],
   );
 
   /** 倍率を絶対値で指定する（原寸 / 200%）。固定点はステージ中心。 */
   const zoomTo = useCallback(
     (target: number) => {
       const point = stageCenter();
-      if (!point) return;
-      setView((prev) => {
-        const scale = clamp(target, fitRef.current, MAX_SCALE);
-        if (scale === prev.scale) return prev;
-        const ratio = scale / prev.scale;
-        return {
-          scale,
-          tx: point.x - (point.x - prev.tx) * ratio,
-          ty: point.y - (point.y - prev.ty) * ratio,
-        };
-      });
+      if (point) dispatch({ type: "zoom/to", point, target });
     },
     [stageCenter],
   );
 
   const resetToFit = useCallback(() => {
-    const stage = stageRef.current;
-    if (!stage || !base) return;
-    const rect = stage.getBoundingClientRect();
-    setView(centeredView(fitRef.current, base, { width: rect.width, height: rect.height }));
-  }, [base]);
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (rect) dispatch({ type: "view/fit", stage: { width: rect.width, height: rect.height } });
+  }, []);
 
   // React の onWheel はルート側に passive で張られるため preventDefault が効かない
   // （＝背景のページごとスクロールしてしまう）。ホイールだけは自前で non-passive に張る。
@@ -313,38 +263,41 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
       const rect = stage.getBoundingClientRect();
       // deltaMode が行単位のブラウザでは deltaY が 1 桁小さいので揃えておく。
       const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-      zoomAt({ x: event.clientX - rect.left, y: event.clientY - rect.top }, Math.exp(-delta * WHEEL_ZOOM_SPEED));
+      dispatch({
+        type: "zoom/at",
+        point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+        factor: Math.exp(-delta * WHEEL_ZOOM_SPEED),
+      });
     };
 
     stage.addEventListener("wheel", handleWheel, { passive: false });
     return () => stage.removeEventListener("wheel", handleWheel);
-  }, [zoomAt]);
+  }, []);
 
   // ---- ドラッグ移動（setPointerCapture でステージ外へ出ても追従させる） -------
+  function releaseDragCapture() {
+    const stage = stageRef.current;
+    const dragId = state.drag?.id;
+    if (stage && dragId !== undefined && stage.hasPointerCapture(dragId)) stage.releasePointerCapture(dragId);
+  }
+
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     const stage = stageRef.current;
     if (!stage || !base) return;
     stage.setPointerCapture(event.pointerId);
-    dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, tx: view.tx, ty: view.ty };
-    setDragging(true);
+    dispatch({ type: "drag/start", id: event.pointerId, x: event.clientX, y: event.clientY });
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.id !== event.pointerId) return;
-    setView((prev) => ({
-      ...prev,
-      tx: drag.tx + (event.clientX - drag.x),
-      ty: drag.ty + (event.clientY - drag.y),
-    }));
+    // ドラッグしていないマウス移動で再描画を起こさない。
+    if (state.drag?.id !== event.pointerId) return;
+    dispatch({ type: "drag/move", id: event.pointerId, x: event.clientX, y: event.clientY });
   }
 
   function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.id !== event.pointerId) return;
-    dragRef.current = null;
-    setDragging(false);
+    if (state.drag?.id !== event.pointerId) return;
+    dispatch({ type: "drag/end", id: event.pointerId });
     const stage = stageRef.current;
     if (stage?.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
   }
@@ -354,22 +307,18 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   const warm = useCallback(
     (target: Face) => {
       if (target === "after" && !hasAfter) return;
-      setMounted((prev) => (prev[target] ? prev : { ...prev, [target]: true }));
+      dispatch({ type: "face/warm", face: target });
     },
     [hasAfter],
   );
 
   function selectFace(next: Face) {
     if (next === "after" && !hasAfter) return;
-    warm(next);
-    setPeek(false);
-    setFace(next);
+    dispatch({ type: "face/select", face: next });
   }
 
   function startPeek() {
-    if (face === "before") return;
-    warm("before");
-    setPeek(true);
+    dispatch({ type: "peek/start" });
   }
 
   function handlePeekKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -382,7 +331,7 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
   function handlePeekKeyUp(event: ReactKeyboardEvent<HTMLButtonElement>) {
     if (event.key !== " " && event.key !== "Enter") return;
     event.preventDefault();
-    setPeek(false);
+    dispatch({ type: "peek/end" });
   }
 
   // ---- キーボード ----------------------------------------------------------
@@ -434,8 +383,9 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
     }
   }
 
-  const markReady = (target: Face) =>
-    setReady((prev) => (prev[target] ? prev : { ...prev, [target]: true }));
+  const markReady = (target: Face) => dispatch({ type: "face/loaded", generation, face: target });
+  const markFailed = (target: Face, label: string) =>
+    dispatch({ type: "face/failed", generation, face: target, message: `${label}の画像を読み込めませんでした。` });
 
   /**
    * ブラウザキャッシュから即座に埋まった画像は、React が onLoad を張るより先に
@@ -534,12 +484,12 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
                 onPointerEnter={() => warm("before")}
                 onFocus={() => warm("before")}
                 onPointerDown={startPeek}
-                onPointerUp={() => setPeek(false)}
-                onPointerLeave={() => setPeek(false)}
-                onPointerCancel={() => setPeek(false)}
+                onPointerUp={() => dispatch({ type: "peek/end" })}
+                onPointerLeave={() => dispatch({ type: "peek/end" })}
+                onPointerCancel={() => dispatch({ type: "peek/end" })}
                 onKeyDown={handlePeekKeyDown}
                 onKeyUp={handlePeekKeyUp}
-                onBlur={() => setPeek(false)}
+                onBlur={() => dispatch({ type: "peek/end" })}
               >
                 長押しで見比べ
               </button>
@@ -572,7 +522,7 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
 
         <div
           ref={stageRef}
-          className={`viewer-stage${dragging ? " dragging" : ""}`}
+          className={`viewer-stage${state.drag ? " dragging" : ""}`}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -597,7 +547,7 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
                   decoding="async"
                   ref={readyRefFor("before")}
                   onLoad={() => markReady("before")}
-                  onError={() => setFailure(`${current.beforeLabel}の画像を読み込めませんでした。`)}
+                  onError={() => markFailed("before", current.beforeLabel)}
                 />
               )}
               {mounted.after && current.afterUrl && (
@@ -610,22 +560,22 @@ export function FullSizeViewer({ gallery, onClose }: FullSizeViewerProps) {
                   decoding="async"
                   ref={readyRefFor("after")}
                   onLoad={() => markReady("after")}
-                  onError={() => setFailure(`${current.afterLabel}の画像を読み込めませんでした。`)}
+                  onError={() => markFailed("after", current.afterLabel)}
                 />
               )}
             </div>
           )}
 
-          {busy && (
+          {status.kind === "loading" && (
             <div className="viewer-spinner">
               <span className="gate-mark running" aria-hidden="true" />
               <p>原寸を読み込んでいます…</p>
             </div>
           )}
 
-          {failure && (
+          {status.kind === "error" && (
             <p className="viewer-error" role="alert">
-              {failure}
+              {status.message}
             </p>
           )}
         </div>

@@ -23,6 +23,7 @@ import type {
   DevelopedResult,
   DevelopmentCandidate,
   DevelopmentCandidatesResponse,
+  DevelopmentCandidatesProgress,
   MergedResult,
   GroupInfo,
   PhotoInfo,
@@ -61,7 +62,8 @@ type OperationPanelProps = {
   candidatesResponse: DevelopmentCandidatesResponse | null;
   candidatesBusy: boolean;
   candidatesError: string;
-  onGenerateCandidates: () => void;
+  candidatesProgress?: DevelopmentCandidatesProgress | null;
+  onGenerateCandidates: (nativeRoiDiagnostics: boolean) => void;
   onApplyCandidate: (candidate: DevelopmentCandidate) => void;
   isBracket: boolean;
   mergeFrames: CaptureId[];
@@ -130,6 +132,7 @@ export function OperationPanel({
   candidatesResponse,
   candidatesBusy,
   candidatesError,
+  candidatesProgress,
   onGenerateCandidates,
   onApplyCandidate,
   isBracket,
@@ -420,6 +423,7 @@ export function OperationPanel({
             candidatesResponse={candidatesResponse}
             candidatesBusy={candidatesBusy}
             candidatesError={candidatesError}
+            candidatesProgress={candidatesProgress}
             onGenerateCandidates={onGenerateCandidates}
             onApplyCandidate={onApplyCandidate}
             onDevelop={onDevelop}
