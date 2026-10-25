@@ -33,6 +33,10 @@ use tauri::{AppHandle, Manager};
 
 use crate::adjustments::normalize_adjustments;
 
+// #141: 手動プレビューの輸送方式比較ベンチ（test 専用）。
+#[cfg(test)]
+mod transport_bench;
+
 /// externalBin の名前（tauri-build が実行ファイルの隣へ triple 無しの名前でコピーする）。
 const SIDECAR_NAME: &str = "geoframe-ci-develop";
 

@@ -1,14 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // node 環境には window.__TAURI_INTERNALS__ が無いので、Tauri API は差し替える。
 vi.mock("@tauri-apps/api/core", () => ({
-  convertFileSrc: (path: string) => `asset://localhost/${path}`,
+  convertFileSrc: vi.fn((path: string) => `asset://localhost/${path}`),
   invoke: vi.fn(() => Promise.reject(new Error("invoke はブラウザモードで呼ばれてはならない"))),
   isTauri: () => false,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { previewTiming } from "./preview-timing";
 import {
   coreImageErrorMessage,
   engineInfoLabel,
@@ -210,5 +211,61 @@ describe("getEngineInfo", () => {
 
   it("表示ラベルは Core Image <cli> / macOS <ver>", () => {
     expect(engineInfoLabel({ cli_version: "0.6.0", macos_version: "15.1" })).toBe("Core Image 0.6.0 / macOS 15.1");
+  });
+});
+
+describe("developPreviewCoreImage の任意計測は製品の結果を変えない（best effort）", () => {
+  const boom = () => {
+    throw new Error("timing exploded");
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("begin が throw しても、成功した invoke の結果をそのまま返す", async () => {
+    vi.spyOn(previewTiming, "begin").mockImplementation(boom);
+    const result = ciResult();
+    vi.mocked(invoke).mockResolvedValueOnce(result);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).resolves.toBe(result);
+  });
+
+  it("timer.invokeReturned が throw しても、成功した invoke の結果を返す", async () => {
+    vi.spyOn(previewTiming, "begin").mockReturnValue({ invokeReturned: boom, invokeFailed: boom });
+    const result = ciResult();
+    vi.mocked(invoke).mockResolvedValueOnce(result);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).resolves.toBe(result);
+  });
+
+  it("convertFileSrc が throw しても、成功した invoke の結果を返す", async () => {
+    const invokeReturned = vi.fn();
+    vi.spyOn(previewTiming, "begin").mockReturnValue({ invokeReturned, invokeFailed: vi.fn() });
+    vi.mocked(convertFileSrc).mockImplementationOnce(boom);
+    const result = ciResult();
+    vi.mocked(invoke).mockResolvedValueOnce(result);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).resolves.toBe(result);
+    expect(invokeReturned).not.toHaveBeenCalled();
+  });
+
+  it("invoke が失敗し、計測の記録（invokeFailed）も throw しても、元のエラーを返す", async () => {
+    vi.spyOn(previewTiming, "begin").mockReturnValue({ invokeReturned: boom, invokeFailed: boom });
+    const error = { code: "BUSY", message: "busy" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).rejects.toBe(error);
+  });
+
+  it("invoke が失敗し、begin も throw しても、元のエラーを返す", async () => {
+    vi.spyOn(previewTiming, "begin").mockImplementation(boom);
+    const error = { code: "SIDECAR_TIMEOUT", message: "timeout" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).rejects.toBe(error);
+  });
+
+  it("計測が有効でも、失敗は invokeFailed にコードだけ渡して元のエラーを返す", async () => {
+    const invokeFailed = vi.fn();
+    vi.spyOn(previewTiming, "begin").mockReturnValue({ invokeReturned: vi.fn(), invokeFailed });
+    const error = { code: "BUSY", message: "busy" };
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    await expect(developPreviewCoreImage("DSC04430", ADJ)).rejects.toBe(error);
+    expect(invokeFailed).toHaveBeenCalledWith("BUSY");
   });
 });

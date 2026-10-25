@@ -44,6 +44,7 @@ import { SOURCE_FOLDER_NO_PAIRS, sourceFolderErrorMessage } from "./lib/format";
 import { adjacentGroupId, isEditableTarget } from "./lib/group-nav";
 import { confirmDiscard } from "./lib/confirm";
 import type { Adjustments, DevelopmentCandidatesProgress, ExportItem } from "./lib/types";
+import { previewTiming } from "./lib/preview-timing";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { SummaryStrip } from "./components/SummaryStrip";
@@ -462,6 +463,8 @@ export default function Home() {
   }
 
   async function runDevelop(mode: DevelopMode) {
+    // 任意計測（既定 OFF）の起点：ボタンのハンドラ入口。ガードで抜けても副作用はない。
+    const handlerEntryMs = previewTiming.now();
     if (!group || !captureId || state.developmentCandidatesBusy || state.developMode || state.mergeMode) return;
     if (state.engineStatus !== "ready") {
       dispatch({ type: "notice/set", message: ENGINE_STOPPED_MESSAGE, tone: "error" });
@@ -485,7 +488,7 @@ export default function Home() {
     try {
       const adjustments = resolveAdjustments(preset, state.overrides);
       const result = mode === "preview"
-        ? toDevelopedResult(await developPreviewCoreImage(captureId, adjustments), preset)
+        ? toDevelopedResult(await developPreviewCoreImage(captureId, adjustments, { handlerEntryMs }), preset)
         : await developFullCoreImage(captureId, adjustments, preset);
       dispatch({ type: "develop/ok", mode, result, generation });
       scrollToComparison();
