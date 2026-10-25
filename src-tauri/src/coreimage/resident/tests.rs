@@ -41,7 +41,11 @@ def run(req, n):
     with open(root / 'calls', 'a') as f: f.write(json.dumps(dict(pid=os.getpid(), request=req)) + '\n')
     action = req.get('test_action', 'ok')
     if action == 'hang': time.sleep(30)
-    if action == 'slow': time.sleep(0.3)
+    if action == 'block':
+        deadline = time.monotonic() + 15
+        while not (root / 'release').exists():
+            if time.monotonic() >= deadline: raise RuntimeError('release barrier timed out')
+            time.sleep(0.005)
     if action == 'die': sys.exit(3)
     if action == 'garbage':
         print('garbage', flush=True)
@@ -109,12 +113,17 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 fn run(
-    owner: &ResidentOwner,
+    owner: &ResidentOwner<'_>,
     cli: &Path,
     req: &Value,
     slot: &DevelopSlot,
 ) -> Result<Value, CoreImageError> {
-    owner.request(cli, req, Duration::from_secs(5), &slot.acquire()?)
+    let timeout = if req["test_action"] == "block" {
+        Duration::from_secs(20) // Longer than the fixture barrier deadline, only for explicit holds.
+    } else {
+        Duration::from_secs(5)
+    };
+    owner.request(cli, req, timeout, &slot.acquire()?)
 }
 
 #[test]
@@ -122,7 +131,7 @@ fn reuse_stateless_requests_and_reject_ops_before_send() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     let req = request(dir.path(), "ok");
     for _ in 0..3 {
         let response = run(&owner, &cli, &req, &slot).unwrap();
@@ -156,7 +165,7 @@ fn timeout_is_one_attempt_reaps_old_pid_and_next_request_recovers() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let old = owner.pid(&slot.acquire().unwrap()).unwrap();
     let error = owner
@@ -182,7 +191,7 @@ fn uncertain_send_error_is_not_retried_without_sent_increment() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "close_stdin"), &slot).unwrap();
     let old = owner.pid(&slot.acquire().unwrap()).unwrap();
     // Child closed its pipe before replying, but remains alive. This exercises real EPIPE
@@ -201,7 +210,7 @@ fn idle_death_and_inflight_failures_recover_only_on_next_call() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let old = owner.pid(&slot.acquire().unwrap()).unwrap();
     kill(old);
@@ -237,7 +246,7 @@ fn structured_cli_error_preserves_code_message_and_session() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     let error = run(&owner, &cli, &request(dir.path(), "fail"), &slot).unwrap_err();
     assert_eq!(
         error,
@@ -269,6 +278,7 @@ fn ttl_and_count_are_idle_recycle_knobs() {
             idle_ttl: Some(Duration::from_secs(10)),
             max_requests: Some(2),
         },
+        &slot,
     )
     .unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
@@ -299,10 +309,11 @@ fn guarded_execution_busy_bound_and_reap_never_interrupts_active_work() {
                 idle_ttl: Some(Duration::ZERO),
                 max_requests: None,
             },
+            &slot,
         )
         .unwrap(),
     );
-    let req = request(dir.path(), "slow");
+    let req = request(dir.path(), "block");
     thread::scope(|scope| {
         let start = scope.spawn(|| run(&owner, &cli, &req, &slot));
         wait_until(|| lines(dir.path(), "calls").len() == 1);
@@ -317,6 +328,7 @@ fn guarded_execution_busy_bound_and_reap_never_interrupts_active_work() {
             1,
             "waiting slot cannot send"
         );
+        fs::write(dir.path().join("release"), b"go").unwrap();
         start.join().unwrap().unwrap();
         second.join().unwrap().unwrap();
         third.join().unwrap().unwrap();
@@ -327,11 +339,63 @@ fn guarded_execution_busy_bound_and_reap_never_interrupts_active_work() {
 }
 
 #[test]
+fn wrong_slot_rejects_before_owner_wait_without_send_and_correct_slot_recovers() {
+    let dir = Dir::new();
+    let cli = mock(dir.path());
+    let slot = DevelopSlot::new(0);
+    let wrong_slot = DevelopSlot::new(0);
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
+    let req = request(dir.path(), "block");
+    thread::scope(|scope| {
+        let active = scope.spawn(|| run(&owner, &cli, &req, &slot));
+        wait_until(|| lines(dir.path(), "calls").len() == 1);
+        let (send, receive) = std::sync::mpsc::channel();
+        let owner = &owner;
+        let cli = &cli;
+        let req = &req;
+        let wrong_slot = &wrong_slot;
+        let wrong = scope.spawn(move || {
+            let guard = wrong_slot.acquire().unwrap();
+            let request_error = owner
+                .request(&cli, &req, Duration::from_secs(5), &guard)
+                .unwrap_err()
+                .code;
+            let identity_error = owner.validate_identity(&cli, &guard).unwrap_err().code;
+            assert_eq!(owner.pid(&guard), None);
+            owner.invalidate(&guard); // Wrong origin must not lock or evict the active session.
+            send.send((request_error, identity_error)).unwrap();
+        });
+        let outcome = receive.recv_timeout(Duration::from_secs(1));
+        let calls_while_blocked = lines(dir.path(), "calls").len();
+        let pending_while_blocked = slot.pending();
+        // Always release before asserting: a regression must fail without leaving a deadlock.
+        fs::write(dir.path().join("release"), b"go").unwrap();
+        active.join().unwrap().unwrap();
+        wrong.join().unwrap();
+        let (request_error, identity_error) = outcome.expect("wrong slot waited for owner mutex");
+        assert_eq!(request_error, "INVALID_SLOT");
+        assert_eq!(identity_error, "INVALID_SLOT");
+        assert_eq!(calls_while_blocked, 1, "wrong slot must send zero requests");
+        assert_eq!(
+            pending_while_blocked, 1,
+            "wrong slot must not join the bound slot queue"
+        );
+    });
+    let pid = owner.pid(&slot.acquire().unwrap()).unwrap();
+    run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
+    assert_eq!(owner.pid(&slot.acquire().unwrap()), Some(pid));
+    assert_eq!(lines(dir.path(), "calls").len(), 2);
+    assert_eq!(lines(dir.path(), "starts").len(), 1);
+    assert_eq!(slot.pending(), 0);
+    assert_eq!(wrong_slot.pending(), 0);
+}
+
+#[test]
 fn stamp_change_is_sticky_even_after_close_and_new_owner_cannot_use_old_hash() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let old = owner.pid(&slot.acquire().unwrap()).unwrap();
     let original = fs::read(&cli).unwrap();
@@ -351,7 +415,7 @@ fn stamp_change_is_sticky_even_after_close_and_new_owner_cannot_use_old_hash() {
     assert_eq!(lines(dir.path(), "calls").len(), 1);
     owner.close().unwrap();
     assert!(
-        matches!(ResidentOwner::new(&cli, Policy::default()), Err(e) if e.code == "SIDECAR_IDENTITY_CHANGED")
+        matches!(ResidentOwner::new(&cli, Policy::default(), &slot), Err(e) if e.code == "SIDECAR_IDENTITY_CHANGED")
     );
     fs::write(&cli, original).unwrap();
     assert_eq!(
@@ -367,7 +431,7 @@ fn poison_recovery_discards_old_session() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let old = owner.pid(&slot.acquire().unwrap()).unwrap();
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -386,7 +450,7 @@ fn drop_and_close_deliver_eof_and_reap_even_when_eof_is_ignored() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let pid = owner.pid(&slot.acquire().unwrap()).unwrap();
     let started = Instant::now();
@@ -400,7 +464,7 @@ fn drop_and_close_deliver_eof_and_reap_even_when_eof_is_ignored() {
     let stubborn = dir.path().join("ignore-eof");
     fs::write(&stubborn, "#!/bin/sh\nexec sleep 30\n").unwrap();
     fs::set_permissions(&stubborn, fs::Permissions::from_mode(0o755)).unwrap();
-    let owner = ResidentOwner::new(&stubborn, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&stubborn, Policy::default(), &slot).unwrap();
     owner.state.lock().unwrap().session =
         Some(batch::BatchSession::start(&stubborn, Duration::from_secs(1)).unwrap());
     let pid = owner.pid(&slot.acquire().unwrap()).unwrap();
@@ -415,7 +479,7 @@ fn shared_develop_parity_cache_and_folder_switch() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     let app = dir.path().join("app");
     fs::create_dir(&app).unwrap();
     let adj = transport_bench::base_adjustments();
@@ -432,6 +496,10 @@ fn shared_develop_parity_cache_and_folder_switch() {
         )
         .unwrap();
         for id in ["DSC04430", "DSC04880", "DSC04430"] {
+            let preview = app.join("coreimage/preview");
+            if preview.exists() {
+                fs::remove_dir_all(preview).unwrap();
+            }
             let single = develop(
                 &app,
                 &cli,
@@ -442,10 +510,12 @@ fn shared_develop_parity_cache_and_folder_switch() {
                 Duration::from_secs(5),
             )
             .unwrap();
+            assert!(!single.cache_hit);
             let single_prov: Value =
                 serde_json::from_str(&fs::read_to_string(&single.provenance_path).unwrap())
                     .unwrap();
             let bytes = fs::read(&single.output_path).unwrap();
+            assert!(bytes.starts_with(format!("{folder}-{id}").as_bytes()));
             fs::remove_file(&single.output_path).unwrap();
             fs::remove_file(&single.provenance_path).unwrap();
             let resident = develop_with_executor(
@@ -466,7 +536,9 @@ fn shared_develop_parity_cache_and_folder_switch() {
                 single_prov, prov,
                 "same key set and values before provenance"
             );
-            assert_eq!(bytes, fs::read(&resident.output_path).unwrap());
+            let resident_bytes = fs::read(&resident.output_path).unwrap();
+            assert!(resident_bytes.starts_with(format!("{folder}-{id}").as_bytes()));
+            assert_eq!(bytes, resident_bytes);
             assert_eq!(single.params_hash, resident.params_hash);
             assert!(!resident.cache_hit);
             assert!(prov.get("sequence").is_none());
@@ -513,7 +585,7 @@ fn common_output_validation_evicts_resident_without_replay() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(2);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     let input = dir.path().join("DSC00001.ARW");
     fs::write(&input, b"raw").unwrap();
     // Inject the fixture action in adjustments (top-level requests remain shared).
@@ -522,7 +594,7 @@ fn common_output_validation_evicts_resident_without_replay() {
     assert_eq!(response["width"], 0);
     // Exercise the seam's common path separately using a fake executor that delegates and
     // corrupts output dimensions, just as a semantically malformed CLI response would.
-    struct Bad<'a>(&'a ResidentOwner);
+    struct Bad<'a>(&'a ResidentOwner<'a>);
     impl DevelopExecutor for Bad<'_> {
         fn execute(
             &self,
@@ -563,13 +635,18 @@ fn idle_resident_coexists_with_single_but_active_develop_is_one() {
     let dir = Dir::new();
     let cli = mock(dir.path());
     let slot = DevelopSlot::new(0);
-    let owner = ResidentOwner::new(&cli, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&cli, Policy::default(), &slot).unwrap();
     run(&owner, &cli, &request(dir.path(), "ok"), &slot).unwrap();
     let resident_pid = owner.pid(&slot.acquire().unwrap()).unwrap();
-    let req = request(dir.path(), "slow");
+    let req = request(dir.path(), "block");
     thread::scope(|scope| {
         let single = scope.spawn(|| {
-            SingleExecutor.execute(&cli, &req, Duration::from_secs(5), &slot.acquire().unwrap())
+            SingleExecutor.execute(
+                &cli,
+                &req,
+                Duration::from_secs(20),
+                &slot.acquire().unwrap(),
+            )
         });
         wait_until(|| lines(dir.path(), "calls").len() == 2);
         let pids: Vec<_> = lines(dir.path(), "starts")
@@ -580,7 +657,9 @@ fn idle_resident_coexists_with_single_but_active_develop_is_one() {
         assert!(pids.iter().all(|pid| alive(*pid)));
         assert!(alive(resident_pid));
         assert_eq!(slot.acquire().err().unwrap().code, "BUSY");
+        // Default policy disables expiry: this checks idle coexistence, not busy-owner rejection.
         assert!(!owner.reap_idle());
+        fs::write(dir.path().join("release"), b"go").unwrap();
         single.join().unwrap().unwrap();
     });
     assert_eq!(owner.pid(&slot.acquire().unwrap()), Some(resident_pid));
@@ -594,7 +673,7 @@ fn canonical_path_change_is_rejected_even_for_identical_bytes() {
     let slot = DevelopSlot::new(2);
     let link = dir.path().join("linked-cli");
     std::os::unix::fs::symlink(&original, &link).unwrap();
-    let owner = ResidentOwner::new(&link, Policy::default()).unwrap();
+    let owner = ResidentOwner::new(&link, Policy::default(), &slot).unwrap();
     run(&owner, &link, &request(dir.path(), "ok"), &slot).unwrap();
     let pid = owner.pid(&slot.acquire().unwrap()).unwrap();
     let copied = dir.path().join("copy-cli");

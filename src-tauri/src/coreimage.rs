@@ -1864,7 +1864,7 @@ pub(crate) fn develop_with_executor(
         adjustments,
     };
 
-    // 3. キャッシュヒットは枠を取らずに返す。
+    // 3. Single のキャッシュヒットは枠を取らずに返す（resident は上で identity 用に取得済み）。
     if let Some(cached) = load_cached(&context) {
         if let Some(guard) = identity_guard.as_ref() {
             executor.validate_identity(sidecar, guard)?;

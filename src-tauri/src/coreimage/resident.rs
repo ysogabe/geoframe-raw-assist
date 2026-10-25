@@ -63,14 +63,20 @@ impl State {
     }
 }
 
-pub(super) struct ResidentOwner {
+pub(super) struct ResidentOwner<'slot> {
+    // Borrow keeps the slot alive and in place; its address cannot be reused while owned.
+    slot: &'slot DevelopSlot,
     identity: Identity,
     state: Mutex<State>,
     policy: Policy,
 }
 
-impl ResidentOwner {
-    pub(super) fn new(sidecar: &Path, policy: Policy) -> Result<Self, CoreImageError> {
+impl<'slot> ResidentOwner<'slot> {
+    pub(super) fn new(
+        sidecar: &Path,
+        policy: Policy,
+        slot: &'slot DevelopSlot,
+    ) -> Result<Self, CoreImageError> {
         let identity = Identity::read(sidecar)?;
         // Once per owner: reject a new owner over an already memoized old binary, too.
         // Do not silently reset process-wide version/hash memos on close/recreation.
@@ -82,14 +88,26 @@ impl ResidentOwner {
             return Err(identity_changed());
         }
         Ok(Self {
+            slot,
             identity,
             state: Mutex::new(State::default()),
             policy,
         })
     }
 
-    fn lock(&self, _slot: &SlotGuard<'_>) -> MutexGuard<'_, State> {
-        match self.state.lock() {
+    fn check_slot(&self, slot: &SlotGuard<'_>) -> Result<(), CoreImageError> {
+        if !std::ptr::eq(slot._ticket.0, &self.slot.pending) {
+            return Err(CoreImageError::new(
+                "INVALID_SLOT",
+                "resident guard belongs to a different develop slot",
+            ));
+        }
+        Ok(())
+    }
+
+    fn lock(&self, slot: &SlotGuard<'_>) -> Result<MutexGuard<'_, State>, CoreImageError> {
+        self.check_slot(slot)?; // Reject before waiting on the owner mutex.
+        Ok(match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
@@ -97,7 +115,7 @@ impl ResidentOwner {
                 self.state.clear_poison();
                 state
             }
-        }
+        })
     }
 
     fn check_identity(&self, sidecar: &Path, state: &mut State) -> Result<(), CoreImageError> {
@@ -128,6 +146,7 @@ impl ResidentOwner {
         timeout: Duration,
         slot: &SlotGuard<'_>,
     ) -> Result<Value, CoreImageError> {
+        self.check_slot(slot)?;
         let Some(object) = request.as_object() else {
             return Err(CoreImageError::new(
                 "INVALID_REQUEST",
@@ -145,7 +164,7 @@ impl ResidentOwner {
                 "resident accepts only stateless 2400 JPEG preview requests",
             ));
         }
-        let mut state = self.lock(slot);
+        let mut state = self.lock(slot)?;
         self.check_identity(sidecar, &mut state)?;
         if self.expired(&state, Instant::now()) {
             state.evict();
@@ -225,13 +244,14 @@ impl ResidentOwner {
     /// Request-boundary observation only. This is not a peak-RSS measurement.
     pub(super) fn pid(&self, slot: &SlotGuard<'_>) -> Option<u32> {
         self.lock(slot)
+            .ok()?
             .session
             .as_ref()
             .and_then(batch::BatchSession::pid)
     }
 }
 
-impl Drop for ResidentOwner {
+impl Drop for ResidentOwner<'_> {
     fn drop(&mut self) {
         // Exclusive ownership: no concurrent request can still borrow this owner.
         self.state
@@ -241,7 +261,7 @@ impl Drop for ResidentOwner {
     }
 }
 
-impl DevelopExecutor for ResidentOwner {
+impl DevelopExecutor for ResidentOwner<'_> {
     fn needs_identity_guard(&self) -> bool {
         true
     }
@@ -250,7 +270,8 @@ impl DevelopExecutor for ResidentOwner {
         sidecar: &Path,
         slot: &SlotGuard<'_>,
     ) -> Result<(), CoreImageError> {
-        self.check_identity(sidecar, &mut self.lock(slot))
+        let mut state = self.lock(slot)?;
+        self.check_identity(sidecar, &mut state)
     }
     fn execute(
         &self,
@@ -262,7 +283,9 @@ impl DevelopExecutor for ResidentOwner {
         self.request(sidecar, request, timeout, slot)
     }
     fn invalidate(&self, slot: &SlotGuard<'_>) {
-        self.lock(slot).evict();
+        if let Ok(mut state) = self.lock(slot) {
+            state.evict();
+        }
     }
 }
 
