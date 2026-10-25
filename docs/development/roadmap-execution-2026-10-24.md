@@ -122,3 +122,12 @@ T3内ブラウザはAX snapshotが2回15秒timeoutとなり、途中からrAFが
 - Core Image接続、5ペア・3グループの一覧とサムネイル、DSC04430の2400×1600プレビューと比較画像、ビューア表示・終了を確認した。[検収報告](../reports/release-window-qa-2026-10-25.md)。
 - 上記は専用IDの配布形の基本動作確認。公証・通常IDの正式配布、全機能の再検証ではない。#141の常駐batch/FFIの採否とは分ける。
 - 次は#28の採用集計・カードprops安定化を小PRで実施し、同じ4 manifestと40操作で比較する。
+
+
+## 2026-10-25: #28 採用集計・カード描画を検収
+
+- Sonnetで一括採用Map、必要スライスのmemo依存、安定callbackとカードmemoを実装。親で301 tests/type/lint/通常・bench build成功。Opus code-reviewはblockerなし、security-reviewは具体的指摘0。最新callbackの反映をLayout Effectへ移し、関連146テストも成功。
+- 5000枚で既存の画像イベント集計が引数上限を超えたため、最大値をreduceで求める機械的修正を前後のハーネスへ共通適用。Haikuが追加した20万件超の回帰を含む10テストを親でも確認した。
+- 同一ハッシュの4 manifest/40操作を専用Chromeで前後比較し、全8走行・56シナリオ完了、画像error/commit欠測0。合成5000枚の採用トグルcommit p95は19.3→1.5ms、帯選択13.9→3.1ms。一覧へ戻る2rAFは659.7→676.5ms、DOM数は同じであり、DOM生成の改善とは扱わない。各条件1走行の限定値。
+- 候補のrelease QA bundleをビルド・adhoc strict検証し、写真と合成の混在採用・取消・採用順hero・件数/内訳/帯/書き出しの一致を実画面で確認。[検収報告](../reports/browse-adoption-optimization-2026-10-25.md)。
+- #28には実アプリのtick中の詳細プロファイル、DOM/layoutの切り分けを残す。#141 B1はFableの読み取り助言を受領し、既定を変えないRust検証基盤→専用feature QAの2段へ分ける。FFI/B2/既定方式切替は保留。

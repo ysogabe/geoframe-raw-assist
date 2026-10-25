@@ -1,0 +1,2175 @@
+{
+  "schema": "geoframe.browse-optimization-summary.v1",
+  "baseline_commit": "fd4d1384140823ffb4d78474a86a72639a2b788d",
+  "candidate_product_commit": "bffb180",
+  "candidate_bench_commit": "dd1c850",
+  "common_harness_patch": "summarizeImages uses reduce(max) instead of Math.max(...loadTimes); baseline bench only was built with the same patch; operation timing boundaries unchanged",
+  "protocol": {
+    "baseline_commit": "fd4d1384140823ffb4d78474a86a72639a2b788d",
+    "datasets": [
+      {
+        "manifest": "real-451/manifest-100.json",
+        "sha256": "a719cf3cbf32af1216195203b9590be770991d9c1f60bfa687e0af3acc47d3b3",
+        "photos": 100,
+        "groups": 25
+      },
+      {
+        "manifest": "real-451/manifest.json",
+        "sha256": "ab40a2b15421e7958d6cebddd32defda3637d5184d59d022335bd98b41100ebb",
+        "photos": 451,
+        "groups": 113
+      },
+      {
+        "manifest": "synthetic/manifest-1000.json",
+        "sha256": "5f2c5d44f9475773725cef8518c5f667b396e80cca39f6fcfc9cfc9ae67e1707",
+        "photos": 1000,
+        "groups": 334
+      },
+      {
+        "manifest": "synthetic/manifest-5000.json",
+        "sha256": "ac7c80659fc5b2e104f8fb562af8fd03dc94d631a6ddf8f6469156d99d08ae9d",
+        "photos": 5000,
+        "groups": 1668
+      }
+    ],
+    "options": {
+      "steps": 40,
+      "mountRepeats": 5,
+      "settleMs": 3000
+    },
+    "desired_environment": {
+      "react_build": "production-profiling",
+      "viewport": {
+        "width": 1893,
+        "height": 1215
+      },
+      "device_pixel_ratio": 2,
+      "thumb_cache_policy": "max-age",
+      "prefers_reduced_motion": false
+    },
+    "method": "Run unchanged baseline and candidate serially with identical fixture bytes; record actual environment, completion/errors/settle warnings. No benchmark during worker mutation/tests. Compare same-browser paired runs; historical measurements are context only, not paired control.",
+    "pending": [
+      "baseline paired rerun",
+      "candidate paired rerun",
+      "real GUI adoption and navigation regression",
+      "review and merge"
+    ],
+    "discarded_attempts": [
+      {
+        "browser": "T3 preview",
+        "reason": "snapshot timeout twice; freeform resize setting did not change measured viewport; two rAF 1011.8ms"
+      },
+      {
+        "browser": "Chrome extension CUA",
+        "reason": "completion/save snapshot timed out, kernel reset, next call reported Debugger is not attached; no saved result accepted"
+      },
+      {
+        "browser": "dedicated Chrome Playwright",
+        "dataset": "synthetic5000",
+        "variant": "candidate",
+        "reason": "existing summarizeImages Math.max(...loadTimes) exceeded JS argument limit in post-measurement aggregation; no successful result accepted"
+      },
+      {
+        "browser": "dedicated Chrome Playwright",
+        "dataset": "synthetic5000",
+        "variant": "candidate",
+        "reason": "targeted type/lint/tests ran briefly during this recording; retain raw observation separately and repeat candidate without validation work"
+      }
+    ],
+    "common_harness_patch": {
+      "file": "src/bench/browse/metrics.ts",
+      "change": "Math.max(...loadTimes) to reduce max with -Infinity; same mathematical result without argument count limit",
+      "applies_to": [
+        "baseline",
+        "candidate"
+      ],
+      "timing_scope": "post-operation aggregate, no operation boundaries/options changed",
+      "earlier_three_pairs": "unchanged arithmetic semantics; retained, backed by small-array and zero-success regression tests"
+    }
+  },
+  "runner": {
+    "playwright": "1.64.1",
+    "browser": "155.0.8059.85",
+    "headless": false,
+    "viewport": {
+      "width": 1893,
+      "height": 1215
+    },
+    "deviceScaleFactor": 2,
+    "flags": [
+      "disable-background-timer-throttling",
+      "disable-renderer-backgrounding",
+      "disable-backgrounding-occluded-windows",
+      "disable-features=CalculateNativeWinOcclusion"
+    ],
+    "order": "real100 baseline/candidate, real451 candidate/baseline, synthetic1000 baseline/candidate, synthetic5000 candidate/baseline",
+    "options": {
+      "steps": 40,
+      "mountRepeats": 5,
+      "settleMs": 3000
+    },
+    "run_level_repeats": 1
+  },
+  "runs": {
+    "real100": {
+      "baseline": {
+        "archive": "baseline-real100.json.gz",
+        "sha256": "d680c9e278c431d5deea0475a3928fe993dbd06446c14e9b9e50244b4b051e9e",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "real_metadata",
+          "stats": {
+            "kind": "real_metadata",
+            "id": "real-100photos",
+            "group_count": 25,
+            "photo_count": 100,
+            "source": {
+              "group_count": 113,
+              "selection": "first_n"
+            },
+            "group_size": {
+              "min": 1,
+              "max": 10,
+              "mean": 4
+            },
+            "unique_thumb_urls": 100,
+            "unique_thumb_ratio": 1,
+            "duplicate_group_signature_ratio": 0,
+            "thumb_bytes": {
+              "known": 100,
+              "total": 4098464,
+              "mean": 40984.64
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 1,
+              "mean": 1.2,
+              "p50": 1.100000023841858,
+              "p95": 1.5999999642372131,
+              "p99": 1.5999999642372131,
+              "max": 1.5999999642372131,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 26.599999964237213,
+              "mean": 119.9599999856949,
+              "p50": 33.30000000000018,
+              "p95": 311.5999999642372,
+              "p99": 311.5999999642372,
+              "max": 311.5999999642372,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 11,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "操作/フレーム数 n=11 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.30000001192092896,
+              "mean": 0.8050000101327897,
+              "p50": 0.8999999761581421,
+              "p95": 1.100000023841858,
+              "p99": 1.199999988079071,
+              "max": 1.199999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 11.300000000000182,
+              "mean": 32.33999999314544,
+              "p50": 32.89999998807889,
+              "p95": 33.69999998807907,
+              "p99": 33.899999999999636,
+              "max": 33.899999999999636,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 215,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": [
+              "グループ数 25 < steps 40: 先頭から巡回して選択する"
+            ]
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.30000001192092896,
+              "mean": 0.6225000083446502,
+              "p50": 0.6000000238418579,
+              "p95": 0.800000011920929,
+              "p99": 0.9000000357627869,
+              "max": 0.9000000357627869,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 29.400000011921293,
+              "mean": 32.48499999254939,
+              "p50": 32.30000001192093,
+              "p95": 33.399999964237395,
+              "p99": 34,
+              "max": 34,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 526,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "グループ数 25 < 操作 40 回: 同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(後半は取消の再描画を含む)"
+            ]
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.30000001192092896,
+              "mean": 0.8124999970197677,
+              "p50": 0.7999999523162842,
+              "p95": 1.100000023841858,
+              "p99": 1.199999988079071,
+              "max": 1.199999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 9.49999996423685,
+              "mean": 31.982499985098684,
+              "p50": 32.79999997615778,
+              "p95": 33.29999996423703,
+              "p99": 33.700000011920565,
+              "max": 33.700000011920565,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 225,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": [
+              "グループ数 25 < 操作 40 回: 同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(後半は取消の再描画を含む)"
+            ]
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.699999988079071,
+              "mean": 1.119999997317791,
+              "p50": 1.100000023841858,
+              "p95": 1.5,
+              "p99": 1.5,
+              "max": 1.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 32.09999997615887,
+              "mean": 33.017499985396896,
+              "p50": 33.19999996423758,
+              "p95": 34.09999998807871,
+              "p99": 34.19999996423576,
+              "max": 34.19999996423576,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 34,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 215,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": []
+          }
+        ]
+      },
+      "candidate": {
+        "archive": "candidate-real100.json.gz",
+        "sha256": "a12e2cbcecbb242a10d228b46c0213815e3d3acd1ed057fb8bb012ef279452f3",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "real_metadata",
+          "stats": {
+            "kind": "real_metadata",
+            "id": "real-100photos",
+            "group_count": 25,
+            "photo_count": 100,
+            "source": {
+              "group_count": 113,
+              "selection": "first_n"
+            },
+            "group_size": {
+              "min": 1,
+              "max": 10,
+              "mean": 4
+            },
+            "unique_thumb_urls": 100,
+            "unique_thumb_ratio": 1,
+            "duplicate_group_signature_ratio": 0,
+            "thumb_bytes": {
+              "known": 100,
+              "total": 4098464,
+              "mean": 40984.64
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 1,
+              "mean": 1.3,
+              "p50": 1.100000023841858,
+              "p95": 1.699999988079071,
+              "p99": 1.699999988079071,
+              "max": 1.699999988079071,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 32.299999988079094,
+              "mean": 32.96000001430512,
+              "p50": 33.09999999999991,
+              "p95": 33.80000003576288,
+              "p99": 33.80000003576288,
+              "max": 33.80000003576288,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 15,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "操作/フレーム数 n=15 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.30000001192092896,
+              "mean": 0.6324999958276749,
+              "p50": 0.6000000238418579,
+              "p95": 0.8999999761581421,
+              "p99": 1.100000023841858,
+              "max": 1.100000023841858,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 11.300000035762878,
+              "mean": 32.25750000745059,
+              "p50": 32.70000003576297,
+              "p95": 33.600000000000364,
+              "p99": 34,
+              "max": 34,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 215,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": [
+              "グループ数 25 < steps 40: 先頭から巡回して選択する"
+            ]
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.19999998807907104,
+              "mean": 0.30999999642372134,
+              "p50": 0.30000001192092896,
+              "p95": 0.3999999761581421,
+              "p99": 0.5,
+              "max": 0.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 28.500000011920747,
+              "mean": 32.56500000983476,
+              "p50": 32.99999998807925,
+              "p95": 33.70000002384222,
+              "p99": 34.10000002384186,
+              "max": 34.10000002384186,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 526,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "グループ数 25 < 操作 40 回: 同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(後半は取消の再描画を含む)"
+            ]
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.09999996423721313,
+              "mean": 0.504999989271164,
+              "p50": 0.5,
+              "p95": 0.699999988079071,
+              "p99": 0.699999988079071,
+              "max": 0.699999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 12.700000023842222,
+              "mean": 32.2275000083446,
+              "p50": 32.800000023841676,
+              "p95": 33.70000003576297,
+              "p99": 33.89999998807889,
+              "max": 33.89999998807889,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 225,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": [
+              "グループ数 25 < 操作 40 回: 同じグループを繰り返しトグルするので、採用の追加と取消が混ざる(後半は取消の再描画を含む)"
+            ]
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.7000000476837158,
+              "mean": 1.2349999979138375,
+              "p50": 1.2999999523162842,
+              "p95": 1.5,
+              "p99": 1.699999988079071,
+              "max": 1.699999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 32.00000001192166,
+              "mean": 32.82250001311297,
+              "p50": 33.00000001192166,
+              "p95": 34.100000000000364,
+              "p99": 34.10000002384186,
+              "max": 34.10000002384186,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 486,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 25,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 34,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 215,
+              "imgs": 25,
+              "imgs_complete": 25,
+              "group_cards": 0,
+              "strip_cards": 25
+            },
+            "warnings": []
+          }
+        ]
+      }
+    },
+    "real451": {
+      "baseline": {
+        "archive": "baseline-real451.json.gz",
+        "sha256": "fb4efe68ca983141a29b7664613111c8f656033ac5df6fb0512aff895dd68d1e",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "real_metadata",
+          "stats": {
+            "kind": "real_metadata",
+            "id": "real-451photos",
+            "group_count": 113,
+            "photo_count": 451,
+            "source": {
+              "group_count": 113,
+              "selection": "all"
+            },
+            "group_size": {
+              "min": 1,
+              "max": 24,
+              "mean": 3.9911504424778763
+            },
+            "unique_thumb_urls": 451,
+            "unique_thumb_ratio": 1,
+            "duplicate_group_signature_ratio": 0,
+            "thumb_bytes": {
+              "known": 451,
+              "total": 22613747,
+              "mean": 50141.34589800444
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 3.199999988079071,
+              "mean": 3.6799999952316282,
+              "p50": 3.599999964237213,
+              "p95": 4.5,
+              "p99": 4.5,
+              "max": 4.5,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 32.89999998807912,
+              "mean": 33.15999999284745,
+              "p50": 32.99999997615805,
+              "p95": 33.90000001192095,
+              "p99": 33.90000001192095,
+              "max": 33.90000001192095,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 36,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 155,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.699999988079071,
+              "mean": 2.0075000002980232,
+              "p50": 1.899999976158142,
+              "p95": 3.100000023841858,
+              "p99": 3.199999988079071,
+              "max": 3.199999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 7.399999976158142,
+              "mean": 32.12499998956914,
+              "p50": 32.79999996423703,
+              "p95": 33.80000000000018,
+              "p99": 33.89999998807889,
+              "max": 33.89999998807889,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 919,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.0999999642372131,
+              "mean": 1.4124999955296516,
+              "p50": 1.399999976158142,
+              "p95": 1.699999988079071,
+              "p99": 1.7999999523162842,
+              "max": 1.7999999523162842,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 27.399999976158142,
+              "mean": 32.56249998956916,
+              "p50": 32.89999997615814,
+              "p95": 33.29999997615778,
+              "p99": 33.89999998807889,
+              "max": 33.89999998807889,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2230,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.100000023841858,
+              "mean": 2.2000000044703483,
+              "p50": 2.300000011920929,
+              "p95": 3,
+              "p99": 3,
+              "max": 3,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 9.799999999999272,
+              "mean": 31.939999990165234,
+              "p50": 32.600000000000364,
+              "p95": 33.100000000000364,
+              "p99": 33.50000001192166,
+              "max": 33.50000001192166,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 959,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 2.800000011920929,
+              "mean": 3.295000007748604,
+              "p50": 3.399999976158142,
+              "p95": 3.600000023841858,
+              "p99": 3.699999988079071,
+              "max": 3.699999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 32.09999997615887,
+              "mean": 33.00499999284739,
+              "p50": 33.00000001192166,
+              "p95": 33.90000001192129,
+              "p99": 34,
+              "max": 34,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 281,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 919,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          }
+        ]
+      },
+      "candidate": {
+        "archive": "candidate-real451.json.gz",
+        "sha256": "60829f91d4dfb5e5052e1354bfb6a783421c987630606312daa32a1b785f33e3",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "real_metadata",
+          "stats": {
+            "kind": "real_metadata",
+            "id": "real-451photos",
+            "group_count": 113,
+            "photo_count": 451,
+            "source": {
+              "group_count": 113,
+              "selection": "all"
+            },
+            "group_size": {
+              "min": 1,
+              "max": 24,
+              "mean": 3.9911504424778763
+            },
+            "unique_thumb_urls": 451,
+            "unique_thumb_ratio": 1,
+            "duplicate_group_signature_ratio": 0,
+            "thumb_bytes": {
+              "known": 451,
+              "total": 22613747,
+              "mean": 50141.34589800444
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 3.5,
+              "mean": 4.1400000095367435,
+              "p50": 4.200000047683716,
+              "p95": 4.5,
+              "p99": 4.5,
+              "max": 4.5,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 32.09999998807916,
+              "mean": 33.280000000000015,
+              "p50": 33.10000000000002,
+              "p95": 34.10000001192088,
+              "p99": 34.10000001192088,
+              "max": 34.10000001192088,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 36,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 155,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.5,
+              "mean": 1.0075000002980232,
+              "p50": 1,
+              "p95": 1.300000011920929,
+              "p99": 1.5,
+              "max": 1.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 6.399999976158142,
+              "mean": 32.08000000000002,
+              "p50": 32.69999998807907,
+              "p95": 33.600000000000364,
+              "p99": 33.70000002384222,
+              "max": 33.70000002384222,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 919,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.19999998807907104,
+              "mean": 0.34999999701976775,
+              "p50": 0.30000001192092896,
+              "p95": 0.5,
+              "p99": 0.5999999642372131,
+              "max": 0.5999999642372131,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 27.300000000000182,
+              "mean": 32.782500000596066,
+              "p50": 33.09999998807871,
+              "p95": 33.30000000000018,
+              "p99": 33.699999976158324,
+              "max": 33.699999976158324,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2230,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.09999996423721313,
+              "mean": 0.5100000008940697,
+              "p50": 0.5,
+              "p95": 0.9000000357627869,
+              "p99": 0.9000000357627869,
+              "max": 0.9000000357627869,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 7.40000002384113,
+              "mean": 32.17749999850976,
+              "p50": 32.90000002384113,
+              "p95": 33.700000011920565,
+              "p99": 33.999999976158506,
+              "max": 33.999999976158506,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 959,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 2.5,
+              "mean": 3.3074999928474424,
+              "p50": 3.300000011920929,
+              "p95": 3.700000047683716,
+              "p99": 4.100000023841858,
+              "max": 4.100000023841858,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 31.999999988078343,
+              "mean": 32.937499998807745,
+              "p50": 33.00000002384331,
+              "p95": 34,
+              "p99": 34.00000002384331,
+              "max": 34.00000002384331,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2070,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 113,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 281,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 919,
+              "imgs": 113,
+              "imgs_complete": 113,
+              "group_cards": 0,
+              "strip_cards": 113
+            },
+            "warnings": []
+          }
+        ]
+      }
+    },
+    "synthetic1000": {
+      "baseline": {
+        "archive": "baseline-synthetic1000.json.gz",
+        "sha256": "d7890c04cd01e8622e1a90ece430d7ae54728ee7b60cb18f503f545e2fc41a04",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "synthetic",
+          "stats": {
+            "kind": "synthetic",
+            "id": "synthetic-1000photos-pool64",
+            "group_count": 334,
+            "photo_count": 1000,
+            "source": null,
+            "group_size": {
+              "min": 1,
+              "max": 5,
+              "mean": 2.9940119760479043
+            },
+            "unique_thumb_urls": 64,
+            "unique_thumb_ratio": 0.064,
+            "duplicate_group_signature_ratio": 0.041916167664670656,
+            "thumb_bytes": {
+              "known": 0,
+              "total": 0,
+              "mean": null
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 6.5,
+              "mean": 8.499999988079072,
+              "p50": 6.899999976158142,
+              "p95": 15.199999988079071,
+              "p99": 15.199999988079071,
+              "max": 15.199999988079071,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 66.40000002384204,
+              "mean": 71.3199999999999,
+              "p50": 66.59999997615796,
+              "p95": 90.50000001192075,
+              "p99": 90.50000001192075,
+              "max": 90.50000001192075,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 164,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "reset: 前のシナリオの画像が静まらなかった(要求済み未完了 15 枚)。この結果に前の読み込みが混入しうる",
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 498,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.5,
+              "mean": 1.6649999901652337,
+              "p50": 1.699999988079071,
+              "p95": 1.800000011920929,
+              "p99": 2,
+              "max": 2,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 3.2999999999992724,
+              "mean": 32.34999999642359,
+              "p50": 33.100000000000364,
+              "p95": 34.100000000000364,
+              "p99": 34.1000000119202,
+              "max": 34.1000000119202,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2687,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 2.5,
+              "mean": 2.8875000044703483,
+              "p50": 2.800000011920929,
+              "p95": 3.400000035762787,
+              "p99": 3.5,
+              "max": 3.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 19.899999999999636,
+              "mean": 32.44500000298012,
+              "p50": 33.000000023841494,
+              "p95": 33.29999997615778,
+              "p99": 34.09999998807871,
+              "max": 34.09999998807871,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6208,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 2,
+              "mean": 3.764999994635582,
+              "p50": 4.199999988079071,
+              "p95": 4.699999988079071,
+              "p99": 4.899999976158142,
+              "max": 4.899999976158142,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 16.399999976158142,
+              "mean": 32.14499999910581,
+              "p50": 32.60000002384186,
+              "p95": 33.10000002384186,
+              "p99": 33.19999998807907,
+              "max": 33.19999998807907,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2727,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 6.399999976158142,
+              "mean": 7.002500005066395,
+              "p50": 6.899999976158142,
+              "p95": 7.699999988079071,
+              "p99": 8.5,
+              "max": 8.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 46.20000000000073,
+              "mean": 60.76750000029797,
+              "p50": 62.90000002384113,
+              "p95": 65.8999999880798,
+              "p99": 66.59999997615887,
+              "max": 66.59999997615887,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 896,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 2687,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          }
+        ]
+      },
+      "candidate": {
+        "archive": "candidate-synthetic1000.json.gz",
+        "sha256": "c12304f10eb4db417d453304ffc8efe0a8baba54c8bea09c00c72ed921a8a0f9",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "synthetic",
+          "stats": {
+            "kind": "synthetic",
+            "id": "synthetic-1000photos-pool64",
+            "group_count": 334,
+            "photo_count": 1000,
+            "source": null,
+            "group_size": {
+              "min": 1,
+              "max": 5,
+              "mean": 2.9940119760479043
+            },
+            "unique_thumb_urls": 64,
+            "unique_thumb_ratio": 0.064,
+            "duplicate_group_signature_ratio": 0.041916167664670656,
+            "thumb_bytes": {
+              "known": 0,
+              "total": 0,
+              "mean": null
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 5.899999976158142,
+              "mean": 8.439999985694886,
+              "p50": 6.899999976158142,
+              "p95": 15.699999988079071,
+              "p99": 15.699999988079071,
+              "max": 15.699999988079071,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 49.89999995231619,
+              "mean": 54.63999997138971,
+              "p50": 49.89999997615814,
+              "p95": 73.59999997615796,
+              "p99": 73.59999997615796,
+              "max": 73.59999997615796,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 164,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "reset: 前のシナリオの画像が静まらなかった(要求済み未完了 15 枚)。この結果に前の読み込みが混入しうる",
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 498,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.6000000238418579,
+              "mean": 1.2675000056624413,
+              "p50": 1.300000011920929,
+              "p95": 1.5,
+              "p99": 1.899999976158142,
+              "max": 1.899999976158142,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 3.557999952316095,
+              "mean": 31.89144998152251,
+              "p50": 32.89999997615814,
+              "p95": 33.79999999999927,
+              "p99": 33.899999964236486,
+              "max": 33.899999964236486,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2687,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.30000001192092896,
+              "mean": 0.5050000056624413,
+              "p50": 0.5,
+              "p95": 0.6000000238418579,
+              "p99": 0.699999988079071,
+              "max": 0.699999988079071,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 20.599999952315557,
+              "mean": 32.84249997705219,
+              "p50": 33.19999998807907,
+              "p95": 33.29999999999927,
+              "p99": 33.29999999999927,
+              "max": 33.29999999999927,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6208,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 0.3999999761581421,
+              "mean": 0.9674999952316284,
+              "p50": 0.8999999761581421,
+              "p95": 1.399999976158142,
+              "p99": 1.600000023841858,
+              "max": 1.600000023841858,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 5.299999976157778,
+              "mean": 32.13749997317787,
+              "p50": 32.8999999880798,
+              "p95": 33.199999976157414,
+              "p99": 33.2999999761596,
+              "max": 33.2999999761596,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 2727,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 6.099999964237213,
+              "mean": 6.480000002682209,
+              "p50": 6.400000035762787,
+              "p95": 6.899999976158142,
+              "p99": 7.300000011920929,
+              "max": 7.300000011920929,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 45.59999997615887,
+              "mean": 55.60749997258208,
+              "p50": 49.69999996423576,
+              "p95": 66.09999998808053,
+              "p99": 66.69999998807907,
+              "max": 66.69999998807907,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 6048,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 334,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 899,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 2687,
+              "imgs": 334,
+              "imgs_complete": 334,
+              "group_cards": 0,
+              "strip_cards": 334
+            },
+            "warnings": []
+          }
+        ]
+      }
+    },
+    "synthetic5000": {
+      "baseline": {
+        "archive": "baseline-synthetic5000.json.gz",
+        "sha256": "8afb32cc192d4bd593eb63b0a74b6f804e5abbdeb4981ce845dbd4303ef3f1ee",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "synthetic",
+          "stats": {
+            "kind": "synthetic",
+            "id": "synthetic-5000photos-pool64",
+            "group_count": 1668,
+            "photo_count": 5000,
+            "source": null,
+            "group_size": {
+              "min": 1,
+              "max": 5,
+              "mean": 2.997601918465228
+            },
+            "unique_thumb_urls": 64,
+            "unique_thumb_ratio": 0.0128,
+            "duplicate_group_signature_ratio": 0.8081534772182254,
+            "thumb_bytes": {
+              "known": 0,
+              "total": 0,
+              "mean": null
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 36.200000047683716,
+              "mean": 40.72000000476837,
+              "p50": 39.59999996423721,
+              "p95": 48.60000002384186,
+              "p99": 48.60000002384186,
+              "max": 48.60000002384186,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 614.3999999999996,
+              "mean": 640.259999988079,
+              "p50": 628.3999999642374,
+              "p95": 679.8999999761581,
+              "p99": 679.8999999761581,
+              "max": 679.8999999761581,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 803,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "reset: 前のシナリオの画像が静まらなかった(要求済み未完了 15 枚)。この結果に前の読み込みが混入しうる",
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 900,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 1133,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "スクロール後: 画像が 3000ms 以内に静まらなかった(要求済み未完了 10 枚)。次の操作・計測に読み込みが混入しうる"
+            ]
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 7.099999964237213,
+              "mean": 12.149999997019767,
+              "p50": 12.600000023841858,
+              "p95": 13.899999976158142,
+              "p99": 25.30000001192093,
+              "max": 25.30000001192093,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 25.155999976159364,
+              "mean": 32.858899974071754,
+              "p50": 33.099999999998545,
+              "p95": 35,
+              "p99": 35.099999988080526,
+              "max": 35.099999988080526,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 13359,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 12.300000011920929,
+              "mean": 17.68000000268221,
+              "p50": 18.299999952316284,
+              "p95": 19.30000001192093,
+              "p99": 23.900000035762787,
+              "max": 23.900000035762787,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 31.199999976157414,
+              "mean": 40.96999997466783,
+              "p50": 34.79999996423794,
+              "p95": 50.099999988080526,
+              "p99": 51.8999999880798,
+              "max": 51.8999999880798,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30220,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 6.700000047683716,
+              "mean": 13.022499996423722,
+              "p50": 12.800000011920929,
+              "p95": 13.699999988079071,
+              "p99": 20.099999964237213,
+              "max": 20.099999964237213,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 26.799999952316284,
+              "mean": 33.1174999752644,
+              "p50": 33.20000000000073,
+              "p95": 34.89999995231483,
+              "p99": 35,
+              "max": 35,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 13399,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 35.80000001192093,
+              "mean": 40.92000000476837,
+              "p50": 41.10000002384186,
+              "p95": 45.60000002384186,
+              "p99": 56.5,
+              "max": 56.5,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 514.4999999761567,
+              "mean": 577.4549999767544,
+              "p50": 558.8999999880762,
+              "p95": 659.6999999523177,
+              "p99": 666.4999999642387,
+              "max": 666.4999999642387,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 900,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 13359,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          }
+        ]
+      },
+      "candidate": {
+        "archive": "candidate-synthetic5000.json.gz",
+        "sha256": "ca727dda683c2864b8018d119b66dcf8ca179d4d0a66f79182ca3122d6cb6b9b",
+        "environment": {
+          "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "device_pixel_ratio": 2,
+          "viewport": {
+            "width": 1893,
+            "height": 1215
+          },
+          "hardware_concurrency": 8,
+          "react_build": "production-profiling",
+          "is_tauri": false,
+          "longtask_supported": true,
+          "prefers_reduced_motion": false,
+          "thumb_cache_policy": "max-age",
+          "thumb_cache_policy_source": "head_probe",
+          "thumb_cache_policy_note": null
+        },
+        "representativeness": {
+          "dataset_kind": "synthetic",
+          "stats": {
+            "kind": "synthetic",
+            "id": "synthetic-5000photos-pool64",
+            "group_count": 1668,
+            "photo_count": 5000,
+            "source": null,
+            "group_size": {
+              "min": 1,
+              "max": 5,
+              "mean": 2.997601918465228
+            },
+            "unique_thumb_urls": 64,
+            "unique_thumb_ratio": 0.0128,
+            "duplicate_group_signature_ratio": 0.8081534772182254,
+            "thumb_bytes": {
+              "known": 0,
+              "total": 0,
+              "mean": null
+            }
+          },
+          "reporter_notes": "",
+          "caveats": [
+            "Chromium(Playwright 等)の結果を WKWebView(Tauri の実アプリ)の値として扱わない。JS エンジン・レイアウト・画像デコード・遅延読み込みのしきい値・GPU 合成が違う。実アプリ相当の数字が要るなら WebView 側で同じ API を呼び直す。",
+            "実メタデータと合成(1000/5000 グループ等)は別物。グループ数と写真数も別物で、報告には両方を併記する。合成は単純複製に近いメタデータ・使い回しのサムネ・同一サイズのグループ構成なので、サムネキャッシュのヒット率と画像デコード負荷が実運用より軽く見える。`manifest.stats` の unique_thumb_ratio / duplicate_group_signature_ratio を必ず併記する。",
+            "to_frame_ms は『操作 → 2 回目の requestAnimationFrame』という paint の代理観測。実際の合成・表示完了は確認していない。"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "mount_list",
+            "operations": 5,
+            "to_commit_ms": {
+              "n": 5,
+              "min": 29.399999976158142,
+              "mean": 35.679999995231626,
+              "p50": 32.10000002384186,
+              "p95": 46.69999998807907,
+              "p99": 46.69999998807907,
+              "max": 46.69999998807907,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 5,
+              "min": 511.79999998807943,
+              "mean": 608.499999988079,
+              "p50": 629.0999999642372,
+              "p95": 654.1999999880791,
+              "p99": 654.1999999880791,
+              "max": 654.1999999880791,
+              "p95_reliable": false,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 803,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "reset: 前のシナリオの画像が静まらなかった(要求済み未完了 15 枚)。この結果に前の読み込みが混入しうる",
+              "1 回目はサムネがブラウザキャッシュに無い可能性がある(cold)。2 回目以降は warm。raw の並び順で読む",
+              "操作/フレーム数 n=5 が 20 未満: p95 は最大値に近い参考値"
+            ]
+          },
+          {
+            "id": "scroll_list",
+            "operations": 900,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 1133,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": [
+              "スクロール後: 画像が 3000ms 以内に静まらなかった(要求済み未完了 10 枚)。次の操作・計測に読み込みが混入しうる"
+            ]
+          },
+          {
+            "id": "select_group_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.7999999523162842,
+              "mean": 2.562500001490116,
+              "p50": 2.599999964237213,
+              "p95": 3.099999964237213,
+              "p99": 3.399999976158142,
+              "max": 3.399999976158142,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 16.09999997615887,
+              "mean": 32.61999998867505,
+              "p50": 33.19999996423576,
+              "p95": 33.30000001192093,
+              "p99": 34.8999999880798,
+              "max": 34.8999999880798,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 13359,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.0999999642372131,
+              "mean": 1.3774999976158142,
+              "p50": 1.300000011920929,
+              "p95": 1.5,
+              "p99": 2,
+              "max": 2,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 29.699999976157414,
+              "mean": 32.71749998480109,
+              "p50": 33.20000000000073,
+              "p95": 33.599999988080526,
+              "p99": 34.099999988080526,
+              "max": 34.099999988080526,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30220,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "accept_toggle_strip",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 1.600000023841858,
+              "mean": 2.2224999994039534,
+              "p50": 2.299999952316284,
+              "p95": 2.800000011920929,
+              "p99": 3,
+              "max": 3,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 18.899999964236486,
+              "mean": 32.00499998867481,
+              "p50": 32.99999998807834,
+              "p95": 33.79999996423794,
+              "p99": 35.199999976157414,
+              "max": 35.199999976157414,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 13399,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          },
+          {
+            "id": "return_to_list",
+            "operations": 40,
+            "to_commit_ms": {
+              "n": 40,
+              "min": 30,
+              "mean": 33.85250000208616,
+              "p50": 32,
+              "p95": 42.19999998807907,
+              "p99": 57,
+              "max": 57,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "to_frame_ms": {
+              "n": 40,
+              "min": 519.6999999880791,
+              "mean": 583.6849999895696,
+              "p50": 563.0999999761552,
+              "p95": 676.499999988082,
+              "p99": 687.199999976161,
+              "max": 687.199999976161,
+              "p95_reliable": true,
+              "p99_reliable": false
+            },
+            "dom_after": {
+              "elements": 30060,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 1668,
+              "strip_cards": 0
+            },
+            "warnings": []
+          },
+          {
+            "id": "scroll_strip",
+            "operations": 901,
+            "to_commit_ms": null,
+            "to_frame_ms": null,
+            "dom_after": {
+              "elements": 13359,
+              "imgs": 1668,
+              "imgs_complete": 1668,
+              "group_cards": 0,
+              "strip_cards": 1668
+            },
+            "warnings": []
+          }
+        ]
+      }
+    }
+  }
+}
