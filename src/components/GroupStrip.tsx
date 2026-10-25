@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
+import type { AcceptedGroupSummary } from "../lib/app-state";
 import { formatClock, groupKindLabel } from "../lib/format";
 import { adjacentGroupId } from "../lib/group-nav";
 import { assetUrl } from "../lib/raw-api";
@@ -20,11 +21,11 @@ type GroupStripProps = {
    */
   groups: GroupInfo[];
   selectedGroupId: number;
-  /** ミニカードの代表として出すカット。一覧カードと同じ流儀（採用優先）。 */
-  heroCaptureOf: (group: GroupInfo) => CaptureId;
-  /** そのグループの採用の内訳。件数だけをバッジに出す。 */
-  acceptedSummaryOf: (group: GroupInfo) => string[];
-  /** カードのクリックでの移動。 */
+  /** ミニカードの代表として出すカット（groupId → 撮影ID）。一覧カードと同じ流儀（採用優先）。 */
+  heroCaptureIds: ReadonlyMap<number, CaptureId>;
+  /** グループごとの採用の内訳。件数だけをバッジに出す。採用の無いグループは無い。 */
+  acceptedSummaries: ReadonlyMap<number, AcceptedGroupSummary>;
+  /** カードのクリックでの移動。参照を安定させて渡すこと（ミニカードの memo が効かなくなる）。 */
   onSelectGroup: (groupId: number) => void;
   /** 左端の ◀▶ での移動（←→ キーと同じ操作）。 */
   onStepGroup: (groupId: number) => void;
@@ -34,8 +35,8 @@ export function GroupStrip({
   analysis,
   groups,
   selectedGroupId,
-  heroCaptureOf,
-  acceptedSummaryOf,
+  heroCaptureIds,
+  acceptedSummaries,
   onSelectGroup,
   onStepGroup,
 }: GroupStripProps) {
@@ -144,38 +145,16 @@ export function GroupStrip({
         <div className="group-strip-scroller" ref={scrollerRef}>
           <ul className="group-strip-track">
             {groups.map((group) => {
-              const heroCaptureId = heroCaptureOf(group);
-              const hero = analysis.photos[heroCaptureId];
-              const acceptedCount = acceptedSummaryOf(group).length;
-              const selected = group.id === selectedGroupId;
+              const heroCaptureId = heroCaptureIds.get(group.id) ?? group.recommended_capture_id;
               return (
-                <li key={group.id} data-group-id={group.id}>
-                  <button
-                    type="button"
-                    className="group-strip-card"
-                    aria-current={selected ? "true" : undefined}
-                    title={group.title}
-                    onClick={() => {
-                      // 再クリックで screen/operation を再ディスパッチすると presetName /
-                      // overrides が「移動」の意味でリセットされ、手動調整が黙って消える。
-                      if (!selected) onSelectGroup(group.id);
-                    }}
-                  >
-                    <span className="group-strip-thumb">
-                      {hero ? (
-                        <img src={assetUrl(hero.thumb)} alt="" loading="lazy" decoding="async" />
-                      ) : null}
-                      {acceptedCount > 0 && <span className="group-strip-accepted">✓{acceptedCount}</span>}
-                    </span>
-                    <span className="group-strip-label">
-                      <strong>{formatClock(group.start_at)}</strong>
-                      <small>
-                        {groupKindLabel(group.kind)}
-                        <span className="group-strip-count"> {group.capture_ids.length}枚</span>
-                      </small>
-                    </span>
-                  </button>
-                </li>
+                <GroupStripCard
+                  key={group.id}
+                  group={group}
+                  selected={group.id === selectedGroupId}
+                  heroThumb={analysis.photos[heroCaptureId]?.thumb}
+                  acceptedCount={acceptedSummaries.get(group.id)?.labels.length ?? 0}
+                  onSelectGroup={onSelectGroup}
+                />
               );
             })}
           </ul>
@@ -184,3 +163,51 @@ export function GroupStrip({
     </>
   );
 }
+
+type GroupStripCardProps = {
+  group: GroupInfo;
+  selected: boolean;
+  heroThumb: string | undefined;
+  acceptedCount: number;
+  onSelectGroup: (groupId: number) => void;
+};
+
+// 選択の移動やスクロール・コンパクト切替、採用の増減のたびに全カードを描き直さない。
+// props は参照が安定した値かプリミティブだけにしてある。
+const GroupStripCard = memo(function GroupStripCard({
+  group,
+  selected,
+  heroThumb,
+  acceptedCount,
+  onSelectGroup,
+}: GroupStripCardProps) {
+  return (
+    <li data-group-id={group.id}>
+      <button
+        type="button"
+        className="group-strip-card"
+        aria-current={selected ? "true" : undefined}
+        title={group.title}
+        onClick={() => {
+          // 再クリックで screen/operation を再ディスパッチすると presetName /
+          // overrides が「移動」の意味でリセットされ、手動調整が黙って消える。
+          if (!selected) onSelectGroup(group.id);
+        }}
+      >
+        <span className="group-strip-thumb">
+          {heroThumb !== undefined ? (
+            <img src={assetUrl(heroThumb)} alt="" loading="lazy" decoding="async" />
+          ) : null}
+          {acceptedCount > 0 && <span className="group-strip-accepted">✓{acceptedCount}</span>}
+        </span>
+        <span className="group-strip-label">
+          <strong>{formatClock(group.start_at)}</strong>
+          <small>
+            {groupKindLabel(group.kind)}
+            <span className="group-strip-count"> {group.capture_ids.length}枚</span>
+          </small>
+        </span>
+      </button>
+    </li>
+  );
+});

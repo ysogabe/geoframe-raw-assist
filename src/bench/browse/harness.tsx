@@ -9,13 +9,14 @@ import { GroupList } from "../../components/GroupList";
 import { GroupStrip } from "../../components/GroupStrip";
 import { SummaryStrip } from "../../components/SummaryStrip";
 import {
-  acceptedSummaryOf,
+  acceptedSummaryIndex,
   developedGroupIds,
-  heroCaptureOf,
+  heroCaptureIdsOf,
   initialState,
   reducer,
   visibleGroups,
   type Action,
+  type ListView,
   type State,
 } from "../../lib/app-state";
 import type { Analysis } from "../../lib/types";
@@ -74,8 +75,31 @@ export function BenchApp({ analysis, onRender, onControls, onFirstCommit }: Prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const groupsToShow = useMemo(() => visibleGroups(state), [state]);
-  const developedIds = useMemo(() => developedGroupIds(state), [state]);
+  // 実 App.tsx と同じ依存(読むスライスだけ)。ここを state 全体に戻すとベンチが実アプリと別物になる。
+  const { accepted, fullResults, mergeFullResults, listView, viewing, mergeSelections, mergePreviewResults } = state;
+  const { selectedGroupId, presets, presetName, overrides } = state;
+  const groupsToShow = useMemo(
+    () => visibleGroups({ analysis: state.analysis, listView, accepted, fullResults, mergeFullResults }),
+    [state.analysis, listView, accepted, fullResults, mergeFullResults],
+  );
+  const developedIds = useMemo(
+    () => developedGroupIds({ analysis: state.analysis, fullResults, mergeFullResults }),
+    [state.analysis, fullResults, mergeFullResults],
+  );
+  const acceptedSummaries = useMemo(
+    () => acceptedSummaryIndex(state.analysis, accepted, mergeFullResults),
+    [state.analysis, accepted, mergeFullResults],
+  );
+  const heroCaptureIds = useMemo(
+    () =>
+      heroCaptureIdsOf(
+        state.analysis?.groups ?? [],
+        { viewing, mergeSelections, mergePreviewResults, mergeFullResults, selectedGroupId, presets, presetName, overrides },
+        acceptedSummaries,
+      ),
+    [state.analysis, viewing, mergeSelections, mergePreviewResults, mergeFullResults, selectedGroupId, presets, presetName, overrides, acceptedSummaries],
+  );
+  const changeView = useCallback((view: ListView) => rawDispatch({ type: "list/view", view }), []);
   const openGroup = useCallback((groupId: number) => rawDispatch({ type: "screen/operation", groupId }), []);
 
   const screen = state.screen === "operation" && state.selectedGroupId !== null ? "operation" : "suggestions";
@@ -99,8 +123,8 @@ export function BenchApp({ analysis, onRender, onControls, onFirstCommit }: Prop
                   analysis={analysis}
                   groups={analysis.groups}
                   selectedGroupId={selectedId}
-                  heroCaptureOf={(item) => heroCaptureOf(state, item)}
-                  acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+                  heroCaptureIds={heroCaptureIds}
+                  acceptedSummaries={acceptedSummaries}
                   onSelectGroup={openGroup}
                   onStepGroup={openGroup}
                 />
@@ -114,13 +138,12 @@ export function BenchApp({ analysis, onRender, onControls, onFirstCommit }: Prop
                 <GroupList
                   analysis={analysis}
                   visibleGroups={groupsToShow}
-                  heroCaptureOf={(item) => heroCaptureOf(state, item)}
-                  recommendedCaptureOf={(item) => item.recommended_capture_id}
-                  acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
-                  acceptedItemCount={state.accepted.length}
+                  heroCaptureIds={heroCaptureIds}
+                  acceptedSummaries={acceptedSummaries}
+                  acceptedItemCount={accepted.length}
                   developedGroupIds={developedIds}
                   activeView={state.listView}
-                  onChangeView={(view) => rawDispatch({ type: "list/view", view })}
+                  onChangeView={changeView}
                   onOpenGroup={openGroup}
                 />
               </Profiler>

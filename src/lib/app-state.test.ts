@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   acceptedMergeOf,
+  acceptedSummaryIndex,
   activePreset,
   adjustmentsLostOnLeave,
   changedAdjustmentKeys,
@@ -10,6 +11,9 @@ import {
   currentDevelopmentCandidates,
   currentDevelopmentCandidatesResponse,
   effectiveAdjustments,
+  developedGroupIds,
+  heroCaptureIdsOf,
+  heroCaptureOf,
   initialState,
   isMergedAccepted,
   mergedAcceptTargetOf,
@@ -17,7 +21,10 @@ import {
   reducer,
   resolveAdjustments,
   viewingCaptureOf,
+  visibleGroups,
+  type AcceptedItem,
   type Action,
+  type BrowseHeroSource,
   type State,
 } from "./app-state";
 import type {
@@ -1325,5 +1332,213 @@ describe("解析の世代と遅れて届く応答（#3 B1・#32・#5）", () => 
     expect(reducer(requested, { type: "analysis/error", message: "新しい失敗", generation: 1 }).analysisError).toBe(
       "新しい失敗",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 一覧・帯の採用集計（#28）
+// ---------------------------------------------------------------------------
+
+describe("acceptedSummaryIndex / heroCaptureOf（採用の集計を 1 本にまとめる）", () => {
+  const g1 = group(1, ["A1", "A2", "A3"], { kind: "bracket" });
+  const g2 = group(2, ["B1", "B2"]);
+  const g3 = group(3, ["C1", "C2"]);
+  const analysis = analysisOf([g1, g2, g3]);
+
+  const photo = (groupId: number, captureId: string): AcceptedItem => ({ kind: "photo", groupId, captureId, variant: "camera_jpg" });
+  const mergedItem = (groupId: number, leadCaptureId: string): AcceptedItem => ({ kind: "merged", groupId, leadCaptureId });
+
+  /** 旧実装（グループごとに accepted を全件走査する）そのまま。新しい集計との同値性の基準。 */
+  function referenceLabels(accepted: AcceptedItem[], results: State["mergeFullResults"], groupId: number): string[] {
+    const found = analysis.groups.find((candidate) => candidate.id === groupId);
+    return accepted
+      .filter((item) => item.groupId === groupId)
+      .map((item) => {
+        if (item.kind === "photo") return item.captureId;
+        const result = found ? mergedResultFor(results, found, item.leadCaptureId) : undefined;
+        return result ? `合成${result.frames}枚` : "合成";
+      });
+  }
+
+  it("写真と合成の混在は採用順のまま、ラベル・件数・ヒーローが揃う", () => {
+    const accepted = [photo(1, "A2"), mergedItem(2, "B1"), photo(1, "A1"), mergedItem(1, "A1")];
+    const results = { 1: merged(["A1", "A2", "A3"]), 2: merged(["B1", "B2"]) };
+    const index = acceptedSummaryIndex(analysis, accepted, results);
+    expect(index.get(1)).toEqual({ labels: ["A2", "A1", "合成3枚"], heroCaptureId: "A2" });
+    expect(index.get(2)).toEqual({ labels: ["合成2枚"], heroCaptureId: "B1" });
+    expect(index.has(3)).toBe(false);
+    // 件数の総和 = accepted.length（一覧バッジ・タブ・Topbar が同じ数を出す前提）。
+    expect([...index.values()].reduce((sum, entry) => sum + entry.labels.length, 0)).toBe(accepted.length);
+  });
+
+  it("先頭が合成の採用なら、ヒーローは合成の先頭フレーム", () => {
+    const index = acceptedSummaryIndex(analysis, [mergedItem(1, "A1"), photo(1, "A3")], { 1: merged(["A1", "A2"]) });
+    expect(index.get(1)).toEqual({ labels: ["合成2枚", "A3"], heroCaptureId: "A1" });
+  });
+
+  it("成果物を引けない合成・未知のグループは『合成』に落ち、件数は減らない", () => {
+    const accepted = [
+      mergedItem(1, "A1"), // 成果物なし
+      mergedItem(2, "B2"), // 先頭フレームが別（合成をやり直した）
+      mergedItem(3, "C1"), // グループ外のフレームを含む古い結果（IDの使い回し）
+      mergedItem(99, "Z1"), // 解析に存在しないグループ
+      photo(99, "Z2"),
+    ];
+    const results = { 2: merged(["B1", "B2"]), 3: merged(["C1", "X9"]) };
+    const index = acceptedSummaryIndex(analysis, accepted, results);
+    expect(index.get(1)?.labels).toEqual(["合成"]);
+    expect(index.get(2)?.labels).toEqual(["合成"]);
+    expect(index.get(3)?.labels).toEqual(["合成"]);
+    expect(index.get(99)).toEqual({ labels: ["合成", "Z2"], heroCaptureId: "Z1" });
+  });
+
+  it("解析が無い間は合成を『合成』、写真はそのまま出す", () => {
+    const index = acceptedSummaryIndex(null, [photo(1, "A1"), mergedItem(1, "A1")], { 1: merged(["A1", "A2"]) });
+    expect(index.get(1)).toEqual({ labels: ["A1", "合成"], heroCaptureId: "A1" });
+    expect(acceptedSummaryIndex(analysis, [], {}).size).toBe(0);
+  });
+
+  it("合成をやり直す（結果が変わる）と、枚数ラベルは新しい集計で更新される", () => {
+    const accepted = [mergedItem(1, "A1")];
+    const before = acceptedSummaryIndex(analysis, accepted, { 1: merged(["A1", "A2"]) });
+    const after = acceptedSummaryIndex(analysis, accepted, { 1: merged(["A1", "A2", "A3"]) });
+    expect(before.get(1)?.labels).toEqual(["合成2枚"]);
+    expect(after.get(1)?.labels).toEqual(["合成3枚"]);
+  });
+
+  it("旧実装（グループごとの全件走査）と全グループで同じ結果になる", () => {
+    const accepted = [
+      photo(2, "B2"),
+      mergedItem(1, "A1"),
+      mergedItem(1, "A2"),
+      photo(3, "C1"),
+      mergedItem(3, "C2"),
+      photo(2, "B1"),
+      mergedItem(99, "Z1"),
+    ];
+    const results = { 1: merged(["A1", "A3"]), 3: merged(["C2", "C1"]) };
+    const index = acceptedSummaryIndex(analysis, accepted, results);
+    for (const id of [1, 2, 3, 99]) {
+      const expected = referenceLabels(accepted, results, id);
+      expect(index.get(id)?.labels ?? []).toEqual(expected);
+      const first = accepted.find((item) => item.groupId === id);
+      const hero = first && (first.kind === "photo" ? first.captureId : first.leadCaptureId);
+      expect(index.get(id)?.heroCaptureId).toBe(hero);
+    }
+  });
+
+  it("グループIDが重複したときは先頭のグループで成果物を引く（旧 find と同じ）", () => {
+    const first = group(7, ["P1", "P2"]);
+    const second = group(7, ["Q1", "Q2"]);
+    const dup = analysisOf([first, second]);
+    const index = acceptedSummaryIndex(dup, [mergedItem(7, "P1")], { 7: merged(["P1", "P2"]) });
+    expect(index.get(7)?.labels).toEqual(["合成2枚"]);
+  });
+
+  describe("heroCaptureOf / heroCaptureIdsOf", () => {
+    const opened: State = run(
+      { ...withEngine, analysis },
+      { type: "screen/operation", groupId: 1 },
+      { type: "view/capture", groupId: 2, captureId: "B2" },
+    );
+    const sliceOf = (state: State): BrowseHeroSource => ({
+      viewing: state.viewing,
+      mergeSelections: state.mergeSelections,
+      mergePreviewResults: state.mergePreviewResults,
+      mergeFullResults: state.mergeFullResults,
+      selectedGroupId: state.selectedGroupId,
+      presets: state.presets,
+      presetName: state.presetName,
+      overrides: state.overrides,
+    });
+
+    it("採用があれば表示カーソルより採用が優先、無ければ表示カーソル（無ければ推薦）", () => {
+      const summaries = acceptedSummaryIndex(analysis, [photo(1, "A3")], {});
+      const heroes = heroCaptureIdsOf(analysis.groups, sliceOf(opened), summaries);
+      expect(heroes.get(1)).toBe("A3"); // 採用 > 推薦(A1)
+      expect(heroes.get(2)).toBe("B2"); // 表示カーソル
+      expect(heroes.get(3)).toBe("C1"); // 推薦
+      expect(heroes.size).toBe(3);
+      for (const g of analysis.groups) {
+        expect(heroes.get(g.id)).toBe(heroCaptureOf(sliceOf(opened), g, summaries));
+      }
+    });
+
+    it("読むのは BrowseHeroSource のキーだけ（他のキーに触れると落ちる）で、全 state と同じ値になる", () => {
+      const strict = (source: BrowseHeroSource): BrowseHeroSource =>
+        new Proxy(source, {
+          get(target, key) {
+            if (!(key in target)) throw new Error(`BrowseHeroSource 外のキーを読んだ: ${String(key)}`);
+            return Reflect.get(target, key);
+          },
+        });
+      const mergedNow = (state: State, ids: string[]): MergedResult => ({
+        ...merged(ids),
+        preset: state.presetName,
+        adjustments: effectiveAdjustments(state)!,
+      });
+      const viewingMerged = run(opened, { type: "view/merged", groupId: 1 });
+      const scenarios: State[] = [
+        opened,
+        viewingMerged,
+        { ...viewingMerged, mergeSelections: { 1: ["A3", "A2"] } },
+        { ...viewingMerged, mergeSelections: { 1: ["A3", "A2"] }, mergePreviewResults: { 1: mergedNow(viewingMerged, ["A2", "A3"]) } },
+        { ...viewingMerged, mergeFullResults: { 1: mergedNow(viewingMerged, ["A1", "A2", "A3"]) } },
+      ];
+      for (const state of scenarios) {
+        const summaries = acceptedSummaryIndex(analysis, [], {});
+        for (const g of analysis.groups) {
+          expect(heroCaptureOf(strict(sliceOf(state)), g, summaries)).toBe(viewingCaptureOf(state, g));
+        }
+      }
+    });
+
+    it("スライスのどれが変わってもヒーローに反映される（更新漏れが無い）", () => {
+      const summaries = acceptedSummaryIndex(analysis, [], {});
+      const heroOf = (state: State) => heroCaptureIdsOf(analysis.groups, sliceOf(state), summaries).get(1);
+      const mergedNow = (state: State, ids: string[]): MergedResult => ({
+        ...merged(ids),
+        preset: state.presetName,
+        adjustments: effectiveAdjustments(state)!,
+      });
+      const base = { ...run(opened, { type: "view/merged", groupId: 1 }), mergeSelections: { 1: ["A3", "A2"] } };
+      // 合う結果なし → 選択の先頭(A3)
+      expect(heroOf(base)).toBe("A3");
+      // viewing: 写真カーソルへ
+      expect(heroOf(run(base, { type: "view/capture", groupId: 1, captureId: "A2" }))).toBe("A2");
+      // mergeSelections
+      expect(heroOf({ ...base, mergeSelections: { 1: ["A2", "A1"] } })).toBe("A2");
+      // mergePreviewResults / mergeFullResults: 合う結果の先頭(昇順正規化で A2)に切り替わる
+      const withPreview = { ...base, mergePreviewResults: { 1: mergedNow(base, ["A2", "A3"]) } };
+      expect(heroOf(withPreview)).toBe("A2");
+      expect(heroOf({ ...base, mergeFullResults: { 1: mergedNow(base, ["A2", "A3"]) } })).toBe("A2");
+      // 調整(overrides)・プリセット(presetName / presets)が変わると結果は外れて A3 に戻る
+      expect(heroOf({ ...withPreview, overrides: { exposure: 0.5 } })).toBe("A3");
+      expect(heroOf({ ...withPreview, presetName: "shadow_rescue" })).toBe("A3");
+      expect(heroOf({ ...withPreview, presets: [] })).toBe("A3");
+      // 選択中でないグループは調整を照合しない(フレーム集合だけ) → 結果が合う
+      expect(heroOf({ ...withPreview, selectedGroupId: 2, overrides: { exposure: 0.5 } })).toBe("A2");
+    });
+  });
+});
+
+describe("visibleGroups / developedGroupIds は読むスライスだけで決まる", () => {
+  const g1 = group(1, ["A1", "A2"]);
+  const g2 = group(2, ["B1", "B2"]);
+  const analysis = analysisOf([g1, g2]);
+  const slice = {
+    analysis,
+    listView: "suggestions" as const,
+    accepted: [{ kind: "photo" as const, groupId: 2, captureId: "B1", variant: "camera_jpg" as const }],
+    fullResults: { A1: developed("A1") },
+    mergeFullResults: {},
+  };
+
+  it("タブごとの絞り込みが、スライスだけで正しく出る", () => {
+    expect(visibleGroups(slice).map((g) => g.id)).toEqual([1, 2]);
+    expect(visibleGroups({ ...slice, listView: "accepted" }).map((g) => g.id)).toEqual([2]);
+    expect(visibleGroups({ ...slice, listView: "queue" }).map((g) => g.id)).toEqual([1]);
+    expect(developedGroupIds(slice)).toEqual([1]);
+    expect(developedGroupIds({ ...slice, mergeFullResults: { 2: merged(["B1", "B2"]) } })).toEqual([1, 2]);
   });
 });
