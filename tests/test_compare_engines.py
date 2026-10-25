@@ -2131,3 +2131,62 @@ class PresetsMockCliIntegrationTests(unittest.TestCase):
         plan = json.loads((self.out / "presets_plan.json").read_text(encoding="utf-8"))
         self.assertEqual([p for p in plan if p["problems"]], [])
         self.assertEqual({p["mode"] for p in plan}, {"preview", "full"})
+
+
+# --- CI 基準の新規作成 --frozen-bootstrap-ci（純粋関数。サブプロセスの結合は test_evaluation_independence） ---
+
+
+class FrozenBootstrapPureTests(unittest.TestCase):
+    def test_request_states_every_value_explicitly(self):
+        neutral = ce.ci_preset_adjustments("neutral_recovery")
+        preview = ce.bootstrap_request("neutral_recovery", "preview")
+        full = ce.bootstrap_request("neutral_recovery", "full")
+        self.assertEqual(preview, {"profile": "apple_default", "lens": True, "decoder_version": "9",
+                                   "adjustments": neutral, "max_edge": 1600})
+        self.assertEqual({k: v for k, v in preview.items() if k != "max_edge"}, full)  # full は長辺を持たない
+        self.assertEqual(len(neutral), 9)
+        self.assertEqual(ce.validate_adjustments_request(
+            {"settings": {"profile": "apple_default"}, "adjustments": neutral}), [])
+        self.assertEqual(ce.bootstrap_request("neutral_recovery", "preview", 1280)["max_edge"], 1280)
+        preview["adjustments"]["exposure"] = 9.0  # 返り値の変更が次の呼び出しへ漏れない
+        self.assertEqual(ce.bootstrap_request("neutral_recovery", "preview")["adjustments"], neutral)
+
+    def test_request_rejects_unknown_preset_mode_and_contract_violations(self):
+        with self.assertRaises(KeyError):
+            ce.bootstrap_request("no_such_preset", "preview")
+        with self.assertRaises(ValueError):
+            ce.bootstrap_request("neutral_recovery", "thumbnail")
+        broken = [{"name": "broken", "adjustments": {**ce.ci_preset_adjustments("neutral_recovery"), "exposure": 99.0}}]
+        with self.assertRaises(ValueError):
+            ce.bootstrap_request("broken", "preview", presets=broken)
+
+    def test_replay_request_honours_recorded_edge_but_not_when_absent(self):
+        recorded = {"request": {"profile": "apple_default", "lens": True, "decoder_version": "9",
+                                "adjustments": ce.ci_preset_adjustments("neutral_recovery"), "max_edge": 120}}
+        self.assertEqual(ce.frozen_request(recorded, "neutral_recovery")["max_edge"], 120)
+        self.assertNotIn("max_edge", ce.frozen_request({}, "neutral_recovery"))  # 旧マニフェストは従来どおり
+
+    def test_path_problems(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            project, source, cli = tmp / "repo", tmp / "raw", tmp / "cli"
+            for d in (project / "work", source):
+                d.mkdir(parents=True)
+            cli.write_text("x")
+            check = lambda out: ce.bootstrap_path_problems(out, source, cli, project)  # noqa: E731
+            self.assertEqual(check(tmp / "new" / "baseline"), [])
+            (tmp / "empty").mkdir()
+            self.assertEqual(check(tmp / "empty"), [])
+            self.assertEqual(check(project / "work" / "baseline"), [])
+            (tmp / "full").mkdir()
+            (tmp / "full" / "x").write_text("x")
+            self.assertTrue(any("空ではありません" in p for p in check(tmp / "full")))
+            self.assertTrue(any("ディレクトリではありません" in p for p in check(cli)))
+            self.assertTrue(any("--source-root" in p for p in check(source)))
+            self.assertTrue(any("--source-root" in p for p in check(source / "out")))
+            self.assertTrue(any("--source-root" in p for p in check(tmp)))
+            self.assertTrue(any("Git 管理下" in p for p in check(project / "baseline")))
+            self.assertTrue(any("Git 管理下" in p for p in check(project)))
+            self.assertTrue(any("Git 管理下" in p for p in check(tmp)))
