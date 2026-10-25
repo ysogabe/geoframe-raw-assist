@@ -1,0 +1,172 @@
+{
+  "schema": "geoframe.resident-summary.v1",
+  "source_commit": "96fa77a8550a724b7e2b8a3821f0afd21612c674",
+  "protocol": {
+    "source_files": [
+      {
+        "file": "DSC04430.ARW",
+        "bytes": 24861440,
+        "sha256": "39d7b25975707dd8b78f2368a3e11d63c5a034162669d701e7f0cdc6c1d2b630",
+        "local_smb_equal": true
+      },
+      {
+        "file": "DSC04880.ARW",
+        "bytes": 25152256,
+        "sha256": "9172855d4ca69797b5f908cfcf07fdab3861fba8cf20d6440c34628aa226c1eb",
+        "local_smb_equal": true
+      }
+    ],
+    "cli_sha256": "8f32b66887e86aa27832d905df929e2d22d3c19a477a1fb6aca9b41d0fcdf471",
+    "cli_version": {
+      "cli_version": "0.8.0",
+      "engine": "coreimage",
+      "macos_version": "27.0.1",
+      "ok": true
+    },
+    "code_base": "a94df3c",
+    "run_axes": {
+      "executors": [
+        "single",
+        "resident"
+      ],
+      "binary": "real_cli",
+      "host": "cargo_harness"
+    },
+    "root_order": [
+      "local_apfs",
+      "smb_backup"
+    ],
+    "rounds_per_step": 4,
+    "series": 10,
+    "expected_pairs": 192,
+    "exact_comparison": true,
+    "gui_e2e": false
+  },
+  "pairs": 192,
+  "all_exact": true,
+  "rgb_max_abs_diff": 0,
+  "child_reaped_after_eof_close": true,
+  "memory_trend": {
+    "samples": 192,
+    "first_half_rss_kib": {
+      "n": 96,
+      "min": 83808.0,
+      "p50": 134784.0,
+      "p95": 181920.0,
+      "max": 185728.0,
+      "mean": 149478.5,
+      "small_sample": false
+    },
+    "second_half_rss_kib": {
+      "n": 96,
+      "min": 135008.0,
+      "p50": 138768.0,
+      "p95": 186112.0,
+      "max": 186352.0,
+      "mean": 158036.5,
+      "small_sample": false
+    },
+    "true_peak_rss_bytes": null,
+    "peak_footprint_bytes": null
+  },
+  "groups": [
+    {
+      "storage": "local_apfs",
+      "series_class": "decode_changing",
+      "pairs": 46,
+      "single_wall_ms": {
+        "n": 46,
+        "p50": 1608.579792,
+        "p95": 1930.00125,
+        "min": 1250.304666,
+        "max": 2101.209417
+      },
+      "resident_wall_ms": {
+        "n": 46,
+        "p50": 1136.720083,
+        "p95": 1380.253542,
+        "min": 846.4855,
+        "max": 1754.8704160000002
+      }
+    },
+    {
+      "storage": "local_apfs",
+      "series_class": "post_only",
+      "pairs": 50,
+      "single_wall_ms": {
+        "n": 50,
+        "p50": 1568.8193749999998,
+        "p95": 1764.6681250000001,
+        "min": 1282.219125,
+        "max": 2268.4856670000004
+      },
+      "resident_wall_ms": {
+        "n": 50,
+        "p50": 1123.601791,
+        "p95": 1342.091084,
+        "min": 844.614291,
+        "max": 1474.032375
+      }
+    },
+    {
+      "storage": "smb_backup",
+      "series_class": "decode_changing",
+      "pairs": 46,
+      "single_wall_ms": {
+        "n": 46,
+        "p50": 2418.899708,
+        "p95": 2724.387792,
+        "min": 1963.501291,
+        "max": 3144.22975
+      },
+      "resident_wall_ms": {
+        "n": 46,
+        "p50": 1824.400958,
+        "p95": 2142.029375,
+        "min": 1533.699208,
+        "max": 2506.984
+      }
+    },
+    {
+      "storage": "smb_backup",
+      "series_class": "post_only",
+      "pairs": 50,
+      "single_wall_ms": {
+        "n": 50,
+        "p50": 2352.3328330000004,
+        "p95": 2578.226875,
+        "min": 2043.69675,
+        "max": 4163.938167
+      },
+      "resident_wall_ms": {
+        "n": 50,
+        "p50": 1854.451834,
+        "p95": 2114.894917,
+        "min": 1546.2422089999998,
+        "max": 2429.0561249999996
+      }
+    }
+  ],
+  "notes": [
+    "One serial run, fixed single then resident order; no controlled cold-cache comparison",
+    "Times include Rust cache miss, source resolution, provenance and prune; not pure IPC transport",
+    "Resident first startup included",
+    "No app E2E, GUI display, acceptance threshold or production executor adoption inferred",
+    "Original 96fa77a report has no input/PID observation fields; archived parity only, not evidence for the later observation gate",
+    "input_matches_expected in later runs checks Rust request path resolution, not direct CLI input-use observation"
+  ],
+  "resource_probe": "resource-probe.json.gz",
+  "resource_scope": "standalone_cli_resource_probe; not owner/app E2E",
+  "final_observations": {
+    "source_commit": "de7578faf7b11fe5fa2bc2a5f5cba2c7beaf6168",
+    "record_sha256": "8df9e073f95f96cc038250b8b6b2b9e0d2131fd61700978bd90b3e5b89c14f3f",
+    "pairs": 192,
+    "all_parity_gates": true,
+    "rust_input_resolution_all_expected": true,
+    "resident_pid_observed_all": true,
+    "same_pid_across_all_192": true,
+    "child_reaped_after_eof_close": true,
+    "timing_use": "validation only; one-second stack sampling during run, not a speed comparison",
+    "archive": "final-observations.json.gz"
+  }
+}

@@ -57,7 +57,7 @@ report を保存した後に pure validator で受入を判定する。全 10 �
 bytes 一致、比較可能・同寸・正の寸法・長辺 2400、decoded RGB 完全一致（max_abs_diff=0）と EOF 子回収を必須とする。
 false・unknown・missing・0 件・件数不足・余剰・比較不能は失敗する。bytes gate は B1 の同一 JSON に対する
 exact equality 条件であり、新しい品質閾値ではない。速度/メモリ閾値は作らない。
-新規 report は両 executor の observed input が期待 canonical root + 明示 ID の解決先と一致する boolean、
+新規 report は両 executor の Rust が解決した request.input が期待 canonical root + 明示 ID の解決先と一致する boolean、
 resident pid の観測成否と前回との一致 boolean（先頭だけ null）を記録し、別の strict gate で必須検証する。
 生 path・生 pid は公開しない。
 同一順序で Single → resident を測るため OS/GPU cache の cold/warm を統制した比較ではない。
@@ -184,3 +184,9 @@ EOF の実 CLI 回収はこの ignored ハーネスとアプリ終了の両方�
 - レビュー修正後、親が対象 **20 passed / 0 failed / 2 ignored**、変更Rustのfmt/diff検査を確認。保存済み実CLI192組を新pure gateで再照合し成功した（画像再生成なし）。
 - 最初の実CLI192組はrequest/cache key/provenance keys/bytes/RGBすべて一致、EOF回収成功。新input/PID観測はこの初回データに存在せず、現在の観測gateの実走行で別途検証する。
 - 単独の実CLI資源・親終了probeは完了。数値は[実測報告](coreimage-resident-validation-2026-10-25.md)へ記録する。アプリE2EはPR-Bの担当で、今回の検収に含めない。
+
+### 再レビューの補足
+
+`input_matches_expected`はRustが保存したrequest.inputと期待した解決先の比較であり、CLI内部の入力使用を直接観測していない。実測のlocal/SMBは同じRAWのコピーなので、バイト一致だけでどちらのパスを使用したかを区別する証拠にもしない。mockの異なるfolder-ID bytesで切替を別に検証する。以後のハーネスはcanonical rootが同じなら開始前に拒否する。
+
+- 追加の実CLI192組でparity/入力解決/PID観測の全gateが成功し、EOF回収も成功した。速度比較には使わず、[実測報告](coreimage-resident-validation-2026-10-25.md)に区別して記録した。

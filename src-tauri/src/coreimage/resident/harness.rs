@@ -55,6 +55,7 @@ fn run(cfg: &Config, binary: &'static str) -> Result<Value, CoreImageError> {
         cfg.roots[0].canonicalize().map_err(io_error)?,
         cfg.roots[1].canonicalize().map_err(io_error)?,
     ];
+    assert_ne!(roots[0], roots[1], "two distinct canonical source roots required");
     // Resolve all inputs before writing scratch; never enumerate photos beyond explicit IDs.
     for root in &roots {
         for id in &cfg.captures {
@@ -183,7 +184,7 @@ fn run(cfg: &Config, binary: &'static str) -> Result<Value, CoreImageError> {
             "memory": "ps RSS at request boundary in KiB; not peak RSS or footprint; first/second half are descriptive",
             "concurrency": "one active develop slot; idle resident and transient single CLI may coexist",
             "thresholds": "no tuned thresholds; exact bytes and decoded RGB equality required",
-            "input": "both observed request inputs equal expected canonical root plus explicit capture ID; boolean only",
+            "input": "Rust-resolved request inputs equal expected canonical root plus explicit capture ID; not direct CLI input-use observation",
             "pid_reuse": "resident pid observed each request; previous-pid equality boolean, null only on first record",
             "privacy": "no paths, GPS, source-path hashes, request/provenance values in public report"
         },
