@@ -63,3 +63,38 @@ describe("Profiler / 画像の集計", () => {
     expect(summary).toMatchObject({ loaded: 2, errored: 1, last_load_after_ms: 50, resource_entries: 2, cache_like: 1 });
   });
 });
+
+describe("summarizeImages の大量イベント（Math.max(...) 引数上限の回帰）", () => {
+  // Math.max(...loadTimes) は引数数が数万〜十数万で RangeError になる。reduce 版で落ちないことを見る。
+  const BULK = 200_000;
+
+  it("200,000 件超の成功/失敗の混在でも落ちず、件数と最後の load 時刻を返す", () => {
+    // at=i の列（i%3===0 は失敗）の先頭に、最大時刻の成功を1件足す。最大時刻は末尾ではない。
+    const events = [{ at: 999_999, ok: true }, ...Array.from({ length: BULK }, (_, index) => ({ at: index, ok: index % 3 !== 0 }))];
+    const summary = summarizeImages(events, [], 100);
+    expect(summary).toMatchObject({
+      loaded: 133_334,
+      errored: 66_667,
+      last_load_after_ms: 999_899,
+    });
+  });
+
+  it("成功が 0 件なら last_load_after_ms は null", () => {
+    const events = Array.from({ length: BULK + 1 }, (_, index) => ({ at: index, ok: false }));
+    expect(summarizeImages(events, [], 0)).toMatchObject({ loaded: 0, errored: BULK + 1, last_load_after_ms: null });
+  });
+
+  it("小さい配列では最大時刻が末尾でなくても従来の最大値と一致する", () => {
+    const summary = summarizeImages(
+      [
+        { at: 300, ok: true },
+        { at: 20, ok: true },
+        { at: 10, ok: false },
+        { at: 120, ok: true },
+      ],
+      [],
+      10,
+    );
+    expect(summary).toMatchObject({ loaded: 3, errored: 1, last_load_after_ms: 290 });
+  });
+});

@@ -1,4 +1,5 @@
-import type { ListView } from "../lib/app-state";
+import { memo } from "react";
+import type { AcceptedGroupSummary, ListView } from "../lib/app-state";
 import { formatConfidence, groupKindLabel, rawPillClass } from "../lib/format";
 import { assetUrl } from "../lib/raw-api";
 import type { Analysis, CaptureId, GroupInfo } from "../lib/types";
@@ -6,12 +7,13 @@ import type { Analysis, CaptureId, GroupInfo } from "../lib/types";
 type GroupListProps = {
   analysis: Analysis;
   visibleGroups: GroupInfo[];
-  /** カードの代表として出すカット。採用があればその 1 件目、無ければ表示カーソル。 */
-  heroCaptureOf: (group: GroupInfo) => CaptureId;
-  /** 推薦カット。ヘロー（採用優先）とは別物なので分けて受け取る。 */
-  recommendedCaptureOf: (group: GroupInfo) => CaptureId;
-  /** そのグループの採用の内訳（例: ["DSC02943", "合成3枚"]）。件数もここから数える。 */
-  acceptedSummaryOf: (group: GroupInfo) => string[];
+  /**
+   * カードの代表として出すカット（groupId → 撮影ID）。採用があればその 1 件目、無ければ表示カーソル。
+   * 推薦カット（group.recommended_capture_id）とは別物。
+   */
+  heroCaptureIds: ReadonlyMap<number, CaptureId>;
+  /** グループごとの採用の内訳（例: ["DSC02943", "合成3枚"]）。件数もここから数える。採用の無いグループは無い。 */
+  acceptedSummaries: ReadonlyMap<number, AcceptedGroupSummary>;
   /**
    * 採用アイテムの総数。**グループ数ではない**。
    * 一覧バッジ・このタブ・Topbar の 3 か所で同じ数が出ていないと、
@@ -27,9 +29,8 @@ type GroupListProps = {
 export function GroupList({
   analysis,
   visibleGroups,
-  heroCaptureOf,
-  recommendedCaptureOf,
-  acceptedSummaryOf,
+  heroCaptureIds,
+  acceptedSummaries,
   acceptedItemCount,
   developedGroupIds,
   activeView,
@@ -49,44 +50,19 @@ export function GroupList({
 
       <div className="group-stack">
         {visibleGroups.length ? visibleGroups.map((group) => {
-          const heroCaptureId = heroCaptureOf(group);
-          const hero = analysis.photos[heroCaptureId];
-          // 推薦の行はあくまで「解析のおすすめ」。ヘローが採用側に寄っても動かさない。
-          const recommendedCaptureId = recommendedCaptureOf(group);
-          const reason = group.recommendation_reasons[0]?.text ?? "";
-          // 1 グループから複数枚採用できるので、バッジは二値ではなく件数を出す。
-          const acceptedSummary = acceptedSummaryOf(group);
+          const heroCaptureId = heroCaptureIds.get(group.id) ?? group.recommended_capture_id;
+          const labels = acceptedSummaries.get(group.id)?.labels;
           return (
-            <article key={group.id} className="group-card" onClick={() => onOpenGroup(group.id)}>
-              <div className="group-hero">
-                {hero ? (
-                  <img src={assetUrl(hero.thumb)} alt={`${group.title} ${heroCaptureId}`} loading="lazy" decoding="async" />
-                ) : null}
-                <span className="photo-count">▧ {group.capture_ids.length}枚</span>
-                {acceptedSummary.length > 0 && (
-                  <span className="accepted-badge">✓ 採用 {acceptedSummary.length}件</span>
-                )}
-              </div>
-              <div className="group-copy">
-                <div className="group-meta"><span>{groupKindLabel(group.kind)}</span>{analysis.scored !== false && <small>信頼度 {formatConfidence(group.confidence)}%</small>}</div>
-                <h3>{group.title}</h3>
-                <div className="recommendation"><span className="spark">✦</span><p><strong>{recommendedCaptureId}</strong><small>{reason}</small></p></div>
-                {/* 何を採用したのかは件数だけでは分からない。カードを開かずに読めるようにする。 */}
-                {acceptedSummary.length > 0 && (
-                  <p className="accepted-summary">
-                    <span aria-hidden="true">✓</span>
-                    {/* テキストを span で包むのは省略記号のため。text-overflow は
-                        インライン内容を直に持つブロックにしか効かず、flex の
-                        無名アイテムのままだと（採用が多いカードでこそ）ばっさり切れる。 */}
-                    <span className="accepted-summary-text">採用: {acceptedSummary.join(" / ")}</span>
-                  </p>
-                )}
-                <div className="group-footer">
-                  <span className={rawPillClass(group.raw.level)}>{group.raw.label}</span>
-                  <button onClick={(event) => { event.stopPropagation(); onOpenGroup(group.id); }}>操作パネルを開く <b>→</b></button>
-                </div>
-              </div>
-            </article>
+            <GroupCard
+              key={group.id}
+              group={group}
+              heroCaptureId={heroCaptureId}
+              heroThumb={analysis.photos[heroCaptureId]?.thumb}
+              scored={analysis.scored !== false}
+              acceptedCount={labels?.length ?? 0}
+              acceptedText={labels?.join(" / ") ?? ""}
+              onOpenGroup={onOpenGroup}
+            />
           );
         }) : (
           <div className="empty-state"><span>○</span><h3>まだ写真がありません</h3><p>別の表示に切り替えるか、提案から写真を採用してください。</p></div>
@@ -95,3 +71,62 @@ export function GroupList({
     </section>
   );
 }
+
+type GroupCardProps = {
+  group: GroupInfo;
+  heroCaptureId: CaptureId;
+  heroThumb: string | undefined;
+  scored: boolean;
+  /** 1 グループから複数枚採用できるので、バッジは二値ではなく件数を出す。 */
+  acceptedCount: number;
+  /** 採用の内訳を " / " でつないだもの。何を採用したのかは件数だけでは分からない。 */
+  acceptedText: string;
+  onOpenGroup: (groupId: number) => void;
+};
+
+// props は参照が安定した値かプリミティブだけ。採用や表示カーソルの変更で、関係の無い
+// カードまで描き直さない（ここを関数 props やインラインの配列に戻すと memo が効かなくなる）。
+const GroupCard = memo(function GroupCard({
+  group,
+  heroCaptureId,
+  heroThumb,
+  scored,
+  acceptedCount,
+  acceptedText,
+  onOpenGroup,
+}: GroupCardProps) {
+  // 推薦の行はあくまで「解析のおすすめ」。ヘローが採用側に寄っても動かさない。
+  const recommendedCaptureId = group.recommended_capture_id;
+  const reason = group.recommendation_reasons[0]?.text ?? "";
+  return (
+    <article className="group-card" onClick={() => onOpenGroup(group.id)}>
+      <div className="group-hero">
+        {heroThumb !== undefined ? (
+          <img src={assetUrl(heroThumb)} alt={`${group.title} ${heroCaptureId}`} loading="lazy" decoding="async" />
+        ) : null}
+        <span className="photo-count">▧ {group.capture_ids.length}枚</span>
+        {acceptedCount > 0 && (
+          <span className="accepted-badge">✓ 採用 {acceptedCount}件</span>
+        )}
+      </div>
+      <div className="group-copy">
+        <div className="group-meta"><span>{groupKindLabel(group.kind)}</span>{scored && <small>信頼度 {formatConfidence(group.confidence)}%</small>}</div>
+        <h3>{group.title}</h3>
+        <div className="recommendation"><span className="spark">✦</span><p><strong>{recommendedCaptureId}</strong><small>{reason}</small></p></div>
+        {acceptedCount > 0 && (
+          <p className="accepted-summary">
+            <span aria-hidden="true">✓</span>
+            {/* テキストを span で包むのは省略記号のため。text-overflow は
+                インライン内容を直に持つブロックにしか効かず、flex の
+                無名アイテムのままだと（採用が多いカードでこそ）ばっさり切れる。 */}
+            <span className="accepted-summary-text">採用: {acceptedText}</span>
+          </p>
+        )}
+        <div className="group-footer">
+          <span className={rawPillClass(group.raw.level)}>{group.raw.label}</span>
+          <button onClick={(event) => { event.stopPropagation(); onOpenGroup(group.id); }}>操作パネルを開く <b>→</b></button>
+        </div>
+      </div>
+    </article>
+  );
+});

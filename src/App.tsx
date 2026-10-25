@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   acceptedKey,
   acceptedMergeOf,
-  acceptedSummaryOf,
+  acceptedSummaryIndex,
   activePreset,
   adjustmentsLostOnLeave,
   changedAdjustmentKeys,
@@ -10,7 +10,7 @@ import {
   developedGroupIds,
   effectiveAdjustments,
   effectiveViewingOf,
-  heroCaptureOf,
+  heroCaptureIdsOf,
   initialState,
   isPhotoAccepted,
   isValidBatchName,
@@ -215,8 +215,53 @@ export default function Home() {
   const globalBusy = Boolean(state.developMode || state.mergeMode || state.developmentCandidatesBusy);
   const photo = photoOf(analysis, captureId);
   const changedKeys = changedAdjustmentKeys(state);
-  const groupsToShow = useMemo(() => visibleGroups(state), [state]);
-  const developedIds = useMemo(() => developedGroupIds(state), [state]);
+  // 一覧・帯の集計は、読むスライスだけを依存に並べる（state 全体にすると 200ms の tick や
+  // 無関係な変更でも再集計される。型は Pick なので、並べ漏れは app-state 側のテストで拾う）。
+  const { listView, viewing: viewingCursors } = state;
+  const { mergeSelections, mergePreviewResults, selectedGroupId, presets, presetName, overrides } = state;
+  const groupsToShow = useMemo(
+    () => visibleGroups({ analysis, listView, accepted, fullResults, mergeFullResults }),
+    [analysis, listView, accepted, fullResults, mergeFullResults],
+  );
+  const developedIds = useMemo(
+    () => developedGroupIds({ analysis, fullResults, mergeFullResults }),
+    [analysis, fullResults, mergeFullResults],
+  );
+  // 採用の内訳は analysis.groups と accepted を一度ずつ走査して作り、ラベルも件数もヒーローの採用優先も
+  // ここから引く。ヒーローの採用なしのフォールバック（表示カーソル）だけ読むスライスが広いので別に持つ。
+  const acceptedSummaries = useMemo(
+    () => acceptedSummaryIndex(analysis, accepted, mergeFullResults),
+    [analysis, accepted, mergeFullResults],
+  );
+  const heroCaptureIds = useMemo(
+    () =>
+      heroCaptureIdsOf(
+        analysis?.groups ?? [],
+        {
+          viewing: viewingCursors,
+          mergeSelections,
+          mergePreviewResults,
+          mergeFullResults,
+          selectedGroupId,
+          presets,
+          presetName,
+          overrides,
+        },
+        acceptedSummaries,
+      ),
+    [
+      analysis,
+      viewingCursors,
+      mergeSelections,
+      mergePreviewResults,
+      mergeFullResults,
+      selectedGroupId,
+      presets,
+      presetName,
+      overrides,
+      acceptedSummaries,
+    ],
+  );
   const engineVersion = state.engineLabel ?? "";
   const coverThumb = useMemo(() => {
     if (!analysis) return null;
@@ -366,8 +411,17 @@ export default function Home() {
   // window の購読は操作画面の間だけ張り替えずに持ち、中身は毎レンダーの最新ハンドラへ
   // 委ねる（state を閉じ込めたハンドラを直接登録すると古い group / changedKeys を見る）。
   const groupKeyHandlerRef = useRef(handleGroupKey);
-  useEffect(() => {
+  // 一覧カード・帯のミニカードへ渡すハンドラは参照を固定する（memo されたカードを描き直さない）。
+  // 呼び出し時に最新のレンダーの関数を見るので、古い state を閉じ込めない。
+  const openOperationScreenRef = useRef(openOperationScreen);
+  const moveToGroupRef = useRef(moveToGroup);
+  const handleOpenGroup = useCallback((groupId: number) => openOperationScreenRef.current(groupId), []);
+  const handleSelectGroup = useCallback((groupId: number) => void moveToGroupRef.current(groupId, "top"), []);
+  const handleStepGroup = useCallback((groupId: number) => void moveToGroupRef.current(groupId, "media"), []);
+  useLayoutEffect(() => {
     groupKeyHandlerRef.current = handleGroupKey;
+    openOperationScreenRef.current = openOperationScreen;
+    moveToGroupRef.current = moveToGroup;
     currentGroupIdRef.current = group?.id ?? null;
   });
   useEffect(() => {
@@ -682,12 +736,12 @@ export default function Home() {
               analysis={analysis}
               groups={analysis.groups}
               selectedGroupId={group.id}
-              heroCaptureOf={(item) => heroCaptureOf(state, item)}
-              acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+              heroCaptureIds={heroCaptureIds}
+              acceptedSummaries={acceptedSummaries}
               // クリック・◀▶ の移動も ←→ キーと同じ確認を通す。カードのクリックは従来どおり
               // ページ先頭へ、◀▶ は ←→ キーと同じ操作なので着地もキーと揃える。
-              onSelectGroup={(groupId) => void moveToGroup(groupId, "top")}
-              onStepGroup={(groupId) => void moveToGroup(groupId, "media")}
+              onSelectGroup={handleSelectGroup}
+              onStepGroup={handleStepGroup}
             />
             <OperationPanel
               analysis={analysis}
@@ -780,14 +834,13 @@ export default function Home() {
           <GroupList
             analysis={analysis}
             visibleGroups={groupsToShow}
-            heroCaptureOf={(item) => heroCaptureOf(state, item)}
-            recommendedCaptureOf={(item) => item.recommended_capture_id}
-            acceptedSummaryOf={(item) => acceptedSummaryOf(state, item.id)}
+            heroCaptureIds={heroCaptureIds}
+            acceptedSummaries={acceptedSummaries}
             acceptedItemCount={accepted.length}
             developedGroupIds={developedIds}
             activeView={state.listView}
             onChangeView={(view) => dispatch({ type: "list/view", view })}
-            onOpenGroup={openOperationScreen}
+            onOpenGroup={handleOpenGroup}
           />
         )}
       </main>

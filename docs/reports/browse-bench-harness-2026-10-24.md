@@ -147,3 +147,8 @@ strip 系シナリオ（`select_group_strip`・`accept_toggle_strip`・`scroll_s
 
 型（`tsc --noEmit`）・lint・`vitest`（manifest 検証/合成生成/変換、集計、fake driver によるシナリオ契約）・`npm run bench:browse:build`（profiling 差し替えが効いていることの確認）は
 自 worktree で確認した。親がChromeのproduction-profilingで4規模×7シナリオを実行済み。画像errorは0。lazy settleのtimeout警告と代表性の制約は[初回計測結果](browse-bench-results-2026-10-24.md)に残す。WKWebViewはこの独立ハーネスでは未計測。
+
+
+## 2026-10-25の更新
+
+#28で採用集計を一括Map化し、カードpropsを安定化した。上記のO(n²)・旧selector名は初回実装時の記録であり、現行コードの説明ではない。[変更前後の検収結果](browse-adoption-optimization-2026-10-25.md)を参照。画像イベントの最大値集計は大量配列でも落ちないreduceへ修正し、計時境界は維持した。

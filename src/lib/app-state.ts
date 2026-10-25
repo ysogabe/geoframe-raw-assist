@@ -1252,7 +1252,7 @@ export function acceptedMergeOf(state: State, group: GroupInfo): AcceptedMergeVi
  * グループIDが使い回されると、同じ先頭フレームIDを持つ古い（無関係になった）合成結果が
  * 複数キーに残ることがあり、どちらが返るかは Object.values() の列挙順（整数キーは昇順）
  * で決まってしまっていた。挿入順ではないので、多くの場合は **古い方（数値の小さいキー）
- * が勝つ**。この結果は書き出し（exportRows）と一覧の枚数表示（acceptedSummaryOf）の
+ * が勝つ**。この結果は書き出し（exportRows）と一覧の枚数表示（acceptedSummaryIndex）の
  * 両方に流れ、しかもファイル名と capture_id は整合するのでサーバは 200 を返す。採用を
  * 解除してやり直しても leadCaptureId は同じ値なので直らず、実質発見できなかった。
  *
@@ -1282,42 +1282,104 @@ export function mergedResultFor(
 }
 
 /** 採用アイテムを 1 件でも持つグループID。 */
-export function acceptedGroupIdSet(state: State): Set<number> {
+export function acceptedGroupIdSet(state: Pick<State, "accepted">): Set<number> {
   return new Set(state.accepted.map((item) => item.groupId));
 }
 
+/** そのグループの採用の集計。ラベルと件数・ヒーローを同じ走査から作る。 */
+export type AcceptedGroupSummary = {
+  /** 採用の内訳ラベル（例: `["DSC02943", "合成3枚"]`）。件数はこの長さ。 */
+  labels: string[];
+  /** 最初に採用したアイテムの撮影ID（合成なら先頭フレーム）。一覧カードのヒーロー。 */
+  heroCaptureId: CaptureId;
+};
+
 /**
- * そのグループの採用の内訳ラベル（例: `["DSC02943", "合成3枚"]`）。
+ * 全グループ分の採用の内訳を **一度の走査** で作る（groupId → 集計）。採用が無いグループは入らない。
  *
- * 件数も一覧カードの 1 行もこれ 1 本から作る。件数だけ別に数えると、バッジは「2件」
- * なのに内訳が 1 つしか出ない、という食い違いが生まれる余地が残るため。
- * 配列の長さの総和は state.accepted.length と一致する（= タブと Topbar の件数）。
+ * 件数も一覧カードの 1 行も、帯のバッジも、ヒーローの採用優先もこれ 1 本から作る。件数だけ
+ * 別に数えると、バッジは「2件」なのに内訳が 1 つしか出ない、という食い違いが生まれる余地が
+ * 残るため。ラベル配列の長さの総和は accepted.length と一致する（= タブと Topbar の件数）。
+ *
+ * 合成の枚数は成果物から引く（採用時に控えても、合成し直したら古い枚数が残る）。成果物を引くには
+ * グループが要る（mergedResultFor はグループの現在の合成だけを見る）ので、解析がまだ無い・
+ * グループが消えた場合は枚数を出さず "合成" へ落とす。グループ id が重複したら先頭が勝つ。
+ * accepted（採用順）を順に見るので、ラベルの並びと「最初の採用」は採用順のまま。
  */
-export function acceptedSummaryOf(state: State, groupId: number): string[] {
-  // 成果物を引くにはグループが要る（mergedResultFor はグループの現在の合成だけを見る）。
-  // 解析がまだ無い・グループが消えた場合は枚数を出さず "合成" へ落とす。
-  const group = state.analysis?.groups.find((candidate) => candidate.id === groupId);
-  return state.accepted
-    .filter((item) => item.groupId === groupId)
-    .map((item) => {
-      if (item.kind === "photo") return item.captureId;
-      // 合成の枚数は成果物から引く。採用時に控えても、合成し直したら古い枚数が残る。
-      const merged = group ? mergedResultFor(state.mergeFullResults, group, item.leadCaptureId) : undefined;
-      return merged ? `合成${merged.frames}枚` : "合成";
-    });
+export function acceptedSummaryIndex(
+  analysis: Analysis | null,
+  accepted: readonly AcceptedItem[],
+  mergeFullResults: State["mergeFullResults"],
+): Map<number, AcceptedGroupSummary> {
+  const index = new Map<number, AcceptedGroupSummary>();
+  let groupById: Map<number, GroupInfo> | null = null;
+  for (const item of accepted) {
+    let label: string;
+    let captureId: CaptureId;
+    if (item.kind === "photo") {
+      label = item.captureId;
+      captureId = item.captureId;
+    } else {
+      if (groupById === null) {
+        groupById = new Map();
+        for (const group of analysis?.groups ?? []) {
+          if (!groupById.has(group.id)) groupById.set(group.id, group);
+        }
+      }
+      const group = groupById.get(item.groupId);
+      const merged = group ? mergedResultFor(mergeFullResults, group, item.leadCaptureId) : undefined;
+      label = merged ? `合成${merged.frames}枚` : "合成";
+      captureId = item.leadCaptureId;
+    }
+    const summary = index.get(item.groupId);
+    if (summary) summary.labels.push(label);
+    else index.set(item.groupId, { labels: [label], heroCaptureId: captureId });
+  }
+  return index;
 }
+
+/**
+ * ヒーローの撮影ID（一覧カード・帯のミニカードの代表）を決めるのに読む state の範囲。
+ * 採用が無いグループは viewingCaptureOf（表示カーソル。合成を見ているときは選択・プリセット・調整・
+ * 合成結果）に落ちるので、そこが読むキーを漏れなく並べる。useMemo の依存はこのキーに揃える。
+ */
+export type BrowseHeroSource = Pick<
+  State,
+  | "viewing"
+  | "mergeSelections"
+  | "mergePreviewResults"
+  | "mergeFullResults"
+  | "selectedGroupId"
+  | "presets"
+  | "presetName"
+  | "overrides"
+>;
 
 /**
  * 一覧カードの代表として出す撮影ID。
  *
  * 採用があれば **最初に採用したアイテム**、無ければ表示カーソル。採用したものが
  * 一覧に出ていないと「採用したはずのカットが見当たらない」ように見えるため、
- * 採用は表示カーソルより優先する。
+ * 採用は表示カーソルより優先する。採用の集計は acceptedSummaryIndex の結果を渡す。
  */
-export function heroCaptureOf(state: State, group: GroupInfo): CaptureId {
-  const first = state.accepted.find((item) => item.groupId === group.id);
-  if (first) return first.kind === "photo" ? first.captureId : first.leadCaptureId;
-  return viewingCaptureOf(state, group);
+export function heroCaptureOf(
+  source: BrowseHeroSource,
+  group: GroupInfo,
+  summaries: ReadonlyMap<number, AcceptedGroupSummary>,
+): CaptureId {
+  // viewingCaptureOf は State を取るが、読むのは BrowseHeroSource のキーだけ（テストで固定）。
+  return summaries.get(group.id)?.heroCaptureId ?? viewingCaptureOf(source as State, group);
+}
+
+/** 全グループ分のヒーロー（groupId → 撮影ID）。 */
+export function heroCaptureIdsOf(
+  groups: readonly GroupInfo[],
+  source: BrowseHeroSource,
+  summaries: ReadonlyMap<number, AcceptedGroupSummary>,
+): Map<number, CaptureId> {
+  const heroes = new Map<number, CaptureId>();
+  for (const group of groups) heroes.set(group.id, heroCaptureOf(source, group, summaries));
+  return heroes;
 }
 
 export function isPhotoAccepted(state: State, captureId: CaptureId): boolean {
@@ -1432,7 +1494,7 @@ export function adjustmentsLostOnLeave(state: State, group: GroupInfo): boolean 
  * 使い回されたときに別グループの合成が残っているだけで「現像済み」に数えてしまう
  * （タブの件数と、そのグループを開いたときの表示が食い違う）。
  */
-export function developedGroupIds(state: State): number[] {
+export function developedGroupIds(state: Pick<State, "analysis" | "fullResults" | "mergeFullResults">): number[] {
   const groups = state.analysis?.groups ?? [];
   return groups
     .filter(
@@ -1499,7 +1561,9 @@ export function mergeBlockReason(frames: CaptureId[]): string | null {
   return null;
 }
 
-export function visibleGroups(state: State): GroupInfo[] {
+export function visibleGroups(
+  state: Pick<State, "analysis" | "listView" | "accepted" | "fullResults" | "mergeFullResults">,
+): GroupInfo[] {
   const groups = state.analysis?.groups ?? [];
   if (state.listView === "accepted") {
     const accepted = acceptedGroupIdSet(state);
