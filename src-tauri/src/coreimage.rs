@@ -37,6 +37,10 @@ use crate::adjustments::normalize_adjustments;
 #[cfg(test)]
 mod transport_bench;
 
+// PR-A: opt-in only from Rust tests; PR-B will wire a preview-only feature.
+#[cfg(test)]
+mod resident;
+
 /// externalBin の名前（tauri-build が実行ファイルの隣へ triple 無しの名前でコピーする）。
 const SIDECAR_NAME: &str = "geoframe-ci-develop";
 
@@ -666,6 +670,8 @@ pub(crate) mod batch {
         sent: u64,
         timeout: Duration,
         usable: bool,
+        #[cfg(test)]
+        reply_valid: bool,
     }
 
     impl BatchSession {
@@ -723,6 +729,8 @@ pub(crate) mod batch {
                 sent: 0,
                 timeout,
                 usable: true,
+                #[cfg(test)]
+                reply_valid: false,
             })
         }
 
@@ -730,6 +738,32 @@ pub(crate) mod batch {
         #[cfg(test)]
         pub(crate) fn is_usable(&self) -> bool {
             self.usable
+        }
+
+        #[cfg(test)]
+        pub(super) fn set_timeout(&mut self, timeout: Duration) {
+            self.timeout = timeout;
+        }
+
+        /// Nonblocking idle probe. An inspection error is not evidence that execution never ran.
+        #[cfg(test)]
+        pub(super) fn is_alive(&mut self) -> Result<bool, CoreImageError> {
+            if !self.usable {
+                return Ok(false);
+            }
+            match self.child.as_mut().map(|child| child.try_wait()) {
+                Some(Ok(None)) => Ok(true),
+                Some(Ok(Some(_))) | None => Ok(false),
+                Some(Err(error)) => Err(self.abort(
+                    "SIDECAR_IO_FAILED",
+                    format!("CLI の生存確認に失敗しました: {error}"),
+                )),
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn reply_valid(&self) -> bool {
+            self.reply_valid
         }
 
         /// これまでに送ったリクエストの件数（= 最後に期待した `sequence`）。
@@ -746,6 +780,10 @@ pub(crate) mod batch {
 
         /// 1 件を送り、応答を待つ。成功応答（`ok: true`）は JSON のまま返す。
         pub(crate) fn request(&mut self, request: &Value) -> Result<Value, CoreImageError> {
+            #[cfg(test)]
+            {
+                self.reply_valid = false;
+            }
             if !self.usable {
                 return Err(CoreImageError::new(
                     "SIDECAR_SESSION_CLOSED",
@@ -813,9 +851,17 @@ pub(crate) mod batch {
                 ));
             }
             if response.get("ok") == Some(&Value::Bool(true)) {
+                #[cfg(test)]
+                {
+                    self.reply_valid = true;
+                }
                 return Ok(response);
             }
             if is_cli_error_response(&response) {
+                #[cfg(test)]
+                {
+                    self.reply_valid = true;
+                }
                 let error = &response["error"];
                 return Err(CoreImageError::new(
                     error["code"].as_str().unwrap_or_default(),
@@ -1597,9 +1643,52 @@ fn load_cached(context: &ResultContext<'_>) -> Option<CoreImagePreviewResult> {
     Some(result)
 }
 
-/// Execute the same single-shot request for regular development and native diagnostics.
-/// The caller must already own the CLI slot. This function never acquires a slot or
-/// touches normal output/cache directories; diagnostics can safely target their own scratch.
+/// Rust-only transport seam. Request construction and output/provenance handling stay shared.
+/// Every execution borrows a slot; implementations must never acquire a slot under their lock.
+pub(crate) trait DevelopExecutor {
+    fn execute(
+        &self,
+        sidecar: &Path,
+        request: &Value,
+        timeout: Duration,
+        slot: &SlotGuard<'_>,
+    ) -> Result<Value, CoreImageError>;
+
+    /// A resident identity must be checked before using memoized version/cache data, even on hits.
+    fn needs_identity_guard(&self) -> bool {
+        false
+    }
+    fn validate_identity(
+        &self,
+        _sidecar: &Path,
+        _slot: &SlotGuard<'_>,
+    ) -> Result<(), CoreImageError> {
+        Ok(())
+    }
+    fn invalidate(&self, _slot: &SlotGuard<'_>) {}
+}
+
+pub(crate) struct SingleExecutor;
+
+impl DevelopExecutor for SingleExecutor {
+    fn execute(
+        &self,
+        sidecar: &Path,
+        request: &Value,
+        timeout: Duration,
+        _slot: &SlotGuard<'_>,
+    ) -> Result<Value, CoreImageError> {
+        let body = request.to_string();
+        let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
+        let response = parse_response(&result)?;
+        if response.get("ok") != Some(&Value::Bool(true)) || !result.status.success() {
+            return Err(cli_error(&response, result.status));
+        }
+        Ok(response)
+    }
+}
+
+/// Existing callers explicitly retain the single-shot transport and their original timeout.
 pub(crate) fn develop_to_output_in_slot(
     sidecar: &Path,
     input: &Path,
@@ -1607,7 +1696,29 @@ pub(crate) fn develop_to_output_in_slot(
     mode: DevelopMode,
     adjustments: Option<&Value>,
     timeout: Duration,
-    _slot: &SlotGuard<'_>,
+    slot: &SlotGuard<'_>,
+) -> Result<Value, CoreImageError> {
+    develop_to_output_with_executor(
+        sidecar,
+        input,
+        output,
+        mode,
+        adjustments,
+        timeout,
+        slot,
+        &SingleExecutor,
+    )
+}
+
+pub(crate) fn develop_to_output_with_executor(
+    sidecar: &Path,
+    input: &Path,
+    output: &Path,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+    timeout: Duration,
+    slot: &SlotGuard<'_>,
+    executor: &impl DevelopExecutor,
 ) -> Result<Value, CoreImageError> {
     let mut request = base_request(input, mode, adjustments);
     request.insert(
@@ -1615,21 +1726,18 @@ pub(crate) fn develop_to_output_in_slot(
         Value::String(output.to_string_lossy().into_owned()),
     );
     let request = Value::Object(request);
-    let body = request.to_string();
-    let result = run_sidecar(sidecar, &[], Some(body.as_bytes()), timeout)?;
-    let mut response = parse_response(&result)?;
-    if response.get("ok") != Some(&Value::Bool(true)) || !result.status.success() {
-        return Err(cli_error(&response, result.status));
-    }
-    if response
-        .get("output")
-        .and_then(Value::as_str)
-        .map(Path::new)
-        != Some(output)
+    let mut response = executor.execute(sidecar, &request, timeout, slot)?;
+    if response.get("ok") != Some(&Value::Bool(true))
+        || response
+            .get("output")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            != Some(output)
         || !output.is_file()
         || !response["width"].as_u64().is_some_and(|w| w > 0)
         || !response["height"].as_u64().is_some_and(|h| h > 0)
     {
+        executor.invalidate(slot);
         return Err(CoreImageError::new(
             "SIDECAR_BAD_RESPONSE",
             "Core Image CLI の出力先・ファイル・寸法が不正です",
@@ -1652,6 +1760,38 @@ pub(crate) fn develop(
     slot: &DevelopSlot,
     timeout: Duration,
 ) -> Result<CoreImagePreviewResult, CoreImageError> {
+    develop_with_executor(
+        app_data_dir,
+        sidecar,
+        capture_id,
+        mode,
+        adjustments,
+        slot,
+        timeout,
+        &SingleExecutor,
+    )
+}
+
+/// Shared result/cache/EXIF/prune path; resident is only available in cfg(test) in PR-A.
+pub(crate) fn develop_with_executor(
+    app_data_dir: &Path,
+    sidecar: &Path,
+    capture_id: &str,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+    slot: &DevelopSlot,
+    timeout: Duration,
+    executor: &impl DevelopExecutor,
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    // The resident owner pins the binary before memoized version/cache lookup. Single keeps
+    // its existing cache-hit fast path. Lock order is slot -> owner for every owner operation.
+    let identity_guard = if executor.needs_identity_guard() {
+        let guard = slot.acquire()?;
+        executor.validate_identity(sidecar, &guard)?;
+        Some(guard)
+    } else {
+        None
+    };
     // 1. 入力の解決（設定 → ARW）。capture_id の形式検査も resolve_arw が FS より先に行う。
     //    どちらも 2 回目以降はメモを使い、config.json の読み直しとフォルダの列挙をしない（#94）。
     let source_root = read_source_root_cached(app_data_dir)?;
@@ -1726,18 +1866,25 @@ pub(crate) fn develop(
 
     // 3. キャッシュヒットは枠を取らずに返す。
     if let Some(cached) = load_cached(&context) {
+        if let Some(guard) = identity_guard.as_ref() {
+            executor.validate_identity(sidecar, guard)?;
+        }
         return Ok(cached);
     }
 
     // 4. CLI は同時 1 本。空くまで待つ（待ちが上限を超えたら BUSY）。枠はガードの drop で返る。
-    let slot_guard = slot.acquire()?;
+    let slot_guard = match identity_guard {
+        Some(guard) => guard,
+        None => slot.acquire()?,
+    };
     // 待っている間に同じ現像（連打など）が終わっていればそれを返す。
     if let Some(cached) = load_cached(&context) {
+        executor.validate_identity(sidecar, &slot_guard)?;
         return Ok(cached);
     }
 
     // 5. CLI 呼び出し（ウォッチドッグは子プロセスの起動から数える）。
-    let mut response = develop_to_output_in_slot(
+    let mut response = develop_to_output_with_executor(
         sidecar,
         &input,
         &output,
@@ -1745,6 +1892,7 @@ pub(crate) fn develop(
         adjustments,
         timeout,
         &slot_guard,
+        executor,
     )?;
     let mut developed = result_from_response(&response, &context, false).ok_or_else(|| {
         CoreImageError::new(
