@@ -131,3 +131,12 @@ T3内ブラウザはAX snapshotが2回15秒timeoutとなり、途中からrAFが
 - 同一ハッシュの4 manifest/40操作を専用Chromeで前後比較し、全8走行・56シナリオ完了、画像error/commit欠測0。合成5000枚の採用トグルcommit p95は19.3→1.5ms、帯選択13.9→3.1ms。一覧へ戻る2rAFは659.7→676.5ms、DOM数は同じであり、DOM生成の改善とは扱わない。各条件1走行の限定値。
 - 候補のrelease QA bundleをビルド・adhoc strict検証し、写真と合成の混在採用・取消・採用順hero・件数/内訳/帯/書き出しの一致を実画面で確認。[検収報告](../reports/browse-adoption-optimization-2026-10-25.md)。
 - #28には実アプリのtick中の詳細プロファイル、DOM/layoutの切り分けを残す。#141 B1はFableの読み取り助言を受領し、既定を変えないRust検証基盤→専用feature QAの2段へ分ける。FFI/B2/既定方式切替は保留。
+
+## 2026-10-25 #141 B1 PR-Aの検収
+
+- 製品はSingle固定のまま、共通実行器seamとcfg(test)resident ownerをPR152へ実装。slot originをlifetime/ptr検査で結び、送信失敗・timeoutを再試行しない。
+- 親の初回Rust全体200 passed/0 failed/14 ignored、修正後対象20 passed/0 failed/2 ignored、保存済み192組の新gate再判定が成功。
+- 実CLIの初回192組で要求・鍵・来歴・JPEG/RGBが一致。修正後の追加192組はparity/入力解決/PID観測が全成功し、同じresident PIDを維持、EOF回収成功。追加走行は短いスタック採取を含むため速度比較へ混ぜない。
+- 別CLI資源probe80要求と親通常終了/SIGKILLで回収を確認。アプリE2Eの証拠とはしない。[報告・数値](../reports/coreimage-resident-validation-2026-10-25.md)。
+- security-reviewとcode-review2回を実施、merge blockerなし。親は最新HEAD/ツリーを確認してPR152を逐次マージ・同期・保全掃除し、その後の新しいWTでQA専用featureのPR-Bを始める。
+- PR-B未了: preview限定・専用QA IDのfeature、アプリ寿命/reaper/来歴executor、local/SMBのE2E、cache-hit枠待ちと他処理競合、終了/署名。製品既定切替・B2・FFIは引き続き保留。
