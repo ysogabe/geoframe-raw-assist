@@ -198,7 +198,19 @@ export type Analysis = {
    * v2（Python）には無いフィールドで、undefined は採点済みとして扱う。
    */
   scored?: boolean;
+  /** 表示用の作成時刻（秒精度）。世代の判定には使わない（`analysis_revision` を使う）。 */
   generated_at: string;
+  /**
+   * 完了した解析ごとに一意な世代（不透明な文字列。Rust は 32 桁の hex）。同じ解析を何度
+   * 読んでも同じ値で、強制再解析なら入力が同じ・同じ秒でも新しい値になる（#3 B1・#32）。
+   * v2（Python）には無い。
+   */
+  analysis_revision?: string;
+  /**
+   * 解析した入力の識別子（不透明な文字列）。現像元フォルダの解決済みパスと、対象ファイルの
+   * 実名・サイズ・mtime から決まり、入力が変わらなければ再解析しても同じ値になる。v2 には無い。
+   */
+  source_id?: string;
   source: AnalysisSource;
   summary: AnalysisSummary;
   photos: Record<CaptureId, PhotoInfo>;

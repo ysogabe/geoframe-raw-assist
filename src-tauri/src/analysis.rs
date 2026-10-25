@@ -1,6 +1,7 @@
 //! JPEG の採点・グループ化・推薦（Python `local_raw/analysis.py` の Rust 移植）。
 //! 採点は未回転の 1/8 DCT デコード RGB、サムネイルだけ EXIF の向きを適用する。
 //! analysis_version は 3、scored は true。未採点キャッシュは再利用しない。
+//! 入力の識別子 `source_id`（名前・サイズ・mtime の指紋）と解析の世代 `analysis_revision`（解析ごとに一意）は別物。
 //! EXIF は必要なタグだけを読み、位置情報は扱わない。
 
 use std::collections::BTreeMap;
@@ -60,16 +61,17 @@ fn entry_pattern() -> &'static Regex {
 }
 
 /// `(実エントリ名, capture_id, 種別 "ARW"|"JPG")` を実名の辞書順で返す。
-fn entries(root: &Path) -> Vec<(String, String, &'static str)> {
-    let Ok(read) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = read
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
+/// フォルダを読めない・エントリの列挙が途中で失敗したときは `Err`（一部だけの一覧を返さない）。
+/// UTF-8 でない名前は対象の命名規則に合わないので、失敗ではなく対象外として飛ばす。
+fn try_entries(root: &Path) -> std::io::Result<Vec<(String, String, &'static str)>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root)? {
+        if let Ok(name) = entry?.file_name().into_string() {
+            names.push(name);
+        }
+    }
     names.sort();
-    names
+    Ok(names
         .into_iter()
         .filter_map(|name| {
             let caps = entry_pattern().captures(&name)?;
@@ -81,7 +83,12 @@ fn entries(root: &Path) -> Vec<(String, String, &'static str)> {
             };
             Some((name, id, kind))
         })
-        .collect()
+        .collect())
+}
+
+/// 失敗を空一覧として扱う版（元 JPG の配信用。見つからなければ 404 になるだけ）。
+fn entries(root: &Path) -> Vec<(String, String, &'static str)> {
+    try_entries(root).unwrap_or_default()
 }
 
 /// 同じ ID・種別の候補から 1 つを決定的に選ぶ（正規表記を最優先、なければ実名の辞書順で最初）。
@@ -119,12 +126,12 @@ struct Scan {
     jpg_only: usize,
     arw_only: usize,
     total_bytes: u64,
-    /// キャッシュ署名用の実エントリ名一覧（辞書順）。
+    /// 入力指紋用の実エントリ名一覧（辞書順）。
     names: Vec<String>,
 }
 
-fn scan_pairs(root: &Path) -> Scan {
-    let all = entries(root);
+fn scan_pairs(root: &Path) -> std::io::Result<Scan> {
+    let all = try_entries(root)?;
     let jpg_names = list_capture_files(&all, "JPG");
     let arw_names = list_capture_files(&all, "ARW");
 
@@ -135,29 +142,69 @@ fn scan_pairs(root: &Path) -> Scan {
         }
     }
     let pairs = jpg_names.keys().filter(|id| arw_names.contains_key(*id)).count();
-    Scan {
+    Ok(Scan {
         pairs,
         jpg_only: jpg_names.len() - pairs,
         arw_only: arw_names.len() - pairs,
         total_bytes,
         names: all.iter().map(|(name, _, _)| name.clone()).collect(),
         jpgs: jpg_names.into_iter().map(|(id, name)| (id, root.join(name))).collect(),
-    }
+    })
 }
 
 fn resolve_dir(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// 解析キャッシュの署名: 解決済みルートパス + 並べたファイル名一覧の sha1（`_source_signature`）。
-fn source_signature(root: &Path, names: &[String]) -> String {
+/// 入力指紋の形式。中身を変えたら上げる（古い形式のキャッシュは自動的に無効になる）。
+const SOURCE_FINGERPRINT_VERSION: u64 = 2;
+
+/// 解析入力の指紋（`source_id`）: 解決済みルートパス + 実エントリ名ごとの
+/// サイズと mtime（ナノ秒）の sha1。名前は `entries()` の辞書順（大文字小文字の表記違いも別エントリ）。
+///
+/// 中身はハッシュしない（24MP の JPG/ARW を毎回読むのは重い）。stat 方式なので、
+/// サイズと mtime を保ったままの差し替え（`cp -p`、`rsync -t` 等）は検出できない。
+/// stat・mtime の取得に 1 つでも失敗したら `Err`（キャッシュは使わない側に倒す）。
+fn source_fingerprint(root: &Path, names: &[String]) -> std::io::Result<String> {
     let resolved = resolve_dir(root);
-    let mut payload = resolved.to_string_lossy().into_owned();
+    let mut payload = format!("geoframe-analysis-source/{SOURCE_FINGERPRINT_VERSION}\n");
+    payload.push_str(&resolved.to_string_lossy());
     for name in names {
-        payload.push('\n');
-        payload.push_str(name);
+        let meta = fs::metadata(resolved.join(name))?;
+        let modified = meta.modified()?;
+        let mtime = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => format!("{}.{:09}", after.as_secs(), after.subsec_nanos()),
+            Err(before) => {
+                let before = before.duration();
+                format!("-{}.{:09}", before.as_secs(), before.subsec_nanos())
+            }
+        };
+        payload.push_str(&format!("\n{name}\t{}\t{mtime}", meta.len()));
     }
-    Sha1::digest(payload.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    Ok(hex(&Sha1::digest(payload.as_bytes())))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 解析結果の世代（`analysis_revision`）。入力から導かない一意値で、同じ入力・同じ秒の
+/// 再解析でも必ず変わる。キャッシュに保存されるので、同じ結果を何度読んでも変わらない。
+///
+/// 一意性を担うのは「ナノ秒の現在時刻 + プロセス ID + プロセス内の連番」の組。同じプロセス内では
+/// 連番が必ず違い、別プロセス（再起動）とは時刻か PID が違う。`RandomState` の値は推測しにくくする
+/// ための補助で、一意性の根拠にはしない（std の鍵はスレッドごとに 1 度だけ乱数で初期化され、
+/// 以後は増分されるだけなので、呼び出しごとに新しい乱数になるわけではない）。
+fn new_analysis_revision() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut random = std::collections::hash_map::RandomState::new().build_hasher();
+    random.write_u64(count);
+    let payload =
+        format!("{}.{:09}/{}/{count}/{}", now.as_secs(), now.subsec_nanos(), std::process::id(), random.finish());
+    hex(&Sha1::digest(payload.as_bytes()))[..32].to_string()
 }
 
 /// 表示用のパス（ホーム配下なら `~/...`、それ以外は絶対パス）。Python の `display_path` から
@@ -775,6 +822,14 @@ fn photo_json(record: &PhotoRecord, thumb: &Path, overall: f64, sharpness: f64) 
     })
 }
 
+/// 走査・stat の失敗。開始時は「読めない」、終了時は「解析中に消えた・読めなくなった」の両方がありうる。
+fn scan_failed(error: std::io::Error) -> CoreImageError {
+    CoreImageError::new(
+        "SOURCE_SCAN_FAILED",
+        format!("現像元フォルダのファイルを読めません（削除・移動・権限の変更などを確認してください）: {error}"),
+    )
+}
+
 /// 解析を最後まで走らせ、`Analysis` JSON（`analysis_version` 3）を返す。
 pub fn build_analysis(
     root: &Path,
@@ -782,8 +837,21 @@ pub fn build_analysis(
     root_key: &str,
     progress: &Progress,
 ) -> Result<Value, CoreImageError> {
+    build_analysis_checked(root, thumbs_dir, root_key, progress, &|| {})
+}
+
+/// `before_verify` は終了時の入力照合の直前に呼ぶ（テストで解析中の入力変更を再現する）。
+fn build_analysis_checked(
+    root: &Path,
+    thumbs_dir: &Path,
+    root_key: &str,
+    progress: &Progress,
+    before_verify: &dyn Fn(),
+) -> Result<Value, CoreImageError> {
     progress.set_stage("scanning");
-    let scan = scan_pairs(root);
+    let scan = scan_pairs(root).map_err(scan_failed)?;
+    // 読み込みより前に取り、終了時に取り直して比べる（解析中の入力変更を結果に混ぜない）。
+    let source_id = source_fingerprint(root, &scan.names).map_err(scan_failed)?;
     progress.total.store(scan.jpgs.len(), Ordering::Relaxed);
     fs::create_dir_all(thumbs_dir).map_err(|e| {
         CoreImageError::new(
@@ -853,10 +921,23 @@ pub fn build_analysis(
         }));
     }
 
+    // 解析中に入力が変わった（追加・削除・差し替え）なら、この結果は公開しない。
+    // 保存してもすぐ照合で外れて理由なく absent に戻るだけなので、理由つきで失敗させる。
+    before_verify();
+    let after = source_fingerprint(root, &scan_names(root).map_err(scan_failed)?).map_err(scan_failed)?;
+    if after != source_id {
+        return Err(CoreImageError::new(
+            "SOURCE_CHANGED",
+            "解析中に現像元フォルダの写真が追加・削除・変更されました。コピーや書き込みが終わってから解析し直してください。",
+        ));
+    }
+
     Ok(json!({
         "analysis_version": ANALYSIS_VERSION,
         "scored": true,
         "generated_at": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        "analysis_revision": new_analysis_revision(),
+        "source_id": source_id,
         "source": {
             "root": display_path(root),
             "pairs": scan.pairs,
@@ -867,7 +948,7 @@ pub fn build_analysis(
         "summary": { "groups": group_infos.len(), "raw_candidates": raw_candidates, "needs_review": needs_review },
         "photos": photos,
         "groups": group_infos,
-        "_source_signature": source_signature(root, &scan.names),
+        FINGERPRINT_KEY: { "version": SOURCE_FINGERPRINT_VERSION, "digest": source_id },
     }))
 }
 
@@ -875,7 +956,9 @@ pub fn build_analysis(
 // キャッシュ
 // ---------------------------------------------------------------------------
 
-const SIGNATURE_KEY: &str = "_source_signature";
+/// 内部キー（返却時には除く）。旧形式 `_source_signature`（ルート + 名前のみ）のキャッシュは
+/// このキーを持たないので、`ANALYSIS_VERSION` を変えずに一度だけ無効になる。
+const FINGERPRINT_KEY: &str = "_source_fingerprint";
 
 fn analysis_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("analysis")
@@ -901,11 +984,37 @@ fn write_cache(path: &Path, payload: &Value) -> Result<(), CoreImageError> {
     fs::write(&temporary, text + "\n").and_then(|()| fs::rename(&temporary, path)).map_err(fail)
 }
 
-/// キャッシュが有効（版・署名が一致し、サムネイルが揃っている）なら署名を除いて返す。
-pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
+/// 解析キャッシュの読み出し結果。
+pub(crate) enum CachedAnalysis {
+    /// 有効（版・入力指紋が一致し、世代があり、サムネイルが揃っている）。内部キーは除いてある。
+    Ready(Value),
+    /// キャッシュファイルが無い（未解析・フォルダ変更直後）。
+    Missing,
+    /// キャッシュはあるが今の入力に使えない（入力の変更・旧形式・壊れている・サムネイル欠け・
+    /// 走査や stat の失敗）。中身を当てにせず、再解析が必要。
+    Stale,
+}
+
+pub(crate) fn load_cached_analysis(app_data_dir: &Path, root: &Path) -> CachedAnalysis {
     let root_key = root_key_for(root);
-    let text = fs::read_to_string(cache_path(app_data_dir, &root_key)).ok()?;
-    let mut payload: Value = serde_json::from_str(&text).ok()?;
+    match fs::read_to_string(cache_path(app_data_dir, &root_key)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CachedAnalysis::Missing,
+        Err(_) => CachedAnalysis::Stale,
+        Ok(text) => validate_cached(&text, root).map_or(CachedAnalysis::Stale, CachedAnalysis::Ready),
+    }
+}
+
+/// キャッシュが有効なら内部キーを除いて返す（無い・使えないの区別が要らない呼び出し側用）。
+pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<Value> {
+    match load_cached_analysis(app_data_dir, root) {
+        CachedAnalysis::Ready(payload) => Some(payload),
+        CachedAnalysis::Missing | CachedAnalysis::Stale => None,
+    }
+}
+
+/// 指紋を取れない（走査・stat の失敗）ときも無効扱い。
+fn validate_cached(text: &str, root: &Path) -> Option<Value> {
+    let mut payload: Value = serde_json::from_str(text).ok()?;
     let object = payload.as_object_mut()?;
     if object.get("analysis_version").and_then(Value::as_u64) != Some(u64::from(ANALYSIS_VERSION)) {
         return None;
@@ -913,8 +1022,19 @@ pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<V
     if object.get("scored").and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    let signature = object.remove(SIGNATURE_KEY)?;
-    if signature.as_str() != Some(source_signature(root, &scan_names(root)).as_str()) {
+    let fingerprint = object.remove(FINGERPRINT_KEY)?;
+    if fingerprint.get("version").and_then(Value::as_u64) != Some(SOURCE_FINGERPRINT_VERSION) {
+        return None;
+    }
+    let digest = fingerprint.get("digest").and_then(Value::as_str)?;
+    if object.get("source_id").and_then(Value::as_str) != Some(digest) {
+        return None;
+    }
+    if !object.get("analysis_revision").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
+        return None;
+    }
+    // 走査・stat のどちらかに失敗したら使わない（一部だけの一覧で一致させない）。
+    if source_fingerprint(root, &scan_names(root).ok()?).ok()?.as_str() != digest {
         return None;
     }
     // サムネイルが消えている（掃除された・APPDATA が移った）ときは作り直す。
@@ -925,8 +1045,8 @@ pub(crate) fn read_cached_analysis(app_data_dir: &Path, root: &Path) -> Option<V
     intact.then_some(payload)
 }
 
-fn scan_names(root: &Path) -> Vec<String> {
-    entries(root).into_iter().map(|(name, _, _)| name).collect()
+fn scan_names(root: &Path) -> std::io::Result<Vec<String>> {
+    Ok(try_entries(root)?.into_iter().map(|(name, _, _)| name).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,13 +1131,19 @@ pub async fn start_analysis(
     let data_dir = app_data_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let root = resolve_dir(&read_source_root(&data_dir)?);
+        if state.is_running() {
+            return Ok("already_running");
+        }
+        // キャッシュの照合は全対象ファイルを stat するので、ロックの外で行う（get_analysis の
+        // ポーリングを待たせない）。二重開始は下でロックを取り直して防ぐ。照合とロックの間に
+        // 別の解析が終わっても、ここでは再解析が 1 回余分に走るだけで結果は壊れない。
+        if !force && read_cached_analysis(&data_dir, &root).is_some() {
+            return Ok("ready");
+        }
         let progress = {
             let mut inner = state.lock();
             if inner.running.is_some() {
                 return Ok("already_running");
-            }
-            if !force && read_cached_analysis(&data_dir, &root).is_some() {
-                return Ok("ready");
             }
             let progress = Arc::new(Progress::default());
             progress.set_stage("scanning");
@@ -1037,7 +1163,8 @@ pub async fn start_analysis(
     .map_err(blocking_failed)?
 }
 
-fn run_analysis(data_dir: &Path, root: &Path, progress: &Progress) -> Result<(), CoreImageError> {
+/// 解析してキャッシュへ保存する（解析ジョブ本体。書き出しのテストからも使う）。
+pub(crate) fn run_analysis(data_dir: &Path, root: &Path, progress: &Progress) -> Result<(), CoreImageError> {
     let root_key = root_key_for(root);
     let payload = build_analysis(root, &thumbnails_dir(data_dir), &root_key, progress)?;
     write_cache(&cache_path(data_dir, &root_key), &payload)
@@ -1302,7 +1429,7 @@ mod tests {
         ] {
             fs::write(dir.join(name), b"x").unwrap();
         }
-        let scan = scan_pairs(&dir);
+        let scan = scan_pairs(&dir).unwrap();
         assert_eq!(scan.jpgs.keys().collect::<Vec<_>>(), ["DSC00001", "DSC00002"]);
         assert_eq!((scan.pairs, scan.jpg_only, scan.arw_only), (1, 1, 1));
         assert_eq!(scan.total_bytes, 4);
@@ -1310,12 +1437,152 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn set_mtime(path: &Path, seconds: u64, nanos: u32) {
+        let time = std::time::UNIX_EPOCH + std::time::Duration::new(seconds, nanos);
+        fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(time).unwrap();
+    }
+
     #[test]
-    fn signature_changes_with_names() {
-        let dir = temp_dir("sig");
-        let a = source_signature(&dir, &["DSC00001.JPG".to_string()]);
-        let b = source_signature(&dir, &["DSC00001.JPG".to_string(), "DSC00002.JPG".to_string()]);
-        assert_ne!(a, b);
+    fn fingerprint_tracks_names_sizes_and_mtime() {
+        let dir = temp_dir("fingerprint");
+        let jpg = dir.join("DSC00001.JPG");
+        let arw = dir.join("DSC00001.ARW");
+        fs::write(&jpg, b"jpeg").unwrap();
+        fs::write(&arw, b"raw!").unwrap();
+        set_mtime(&jpg, 1_700_000_000, 0);
+        set_mtime(&arw, 1_700_000_000, 0);
+        let names = scan_names(&dir).unwrap();
+        let base = source_fingerprint(&dir, &names).unwrap();
+        // 変化なしなら同じ。
+        assert_eq!(source_fingerprint(&dir, &scan_names(&dir).unwrap()).unwrap(), base);
+        // 名前の追加。
+        fs::write(dir.join("DSC00002.JPG"), b"x").unwrap();
+        assert_ne!(source_fingerprint(&dir, &scan_names(&dir).unwrap()).unwrap(), base);
+        fs::remove_file(dir.join("DSC00002.JPG")).unwrap();
+        assert_eq!(source_fingerprint(&dir, &scan_names(&dir).unwrap()).unwrap(), base);
+        // 同名でサイズ違い（修復・差し替え）。mtime は戻しておく。
+        fs::write(&jpg, b"jpeg-repaired").unwrap();
+        set_mtime(&jpg, 1_700_000_000, 0);
+        assert_ne!(source_fingerprint(&dir, &names).unwrap(), base);
+        fs::write(&jpg, b"jpeg").unwrap();
+        set_mtime(&jpg, 1_700_000_000, 0);
+        assert_eq!(source_fingerprint(&dir, &names).unwrap(), base);
+        // 同サイズで mtime だけ違う（ナノ秒の差も拾う）。ARW 側でも同じ。
+        set_mtime(&jpg, 1_700_000_000, 1_000);
+        assert_ne!(source_fingerprint(&dir, &names).unwrap(), base);
+        set_mtime(&jpg, 1_700_000_000, 0);
+        set_mtime(&arw, 1_700_000_001, 0);
+        assert_ne!(source_fingerprint(&dir, &names).unwrap(), base);
+        set_mtime(&arw, 1_700_000_000, 0);
+        // 既知の限界: サイズと mtime を保った中身の差し替えは検出しない。
+        fs::write(&jpg, b"JPEG").unwrap();
+        set_mtime(&jpg, 1_700_000_000, 0);
+        assert_eq!(source_fingerprint(&dir, &names).unwrap(), base);
+        // stat できない名前（壊れたシンボリックリンク）は Err。
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join("DSC00003.JPG")).unwrap();
+        assert!(source_fingerprint(&dir, &scan_names(&dir).unwrap()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_failures_are_errors_not_empty_folders() {
+        // 消えたルートでも root_key が変わらないよう、解決済みのパスで組む（キー違いで偶然
+        // キャッシュが見つからないのではなく、走査の失敗で外れることを確かめる）。
+        let dir = fs::canonicalize(temp_dir("scan-fail")).unwrap();
+        let root = dir.join("src");
+        fs::create_dir_all(&root).unwrap();
+        // 走査失敗の検証用ペア。大文字小文字を区別しないFSでもJPEGを上書きしない。
+        synthetic_jpeg(&root.join("DSC00001.JPG"), 64, 48);
+        fs::write(root.join("DSC00001.ARW"), b"raw").unwrap();
+        assert_eq!(scan_names(&root).unwrap(), ["DSC00001.ARW", "DSC00001.JPG"]);
+        assert_eq!(scan_pairs(&root).unwrap().jpgs["DSC00001"], root.join("DSC00001.JPG"));
+        // 空フォルダは成功（0 件）で、走査の失敗とは区別する。
+        let empty = dir.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(scan_names(&empty).unwrap(), Vec::<String>::new());
+
+        let data = dir.join("data");
+        let key = root_key_for(&root);
+        let payload = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap();
+        write_cache(&cache_path(&data, &key), &payload).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
+
+        // 現像元が消えた: 走査できないのでキャッシュは使わず、解析は SOURCE_SCAN_FAILED。
+        let moved = dir.join("moved");
+        fs::rename(&root, &moved).unwrap();
+        assert_eq!(root_key_for(&root), key);
+        assert!(scan_names(&root).is_err());
+        assert!(read_cached_analysis(&data, &root).is_none());
+        let error = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap_err();
+        assert_eq!(error.code, "SOURCE_SCAN_FAILED");
+
+        // 同じパスがディレクトリでなくファイルになった: 同じく失敗扱い。
+        fs::write(&root, b"not a directory").unwrap();
+        assert!(scan_names(&root).is_err());
+        assert!(read_cached_analysis(&data, &root).is_none());
+        let error = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap_err();
+        assert_eq!(error.code, "SOURCE_SCAN_FAILED");
+
+        // 元に戻せば同じ入力なので有効に戻る。
+        fs::remove_file(&root).unwrap();
+        fs::rename(&moved, &root).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn analysis_revision_is_unique() {
+        // 一意性は時刻 + PID + 連番で担う。同じナノ秒に並行して作っても連番で分かれる。
+        let revisions: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> =
+                (0..8).map(|_| scope.spawn(|| (0..256).map(|_| new_analysis_revision()).collect::<Vec<_>>())).collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        let unique: std::collections::BTreeSet<&String> = revisions.iter().collect();
+        assert_eq!(unique.len(), 8 * 256);
+        assert!(revisions.iter().all(|r| r.len() == 32 && r.bytes().all(|b| b.is_ascii_hexdigit())));
+    }
+
+    #[test]
+    fn input_change_during_analysis_is_not_published() {
+        let dir = fs::canonicalize(temp_dir("during")).unwrap();
+        let root = dir.join("src");
+        fs::create_dir_all(&root).unwrap();
+        let thumbs = dir.join("thumbs");
+        let key = root_key_for(&root);
+        let reset = || {
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            for id in ["DSC00001", "DSC00002"] {
+                synthetic_jpeg(&root.join(format!("{id}.JPG")), 64, 48);
+                fs::write(root.join(format!("{id}.ARW")), b"raw").unwrap();
+            }
+        };
+        let run = |change: &dyn Fn()| {
+            reset();
+            build_analysis_checked(&root, &thumbs, &key, &Progress::default(), change)
+        };
+        assert!(run(&|| {}).is_ok());
+        // 追加・同名の差し替え・削除は入力変更（SOURCE_CHANGED）。
+        let changes: [&dyn Fn(); 3] = [
+            &|| fs::write(root.join("DSC00003.JPG"), b"x").unwrap(),
+            &|| synthetic_jpeg(&root.join("DSC00001.JPG"), 80, 48),
+            &|| fs::remove_file(root.join("DSC00002.ARW")).unwrap(),
+        ];
+        for change in changes {
+            assert_eq!(run(change).unwrap_err().code, "SOURCE_CHANGED");
+        }
+        // 読めなくなった（壊れたリンクへの置き換え・フォルダごと消えた）は SOURCE_SCAN_FAILED。
+        let unreadable: [&dyn Fn(); 2] = [
+            &|| {
+                fs::remove_file(root.join("DSC00001.JPG")).unwrap();
+                std::os::unix::fs::symlink(dir.join("missing"), root.join("DSC00001.JPG")).unwrap();
+            },
+            &|| fs::remove_dir_all(&root).unwrap(),
+        ];
+        for change in unreadable {
+            assert_eq!(run(change).unwrap_err().code, "SOURCE_SCAN_FAILED");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1380,9 +1647,18 @@ mod tests {
         // 時刻なしなので 2 枚は別グループ。
         assert_eq!(payload["summary"]["groups"], 2);
         assert_eq!(payload["groups"][0]["confidence"], 1.0);
+        let revision = payload["analysis_revision"].as_str().unwrap().to_string();
+        let source_id = payload["source_id"].as_str().unwrap().to_string();
+        assert_eq!(payload[FINGERPRINT_KEY]["digest"], json!(source_id));
         write_cache(&cache_path(&data, &key), &payload).unwrap();
         let cached = read_cached_analysis(&data, &root).expect("cache valid");
-        assert!(cached.get(SIGNATURE_KEY).is_none());
+        assert!(cached.get(FINGERPRINT_KEY).is_none());
+        // 同じ完了済み解析は何度読んでも同じ世代・同じ入力 ID。
+        for _ in 0..2 {
+            let again = read_cached_analysis(&data, &root).expect("cache valid");
+            assert_eq!(again["analysis_revision"], json!(revision));
+            assert_eq!(again["source_id"], json!(source_id));
+        }
         for flag in [Some(json!(false)), None] {
             let mut stale = payload.clone();
             if let Some(flag) = flag {
@@ -1393,9 +1669,61 @@ mod tests {
             write_cache(&cache_path(&data, &key), &stale).unwrap();
             assert!(read_cached_analysis(&data, &root).is_none());
         }
+        // 旧形式（ルート + 名前だけの `_source_signature`）や指紋の版・世代の欠けは無効。
+        let mut legacy = payload.clone();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove(FINGERPRINT_KEY);
+        object.remove("analysis_revision");
+        object.remove("source_id");
+        object.insert("_source_signature".into(), json!("ff4911aae764f9f319a90ae95b71ad9db23f410b"));
+        let mut old_version = payload.clone();
+        old_version[FINGERPRINT_KEY]["version"] = json!(1);
+        let mut no_revision = payload.clone();
+        no_revision.as_object_mut().unwrap().remove("analysis_revision");
+        let mut wrong_id = payload.clone();
+        wrong_id["source_id"] = json!("0");
+        for invalid in [legacy, old_version, no_revision, wrong_id] {
+            write_cache(&cache_path(&data, &key), &invalid).unwrap();
+            assert!(read_cached_analysis(&data, &root).is_none());
+        }
+        // 同じ入力の再解析（同じ秒でもよい）: 入力 ID は同じ、世代は新しい。
+        let forced = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap();
+        assert_eq!(forced["source_id"], json!(source_id));
+        assert_ne!(forced["analysis_revision"], json!(revision));
         write_cache(&cache_path(&data, &key), &payload).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
+        // 同名 JPG の修復（サイズが変わる）で無効。
+        synthetic_jpeg(&root.join("DSC00001.JPG"), 640, 480);
+        assert!(read_cached_analysis(&data, &root).is_none());
+        let payload = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap();
+        write_cache(&cache_path(&data, &key), &payload).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
+        // 同サイズの ARW でも mtime が変われば無効。
+        let arw = root.join("DSC00002.ARW");
+        let modified = fs::metadata(&arw).unwrap().modified().unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&arw)
+            .unwrap()
+            .set_modified(modified + std::time::Duration::from_millis(1))
+            .unwrap();
+        assert!(read_cached_analysis(&data, &root).is_none());
+        let payload = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap();
+        write_cache(&cache_path(&data, &key), &payload).unwrap();
+        // stat できないエントリがあれば無効（解析そのものは SOURCE_SCAN_FAILED）。
+        std::os::unix::fs::symlink(dir.join("missing"), root.join("DSC00004.JPG")).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_none());
+        let error = build_analysis(&root, &thumbnails_dir(&data), &key, &Progress::default()).unwrap_err();
+        assert_eq!(error.code, "SOURCE_SCAN_FAILED");
+        fs::remove_file(root.join("DSC00004.JPG")).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
         // ファイル名一覧が変わると無効。
         fs::write(root.join("DSC00003.JPG"), b"x").unwrap();
+        assert!(read_cached_analysis(&data, &root).is_none());
+        // サムネイルが消えたら無効（再解析で作り直す）。
+        fs::remove_file(root.join("DSC00003.JPG")).unwrap();
+        assert!(read_cached_analysis(&data, &root).is_some());
+        fs::remove_file(thumbnail_path(&thumbnails_dir(&data), &key, "DSC00001")).unwrap();
         assert!(read_cached_analysis(&data, &root).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1661,7 +1989,7 @@ mod tests {
         // 1 枚ずつ（並列なし）のデコード + エンコード時間。
         let mut total = std::time::Duration::ZERO;
         let mut count = 0;
-        for (_, path) in scan_pairs(&root).jpgs {
+        for (_, path) in scan_pairs(&root).unwrap().jpgs {
             let t = std::time::Instant::now();
             let (_, _, image) = decode_scaled(&path).unwrap();
             let decode = t.elapsed();
