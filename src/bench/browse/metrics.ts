@@ -135,7 +135,7 @@ export type ImageSummary = {
 
 export function summarizeImages(events: readonly ImageEvent[], resources: readonly ResourceSample[], startedAt: number): ImageSummary {
   const loadTimes = events.filter((event) => event.ok).map((event) => event.at);
-  const last = loadTimes.length ? Math.max(...loadTimes) : null;
+  const last = loadTimes.length ? loadTimes.reduce((max, at) => Math.max(max, at), -Infinity) : null;
   return {
     loaded: loadTimes.length,
     errored: events.filter((event) => !event.ok).length,
