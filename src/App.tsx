@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   acceptedKey,
   acceptedMergeOf,
@@ -418,7 +418,7 @@ export default function Home() {
   const handleOpenGroup = useCallback((groupId: number) => openOperationScreenRef.current(groupId), []);
   const handleSelectGroup = useCallback((groupId: number) => void moveToGroupRef.current(groupId, "top"), []);
   const handleStepGroup = useCallback((groupId: number) => void moveToGroupRef.current(groupId, "media"), []);
-  useEffect(() => {
+  useLayoutEffect(() => {
     groupKeyHandlerRef.current = handleGroupKey;
     openOperationScreenRef.current = openOperationScreen;
     moveToGroupRef.current = moveToGroup;
