@@ -37,9 +37,10 @@ use crate::adjustments::normalize_adjustments;
 #[cfg(test)]
 mod transport_bench;
 
-// PR-A: opt-in only from Rust tests; PR-B will wire a preview-only feature.
-#[cfg(test)]
-mod resident;
+// #141 B1: resident owner. Rust tests (PR-A) and the QA-only `resident-preview-qa` feature (PR-B).
+// The ordinary build never compiles it.
+#[cfg(any(test, feature = "resident-preview-qa"))]
+pub(crate) mod resident;
 
 /// externalBin の名前（tauri-build が実行ファイルの隣へ triple 無しの名前でコピーする）。
 const SIDECAR_NAME: &str = "geoframe-ci-develop";
@@ -670,7 +671,7 @@ pub(crate) mod batch {
         sent: u64,
         timeout: Duration,
         usable: bool,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         reply_valid: bool,
     }
 
@@ -729,24 +730,24 @@ pub(crate) mod batch {
                 sent: 0,
                 timeout,
                 usable: true,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "resident-preview-qa"))]
                 reply_valid: false,
             })
         }
 
         /// まだリクエストを流せるか（タイムアウト・対応の食い違い・子の終了の後は false）。
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         pub(crate) fn is_usable(&self) -> bool {
             self.usable
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         pub(super) fn set_timeout(&mut self, timeout: Duration) {
             self.timeout = timeout;
         }
 
         /// Nonblocking idle probe. An inspection error is not evidence that execution never ran.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         pub(super) fn is_alive(&mut self) -> Result<bool, CoreImageError> {
             if !self.usable {
                 return Ok(false);
@@ -761,7 +762,7 @@ pub(crate) mod batch {
             }
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         pub(super) fn reply_valid(&self) -> bool {
             self.reply_valid
         }
@@ -773,14 +774,14 @@ pub(crate) mod batch {
         }
 
         /// 子プロセスの pid（テストで後片付けを確かめる用）。
-        #[cfg(test)]
+        #[cfg(any(test, feature = "resident-preview-qa"))]
         pub(crate) fn pid(&self) -> Option<u32> {
             self.child.as_ref().map(Child::id)
         }
 
         /// 1 件を送り、応答を待つ。成功応答（`ok: true`）は JSON のまま返す。
         pub(crate) fn request(&mut self, request: &Value) -> Result<Value, CoreImageError> {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "resident-preview-qa"))]
             {
                 self.reply_valid = false;
             }
@@ -851,14 +852,14 @@ pub(crate) mod batch {
                 ));
             }
             if response.get("ok") == Some(&Value::Bool(true)) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "resident-preview-qa"))]
                 {
                     self.reply_valid = true;
                 }
                 return Ok(response);
             }
             if is_cli_error_response(&response) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "resident-preview-qa"))]
                 {
                     self.reply_valid = true;
                 }
@@ -1772,7 +1773,8 @@ pub(crate) fn develop(
     )
 }
 
-/// Shared result/cache/EXIF/prune path; resident is only available in cfg(test) in PR-A.
+/// Shared result/cache/EXIF/prune path. Resident executors exist only in cfg(test) and the QA-only
+/// `resident-preview-qa` feature.
 pub(crate) fn develop_with_executor(
     app_data_dir: &Path,
     sidecar: &Path,
@@ -2180,6 +2182,55 @@ fn full_developed_result(
     value
 }
 
+/// Ordinary build: every mode uses the single-shot CLI on the app-wide slot.
+#[cfg(not(feature = "resident-preview-qa"))]
+fn develop_for_command(
+    _app: &AppHandle,
+    app_data_dir: &Path,
+    sidecar: &Path,
+    capture_id: &str,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    develop(
+        app_data_dir,
+        sidecar,
+        capture_id,
+        mode,
+        adjustments,
+        &DEVELOP_SLOT,
+        DEVELOP_TIMEOUT,
+    )
+}
+
+/// `resident-preview-qa` (dedicated QA ID only; `setup` refuses any other identifier): preview
+/// uses the resident child, everything else stays single-shot. The managed state exists only if
+/// that setup check passed, so a missing state is refused instead of falling into a hidden path.
+#[cfg(feature = "resident-preview-qa")]
+fn develop_for_command(
+    app: &AppHandle,
+    app_data_dir: &Path,
+    sidecar: &Path,
+    capture_id: &str,
+    mode: DevelopMode,
+    adjustments: Option<&Value>,
+) -> Result<CoreImagePreviewResult, CoreImageError> {
+    let state = app.try_state::<resident::qa::QaApp>().ok_or_else(|| {
+        CoreImageError::new(
+            "RESIDENT_QA_NOT_READY",
+            "resident-preview-qa の初期化（QA ID の確認）が済んでいません",
+        )
+    })?;
+    state.preview().develop(
+        app_data_dir,
+        sidecar,
+        capture_id,
+        mode,
+        adjustments,
+        DEVELOP_TIMEOUT,
+    )
+}
+
 async fn develop_command(
     app: AppHandle,
     capture_id: String,
@@ -2202,14 +2253,13 @@ async fn develop_command(
     })?;
     let sidecar = sidecar_path()?;
     tauri::async_runtime::spawn_blocking(move || {
-        develop(
+        develop_for_command(
+            &app,
             &app_data_dir,
             &sidecar,
             &capture_id,
             mode,
             Some(&adjustments),
-            &DEVELOP_SLOT,
-            DEVELOP_TIMEOUT,
         )
     })
     .await

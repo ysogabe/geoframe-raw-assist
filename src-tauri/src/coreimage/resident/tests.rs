@@ -75,7 +75,7 @@ else:
     program
 }
 
-fn request(dir: &Path, action: &str) -> Value {
+pub(super) fn request(dir: &Path, action: &str) -> Value {
     let input = dir.join("DSC00001.ARW");
     fs::write(&input, b"mock raw").unwrap();
     let mut req = Value::Object(base_request(&input, DevelopMode::Preview, None));
@@ -83,14 +83,14 @@ fn request(dir: &Path, action: &str) -> Value {
     req["test_action"] = json!(action);
     req
 }
-fn lines(dir: &Path, file: &str) -> Vec<String> {
+pub(super) fn lines(dir: &Path, file: &str) -> Vec<String> {
     fs::read_to_string(dir.join(file))
         .unwrap_or_default()
         .lines()
         .map(str::to_owned)
         .collect()
 }
-fn alive(pid: u32) -> bool {
+pub(super) fn alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stderr(Stdio::null())
@@ -105,7 +105,7 @@ fn kill(pid: u32) {
         .unwrap()
         .success());
 }
-fn wait_until(mut predicate: impl FnMut() -> bool) {
+pub(super) fn wait_until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !predicate() {
         assert!(Instant::now() < deadline, "condition timed out");

@@ -63,6 +63,21 @@
   `canonicalize` 後の親ディレクトリが現像元フォルダと一致しないもの（シンボリックリンクで外へ出るもの）は拒否する。
 - **Core Image CLI の同時実行**: `DEVELOP_SLOT` は CLI を 1 本ずつ走らせ、待ちは最大 2 件。
   さらに来た呼び出しは即 `BUSY`。プレビュー・原寸現像・合成・候補生成で共有する。キャッシュヒットはスロットを取らない。
+- **QA 専用 feature `resident-preview-qa`（通常ビルドには存在しない。#141 B1 PR-B）**: 専用 QA ID
+  `com.geoframe.rawassist.qaroadmap` でのみ有効で、他の ID で起動すると `main` が `Builder::build` の前に stderr へ
+  `RESIDENT_QA_WRONG_APP_ID: ...` を出して `exit(1)` し、ウィンドウは作られない（`setup` にも防御的な同じ検査がある）。
+  環境変数などの実行時切替はない。IPC の引数・結果の形は通常ビルドと同じ。上の契約との差分は次のとおり。
+  - プレビュー現像だけが常駐 stateless CLI（resident）で実行される。原寸・合成・候補生成・native ROI は従来の単発 CLI /
+    独自セッションのまま。
+  - 例外として「実行中 1 本 + 待機中の常駐 CLI 1 本」が同時に存在しうる。CPU/GPU で同時に現像するのは今までどおり 1 本で、
+    プロセス総数が 1 本という意味ではない。常駐 CLI は idle TTL・要求回数・アプリ終了で閉じる（QA 用の未調整ノブ）。
+  - resident のプレビューはキャッシュヒットでも CLI の同一性検査のために先にスロットを取る。他の現像が走行中なら待ち（上限超過は
+    `BUSY`）になる（通常ビルドのキャッシュヒットは待たない）。
+  - 来歴 JSON に `resident_qa: {schema, executor: "resident_batch", owner_pid}` が付く（resident が実行したときだけ。
+    キャッシュ鍵・request には入らない）。キーが無い来歴は単発製か旧来歴で、キャッシュヒットの応答は生成時の来歴をそのまま返す
+    ので、タグは「過去にその pid が実行した」事実であり現在の生存を意味しない。
+  - 追加 code（§0.5 の表にも載せる）: `SIDECAR_IDENTITY_CHANGED`（CLI が差し替えられた。アプリ再起動が必要で、同一プロセス内では回復しない）、
+    `RESIDENT_CLOSED`（終了処理後の要求）、`RESIDENT_QA_NOT_READY`（QA 初期化前）。
 
 ### 0.5 エラー code 一覧（`CoreImageError`）
 
@@ -96,6 +111,10 @@ Rust が生成する code:
 | `SIDECAR_TIMEOUT` | タイムアウトで kill（§1 各コマンドの値） | 同上 |
 | `SIDECAR_BAD_RESPONSE` | 最終行が JSON でない・構造化エラー無しで失敗・`output` が要求と違う・ファイルが無い・寸法や必須キーが欠落 | 同上 |
 | `SIDECAR_SESSION_CLOSED` | `--batch` セッションがタイムアウト等で閉じた後の要求 | candidates |
+| `SIDECAR_IDENTITY_CHANGED` | **QA feature `resident-preview-qa` のみ**。resident の CLI が固定した sidecar と違う（差し替え・別パス）。sticky でアプリ再起動が必要 | develop_preview_coreimage |
+| `RESIDENT_CLOSED` | **QA feature のみ**。アプリ終了処理の後の resident preview 要求 | develop_preview_coreimage |
+| `RESIDENT_QA_NOT_READY` | **QA feature のみ**。QA 状態の初期化前の preview 要求（通常は起きない） | develop_preview_coreimage |
+| `RESIDENT_QA_WRONG_APP_ID` | **QA feature のみ・起動時のみ**。専用 QA ID 以外で起動した。**IPC 応答ではなく** stderr（`code: message`）と終了コード 1 で、ウィンドウ作成前に拒否する | （起動時） |
 | `INTERNAL_ERROR` | `spawn_blocking` のスレッドが異常終了 | analysis 系、develop 系、merge |
 | `INTERNAL` | 同上（**`engine_info` だけこの code**。§10.3） | engine_info |
 
