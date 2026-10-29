@@ -2,7 +2,7 @@
 
 ## Scope
 
-PR-B adds Swift CLI `mode: "merge"` on top of the PR-A `MergeCore` at base `8c861cd`. CLI version is bumped from 0.7.0 to 0.8.0. The request contract follows `docs/design/bracket-merge-coreimage.md` §§2, 5 and 6.1, with the adopted defaults: Mertens weights (1,1,0), central pivot, common crop, shift-limit fallback, 2400-edge preview when requested, and UInt16 RGB retained frames.
+PR-B adds Swift CLI `mode: "merge"` on top of the PR-A `MergeCore` at base `8c861cd`. CLI version is bumped from 0.7.0 to 0.8.0. The request contract follows [`docs/design/bracket-merge-coreimage.md`](../design/bracket-merge-coreimage.md) §§2, 5 and 7.1, with the adopted defaults: Mertens weights (1,1,0), central pivot, common crop, shift-limit fallback, 2400-edge preview when requested, and UInt16 RGB retained frames.
 
 The CLI emits JPEG only and does not copy EXIF/GPS. `exposure` and `highlight_recovery` are forced to zero in every decoder stage and reported in `adjustments_applied.ignored`. `settings.exposure_ev` must be omitted or null; the existing adjustment contract rejects any non-null explicit setting, including zero, alongside `adjustments`. White balance, NR, and decoder sharpness are applied while decoding all frames. The remaining post adjustments run once on the fused image.
 
