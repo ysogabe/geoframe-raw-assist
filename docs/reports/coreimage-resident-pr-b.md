@@ -128,24 +128,29 @@ Finder や `open` 起動では stderr が失われるので、項目 8・9 の�
 
 PR-A の wrong-slot / 差し替え / 再試行なし / timeout 等は既存テスト（`coreimage::resident::tests`）のまま維持。
 
-## 親 QA チェック表（すべて未実施）
+## 親 QA チェック表（2026-10-25〜29 実施）
+
+head `632556f` の専用 QA bundle（Single: feature なし、resident: `resident-preview-qa`。どちらも ID `com.geoframe.rawassist.qaroadmap`、adhoc strict 署名）で確認した。
+SMB の行と #6〜#9 は macOS 27.2 で取り直した（それ以前の行は 27.0.1。OS 更新で cache key が変わるため、比較は同じ OS 同士で行った）。
 
 | # | 項目 | 結果 |
 |---|---|---|
-| 1 | 通常 ID + feature の誤起動が拒否される | 未 |
-| 2 | QA release が adhoc strict 署名で起動・devtools が開く | 未 |
-| 3 | local / SMB の 2 RAW で Single 版と resident 版の preview（同調整、cache miss）。画素・寸法一致、来歴に `resident_qa` | 未 |
-| 4 | 連続 preview・ソース切替で `owner_pid` が同一 | 未 |
-| 5 | preview-timing（status と origin→2rAF。n が小さいので p95 は主張しない。同一 URL の `image_not_observed` を成功にしない） | 未 |
-| 6 | 候補 / 合成 / 原寸の最中の preview cache hit の枠待ち・`BUSY`、2 プロセス（実行 1 + idle 1）の確認 | 未 |
-| 7 | エラー後の次要求（mock で先に。実アプリは所有 scratch の無効 path 等のみ。元写真は変更しない） | 未 |
-| 8 | idle TTL（90 秒）での reaper 回収 | 未 |
-| 9 | 通常終了で子が不在（EOF）、処理中終了、親の異常終了での子の不在 | 未 |
-| 10 | 通常 ID の feature なしビルドは従来どおり Single（resident コードを含まない） | 未 |
+| 1 | 通常 ID + feature の誤起動が拒否される | 済。`RESIDENT_QA_WRONG_APP_ID` を stderr に出して exit 1（0.51 秒）。ウィンドウは出ず、通常 ID の appdata は変化なし |
+| 2 | QA release が adhoc strict 署名で起動・devtools が開く | 済。両 bundle とも `codesign --verify --deep --strict` が通る。右クリック →「Inspect Element」で devtools が開き、コンソールから操作できた |
+| 3 | local / SMB の 2 RAW で Single 版と resident 版の preview（同調整、cache miss）。画素・寸法一致、来歴に `resident_qa` | 済。local（27.0.1）・SMB（27.2）とも DSC04430 / DSC04880 で request が一致し、JPEG がバイト単位で一致。2400×1600。resident 側の来歴にだけ `resident_qa`（`resident_batch`）が付く |
+| 4 | 連続 preview・ソース切替で `owner_pid` が同一 | 済。local の 2 枚は同じ pid。SMB の 2 枚・エラー後の次要求・原寸を挟んだ後も同じ子 pid のまま |
+| 5 | preview-timing（status と origin→2rAF。n が小さいので p95 は主張しない。同一 URL の `image_not_observed` を成功にしない） | 参考値のみ（n=2）。local の button_handler 計測で Single 1186 / 1153 ms、resident 1072 / 703 ms（status ok、cache miss）。SMB の invoke wall は Single 6286（マウント直後の初回読み込み込み）/ 2017 ms、resident 3886 / 1629 ms。表示が画面外にあった回は rAF 待ちが延びたため比較から除外し、記録だけ残した |
+| 6 | 候補 / 合成 / 原寸の最中の preview cache hit の枠待ち・`BUSY`、2 プロセス（実行 1 + idle 1）の確認 | 済（原寸で確認）。原寸の CLI 実行中に出した preview cache hit は 2337 ms 待って原寸の直後に返った。同時に 3 本出すと 1 本が即 `BUSY`、2 本は 1230 ms 待って hit。その間、原寸用の単発 CLI と idle の resident 子の 2 プロセスを観測。なお原寸は CLI 起動まで約 1 秒の前処理があり、その間の hit は待たない（2 ms） |
+| 7 | エラー後の次要求（mock で先に。実アプリは所有 scratch の無効 path 等のみ。元写真は変更しない） | 済。存在しない capture（DSC99999）で `ARW_NOT_FOUND`（21 ms、子は起動し直さない）、続く cache miss は 1991 ms で成功し同じ子 pid |
+| 8 | idle TTL（90 秒）での reaper 回収 | 済。最後の実要求（出力の書き込み時刻）から 95.3 秒後に子が消え、stderr に `idle resident child closed by reaper`。cache hit は TTL を延ばさない |
+| 9 | 通常終了で子が不在（EOF）、処理中終了、親の異常終了での子の不在 | 済（一部未観測あり、下記）。idle で通常終了 → `exit cleanup: Closed`、0.31 秒で親子とも不在。処理中に終了（2 回）→ どちらも処理は kill されず完走し（終了指示の 0.76 / 2.45 秒後に出力）、その後 `Closed` で子は不在。親を SIGKILL: idle の子は 0.12 秒で不在、処理中の子は現像を完走して JPEG を書いた 0.08 秒後に不在（親が消えているので来歴 JSON は作られず、JPEG だけが cache に残る） |
+| 10 | 通常 ID の feature なしビルドは従来どおり Single（resident コードを含まない） | 済。feature なし bundle のバイナリに resident 関連の文字列は 0 件（resident bundle は 7 件） |
+
+未観測: 終了時に 3 秒以上処理が続く `StillBusy` の経路。実データの preview はすべて 3 秒以内に終わり、再現できなかった。hang した子の回収は保証しない（既存の制約、本書「寿命の保証範囲」）。
 
 機能受入と配布・署名の受入は分けて扱う。未観測の項目を passing と書かない。
 
 ## 親の初回検証
 
 - feature付き全体216 passed / 0 failed / 15 ignored。default並行走行は既存mockハーネス1件が5秒timeout（215/1/15）したが、defaultをtest-threads=1で再走行すると216/0/15で成功した。最初の失敗ログも保存し、全走行成功とは書かない。
-- 署名済みアプリの実動作は以下の検収で追記する。
+- 署名済みアプリの実動作は上の「親 QA チェック表」に記録した。
